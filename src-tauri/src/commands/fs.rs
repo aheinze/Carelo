@@ -1,4 +1,3 @@
-use crate::fs::archive;
 use crate::fs::local::LocalFileProvider;
 use crate::fs::models::{FileEntry, FileMetadata, FsError, FsResult, VolumeEntry};
 use crate::fs::provider::FileProvider;
@@ -8,10 +7,13 @@ use crate::fs::remote::{
     stat_remote_item, RemoteVolumeConfig, RemoteVolumeInfo, RemoteVolumeState,
 };
 use crate::fs::sudo;
+use crate::fs::{archive, operations};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -19,11 +21,14 @@ use tauri::{AppHandle, Emitter};
 pub struct TransferItem {
     pub from: String,
     pub to: String,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Clone, Default)]
 pub struct FileOperationState {
     cancelled_jobs: Arc<Mutex<HashSet<String>>>,
+    paused_jobs: Arc<Mutex<HashSet<String>>>,
 }
 
 impl FileOperationState {
@@ -39,6 +44,22 @@ impl FileOperationState {
         }
     }
 
+    fn clear_pause(&self, job_id: &str) {
+        if let Ok(mut paused_jobs) = self.paused_jobs.lock() {
+            paused_jobs.remove(job_id);
+        }
+    }
+
+    fn request_pause(&self, job_id: &str) {
+        if let Ok(mut paused_jobs) = self.paused_jobs.lock() {
+            paused_jobs.insert(job_id.to_string());
+        }
+    }
+
+    fn request_resume(&self, job_id: &str) {
+        self.clear_pause(job_id);
+    }
+
     fn is_cancelled(&self, job_id: &Option<String>) -> bool {
         let Some(job_id) = job_id else {
             return false;
@@ -48,6 +69,62 @@ impl FileOperationState {
             .lock()
             .map(|cancelled_jobs| cancelled_jobs.contains(job_id))
             .unwrap_or(false)
+    }
+
+    fn is_paused(&self, job_id: &Option<String>) -> bool {
+        let Some(job_id) = job_id else {
+            return false;
+        };
+
+        self.paused_jobs
+            .lock()
+            .map(|paused_jobs| paused_jobs.contains(job_id))
+            .unwrap_or(false)
+    }
+
+    fn checkpoint(&self, job_id: &Option<String>, path: Option<&Path>) -> FsResult<()> {
+        loop {
+            if self.is_cancelled(job_id) {
+                return Err(FsError::new(
+                    "operation_cancelled",
+                    "The file operation was cancelled.",
+                    path.map(|path| path.to_string_lossy().into_owned()),
+                ));
+            }
+
+            if !self.is_paused(job_id) {
+                return Ok(());
+            }
+
+            thread::sleep(Duration::from_millis(120));
+        }
+    }
+
+    fn wait_if_paused_or_cancelled(&self, job_id: &Option<String>) -> bool {
+        self.checkpoint(job_id, None).is_err()
+    }
+}
+
+struct OperationStateCleanup {
+    operation_state: FileOperationState,
+    job_id: Option<String>,
+}
+
+impl OperationStateCleanup {
+    fn new(operation_state: FileOperationState, job_id: Option<String>) -> Self {
+        Self {
+            operation_state,
+            job_id,
+        }
+    }
+}
+
+impl Drop for OperationStateCleanup {
+    fn drop(&mut self) {
+        if let Some(job_id) = &self.job_id {
+            self.operation_state.clear_cancel(job_id);
+            self.operation_state.clear_pause(job_id);
+        }
     }
 }
 
@@ -62,6 +139,8 @@ struct FileOperationProgress {
     processed_entries: u64,
     total_entries: u64,
     current_path: Option<String>,
+    current_bytes: u64,
+    current_total_bytes: u64,
 }
 
 #[tauri::command]
@@ -226,16 +305,40 @@ pub async fn delete_items(
 
 #[tauri::command]
 pub async fn copy_items(
+    app: AppHandle,
+    operation_state: tauri::State<'_, FileOperationState>,
     items: Vec<TransferItem>,
+    job_id: Option<String>,
     sudo_password: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<(), FsError> {
+    let _operation_cleanup =
+        OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
     let mut local_items = Vec::new();
+    let total_items = items.len() as u64;
+    let mut processed_items = 0_u64;
 
     for item in items {
+        operation_state.checkpoint(&job_id, None)?;
+
         match (parse_remote_path(&item.from), parse_remote_path(&item.to)) {
             (Some(remote_from), Some(remote_to)) => {
-                copy_remote_item(&remotes, remote_from, remote_to).await?;
+                let target_uri =
+                    crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
+                copy_remote_item(&remotes, remote_from, remote_to, item.overwrite).await?;
+                processed_items = processed_items.saturating_add(1);
+                emit_file_operation_progress(
+                    &app,
+                    &job_id,
+                    "copy",
+                    "running",
+                    ProgressSnapshot {
+                        processed_entries: processed_items,
+                        total_entries: total_items,
+                        current_path: Some(target_uri),
+                        ..ProgressSnapshot::default()
+                    },
+                );
             }
             (Some(remote_from), None) => {
                 return Err(cross_provider_error(
@@ -256,42 +359,115 @@ pub async fn copy_items(
     }
 
     if local_items.is_empty() {
+        if let Some(job_id) = &job_id {
+            operation_state.clear_cancel(job_id);
+            operation_state.clear_pause(job_id);
+        }
+
         return Ok(());
     }
 
     let sudo_items = local_items.clone();
-    run_local_with_sudo(
+    let native_app = app.clone();
+    let native_job_id = job_id.clone();
+    let native_operation_state = operation_state.inner().clone();
+    let sudo_app = app.clone();
+    let sudo_job_id = job_id.clone();
+    let sudo_operation_state = operation_state.inner().clone();
+    let result = run_local_with_sudo(
         sudo_password,
         move |provider| {
+            if native_job_id.is_some() {
+                let operation_items = transfer_items_for_operations(&local_items);
+                return operations::copy_items_with_progress(
+                    &operation_items,
+                    |progress| {
+                        emit_transfer_operation_progress(
+                            &native_app,
+                            &native_job_id,
+                            "copy",
+                            "running",
+                            progress,
+                        );
+                    },
+                    |path| native_operation_state.checkpoint(&native_job_id, path),
+                );
+            }
+
             for item in local_items {
-                provider.copy(&item.from, &item.to)?;
+                provider.copy(&item.from, &item.to, item.overwrite)?;
             }
 
             Ok(())
         },
         move |password| {
-            for item in &sudo_items {
-                sudo::copy_item(&password, &item.from, &item.to)?;
+            emit_file_operation_status(&sudo_app, &sudo_job_id, "copy", "running");
+            for (index, item) in sudo_items.iter().enumerate() {
+                sudo_operation_state.checkpoint(&sudo_job_id, None)?;
+                sudo::copy_item(&password, &item.from, &item.to, item.overwrite)?;
+                emit_file_operation_progress(
+                    &sudo_app,
+                    &sudo_job_id,
+                    "copy",
+                    "running",
+                    ProgressSnapshot {
+                        processed_entries: (index + 1) as u64,
+                        total_entries: sudo_items.len() as u64,
+                        current_path: Some(item.to.clone()),
+                        ..ProgressSnapshot::default()
+                    },
+                );
             }
 
             Ok(())
         },
     )
-    .await
+    .await;
+
+    if let Some(job_id) = &job_id {
+        operation_state.clear_cancel(job_id);
+        operation_state.clear_pause(job_id);
+    }
+
+    result
 }
 
 #[tauri::command]
 pub async fn move_items(
+    app: AppHandle,
+    operation_state: tauri::State<'_, FileOperationState>,
     items: Vec<TransferItem>,
+    job_id: Option<String>,
     sudo_password: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<(), FsError> {
+    let _operation_cleanup =
+        OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
     let mut local_items = Vec::new();
+    let total_items = items.len() as u64;
+    let mut processed_items = 0_u64;
 
     for item in items {
+        operation_state.checkpoint(&job_id, None)?;
+
         match (parse_remote_path(&item.from), parse_remote_path(&item.to)) {
             (Some(remote_from), Some(remote_to)) => {
-                move_remote_item(&remotes, remote_from, remote_to).await?;
+                let target_uri =
+                    crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
+                move_remote_item(&remotes, remote_from, remote_to, item.overwrite).await?;
+                processed_items = processed_items.saturating_add(1);
+                emit_file_operation_progress(
+                    &app,
+                    &job_id,
+                    "move",
+                    "running",
+                    ProgressSnapshot {
+                        processed_entries: processed_items,
+                        total_entries: total_items,
+                        current_path: Some(target_uri),
+                        ..ProgressSnapshot::default()
+                    },
+                );
             }
             (Some(remote_from), None) => {
                 return Err(cross_provider_error(
@@ -312,28 +488,77 @@ pub async fn move_items(
     }
 
     if local_items.is_empty() {
+        if let Some(job_id) = &job_id {
+            operation_state.clear_cancel(job_id);
+            operation_state.clear_pause(job_id);
+        }
+
         return Ok(());
     }
 
     let sudo_items = local_items.clone();
-    run_local_with_sudo(
+    let native_app = app.clone();
+    let native_job_id = job_id.clone();
+    let native_operation_state = operation_state.inner().clone();
+    let sudo_app = app.clone();
+    let sudo_job_id = job_id.clone();
+    let sudo_operation_state = operation_state.inner().clone();
+    let result = run_local_with_sudo(
         sudo_password,
         move |provider| {
+            if native_job_id.is_some() {
+                let operation_items = transfer_items_for_operations(&local_items);
+                return operations::move_items_with_progress(
+                    &operation_items,
+                    |progress| {
+                        emit_transfer_operation_progress(
+                            &native_app,
+                            &native_job_id,
+                            "move",
+                            "running",
+                            progress,
+                        );
+                    },
+                    |path| native_operation_state.checkpoint(&native_job_id, path),
+                );
+            }
+
             for item in local_items {
-                provider.move_item(&item.from, &item.to)?;
+                provider.move_item(&item.from, &item.to, item.overwrite)?;
             }
 
             Ok(())
         },
         move |password| {
-            for item in &sudo_items {
-                sudo::move_item(&password, &item.from, &item.to)?;
+            emit_file_operation_status(&sudo_app, &sudo_job_id, "move", "running");
+            for (index, item) in sudo_items.iter().enumerate() {
+                sudo_operation_state.checkpoint(&sudo_job_id, None)?;
+                sudo::move_item(&password, &item.from, &item.to, item.overwrite)?;
+                emit_file_operation_progress(
+                    &sudo_app,
+                    &sudo_job_id,
+                    "move",
+                    "running",
+                    ProgressSnapshot {
+                        processed_entries: (index + 1) as u64,
+                        total_entries: sudo_items.len() as u64,
+                        current_path: Some(item.to.clone()),
+                        ..ProgressSnapshot::default()
+                    },
+                );
             }
 
             Ok(())
         },
     )
-    .await
+    .await;
+
+    if let Some(job_id) = &job_id {
+        operation_state.clear_cancel(job_id);
+        operation_state.clear_pause(job_id);
+    }
+
+    result
 }
 
 #[tauri::command]
@@ -346,6 +571,9 @@ pub async fn archive_items(
     job_id: Option<String>,
     sudo_password: Option<String>,
 ) -> Result<(), FsError> {
+    let _operation_cleanup =
+        OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
+
     for path in &paths {
         if let Some(remote_path) = parse_remote_path(path) {
             return Err(cross_provider_error(
@@ -367,11 +595,13 @@ pub async fn archive_items(
     let sudo_paths = paths.clone();
     let sudo_destination = destination.clone();
     let operation_state = operation_state.inner().clone();
+    let cleanup_operation_state = operation_state.clone();
     let native_app = app.clone();
     let native_job_id = job_id.clone();
     let native_operation_state = operation_state.clone();
     let sudo_app = app.clone();
     let sudo_job_id = job_id.clone();
+    let sudo_operation_state = operation_state.clone();
     let result = run_local_with_sudo(
         sudo_password,
         move |_| {
@@ -388,10 +618,11 @@ pub async fn archive_items(
                         progress,
                     );
                 },
-                || native_operation_state.is_cancelled(&native_job_id),
+                || native_operation_state.wait_if_paused_or_cancelled(&native_job_id),
             )
         },
         move |password| {
+            sudo_operation_state.checkpoint(&sudo_job_id, None)?;
             emit_file_operation_status(&sudo_app, &sudo_job_id, "archive", "running");
             sudo::archive_items(&password, &sudo_paths, &sudo_destination, overwrite)
         },
@@ -399,7 +630,8 @@ pub async fn archive_items(
     .await;
 
     if let Some(job_id) = &job_id {
-        operation_state.clear_cancel(job_id);
+        cleanup_operation_state.clear_cancel(job_id);
+        cleanup_operation_state.clear_pause(job_id);
     }
 
     result
@@ -414,6 +646,9 @@ pub async fn unarchive_items(
     job_id: Option<String>,
     sudo_password: Option<String>,
 ) -> Result<Vec<String>, FsError> {
+    let _operation_cleanup =
+        OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
+
     for path in &paths {
         if let Some(remote_path) = parse_remote_path(path) {
             return Err(cross_provider_error(
@@ -435,11 +670,13 @@ pub async fn unarchive_items(
     let sudo_paths = paths.clone();
     let sudo_destination_directory = destination_directory.clone();
     let operation_state = operation_state.inner().clone();
+    let cleanup_operation_state = operation_state.clone();
     let native_app = app.clone();
     let native_job_id = job_id.clone();
     let native_operation_state = operation_state.clone();
     let sudo_app = app.clone();
     let sudo_job_id = job_id.clone();
+    let sudo_operation_state = operation_state.clone();
     let result = run_local_with_sudo(
         sudo_password,
         move |_| {
@@ -455,10 +692,11 @@ pub async fn unarchive_items(
                         progress,
                     );
                 },
-                || native_operation_state.is_cancelled(&native_job_id),
+                || native_operation_state.wait_if_paused_or_cancelled(&native_job_id),
             )
         },
         move |password| {
+            sudo_operation_state.checkpoint(&sudo_job_id, None)?;
             emit_file_operation_status(&sudo_app, &sudo_job_id, "unarchive", "running");
             sudo::unarchive_items(&password, &sudo_paths, &sudo_destination_directory)
         },
@@ -466,7 +704,8 @@ pub async fn unarchive_items(
     .await;
 
     if let Some(job_id) = &job_id {
-        operation_state.clear_cancel(job_id);
+        cleanup_operation_state.clear_cancel(job_id);
+        cleanup_operation_state.clear_pause(job_id);
     }
 
     result
@@ -486,6 +725,40 @@ pub async fn cancel_file_operation(
     }
 
     operation_state.request_cancel(&job_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn pause_file_operation(
+    job_id: String,
+    operation_state: tauri::State<'_, FileOperationState>,
+) -> Result<(), FsError> {
+    if job_id.trim().is_empty() {
+        return Err(FsError::new(
+            "invalid_job_id",
+            "Unable to pause an operation without a job id.",
+            None,
+        ));
+    }
+
+    operation_state.request_pause(&job_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn resume_file_operation(
+    job_id: String,
+    operation_state: tauri::State<'_, FileOperationState>,
+) -> Result<(), FsError> {
+    if job_id.trim().is_empty() {
+        return Err(FsError::new(
+            "invalid_job_id",
+            "Unable to resume an operation without a job id.",
+            None,
+        ));
+    }
+
+    operation_state.request_resume(&job_id);
     Ok(())
 }
 
@@ -539,17 +812,70 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), FsError> {
     })
 }
 
-fn emit_file_operation_progress(
+#[derive(Debug, Clone, Default)]
+struct ProgressSnapshot {
+    processed_bytes: u64,
+    total_bytes: u64,
+    processed_entries: u64,
+    total_entries: u64,
+    current_path: Option<String>,
+    current_bytes: u64,
+    current_total_bytes: u64,
+}
+
+impl From<archive::ArchiveProgress> for ProgressSnapshot {
+    fn from(progress: archive::ArchiveProgress) -> Self {
+        Self {
+            processed_bytes: progress.processed_bytes,
+            total_bytes: progress.total_bytes,
+            processed_entries: progress.processed_entries,
+            total_entries: progress.total_entries,
+            current_path: progress.current_path,
+            current_bytes: progress.current_bytes,
+            current_total_bytes: progress.current_total_bytes,
+        }
+    }
+}
+
+impl From<operations::OperationProgress> for ProgressSnapshot {
+    fn from(progress: operations::OperationProgress) -> Self {
+        Self {
+            processed_bytes: progress.processed_bytes,
+            total_bytes: progress.total_bytes,
+            processed_entries: progress.processed_entries,
+            total_entries: progress.total_entries,
+            current_path: progress.current_path,
+            current_bytes: progress.current_bytes,
+            current_total_bytes: progress.current_total_bytes,
+        }
+    }
+}
+
+fn transfer_items_for_operations(items: &[TransferItem]) -> Vec<operations::LocalTransferItem> {
+    items
+        .iter()
+        .map(|item| operations::LocalTransferItem {
+            from: item.from.clone(),
+            to: item.to.clone(),
+            overwrite: item.overwrite,
+        })
+        .collect()
+}
+
+fn emit_file_operation_progress<P>(
     app: &AppHandle,
     job_id: &Option<String>,
     operation: &str,
     status: &str,
-    progress: archive::ArchiveProgress,
-) {
+    progress: P,
+) where
+    P: Into<ProgressSnapshot>,
+{
     let Some(job_id) = job_id else {
         return;
     };
 
+    let progress = progress.into();
     let _ = app.emit(
         "file-operation-progress",
         FileOperationProgress {
@@ -561,8 +887,20 @@ fn emit_file_operation_progress(
             processed_entries: progress.processed_entries,
             total_entries: progress.total_entries,
             current_path: progress.current_path,
+            current_bytes: progress.current_bytes,
+            current_total_bytes: progress.current_total_bytes,
         },
     );
+}
+
+fn emit_transfer_operation_progress(
+    app: &AppHandle,
+    job_id: &Option<String>,
+    operation: &str,
+    status: &str,
+    progress: operations::OperationProgress,
+) {
+    emit_file_operation_progress(app, job_id, operation, status, progress);
 }
 
 fn emit_file_operation_status(
@@ -571,13 +909,7 @@ fn emit_file_operation_status(
     operation: &str,
     status: &str,
 ) {
-    emit_file_operation_progress(
-        app,
-        job_id,
-        operation,
-        status,
-        archive::ArchiveProgress::default(),
-    );
+    emit_file_operation_progress(app, job_id, operation, status, ProgressSnapshot::default());
 }
 
 fn cross_provider_error(message: &str, volume_id: &str, path: &str) -> FsError {

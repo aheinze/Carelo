@@ -58,7 +58,7 @@ const inspectedEntry = computed(() => {
 
 const permissions = computed(() => fileMetadata.value?.permissions || null);
 const runningJobs = computed(() =>
-  store.queue.filter((job) => ['running', 'cancelling'].includes(job.status)),
+  store.queue.filter((job) => ['running', 'paused', 'cancelling'].includes(job.status)),
 );
 const currentWorkSummary = computed(() => {
   const count = store.queue.length;
@@ -394,16 +394,57 @@ function jobStatus(job) {
   if (job.status === 'failed') return 'Failed';
   if (job.status === 'cancelled') return 'Cancelled';
   if (job.status === 'cancelling') return 'Cancelling';
+  if (job.status === 'paused') return 'Paused';
   return formatPercent(job) || 'Working';
 }
 
+function formatDuration(seconds) {
+  const value = Number(seconds);
+
+  if (!Number.isFinite(value) || value < 0) {
+    return '';
+  }
+
+  if (value < 60) {
+    return `${Math.max(1, Math.round(value))}s`;
+  }
+
+  const minutes = Math.floor(value / 60);
+  const remainingSeconds = Math.round(value % 60);
+
+  if (minutes < 60) {
+    return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function metricDetail(job) {
+  const metrics = [];
+
+  if (job.bytesPerSecond > 0) {
+    metrics.push(`${formatBytes(job.bytesPerSecond)}/s`);
+  }
+
+  if (job.etaSeconds !== null && job.etaSeconds !== undefined) {
+    metrics.push(`${formatDuration(job.etaSeconds)} left`);
+  }
+
+  return metrics.join(' · ');
+}
+
 function jobDetail(job) {
+  const metric = metricDetail(job);
+
   if (job.detail) {
-    return job.detail;
+    return metric ? `${job.detail} · ${metric}` : job.detail;
   }
 
   if (job.totalBytes > 0) {
-    return `${formatBytes(job.processedBytes)} of ${formatBytes(job.totalBytes)}`;
+    const progress = `${formatBytes(job.processedBytes)} of ${formatBytes(job.totalBytes)}`;
+    return metric ? `${progress} · ${metric}` : progress;
   }
 
   if (job.totalEntries > 0) {
@@ -413,12 +454,61 @@ function jobDetail(job) {
   return job.currentPath || 'Preparing operation';
 }
 
+function fileName(path) {
+  const value = String(path || '').replace(/\/+$/, '');
+  return value.split('/').filter(Boolean).at(-1) || value || 'Current item';
+}
+
+function currentFileDetail(job) {
+  if (!job.currentPath) {
+    return '';
+  }
+
+  if (job.currentTotalBytes > 0) {
+    return `${fileName(job.currentPath)} · ${formatBytes(job.currentBytes)} of ${formatBytes(job.currentTotalBytes)}`;
+  }
+
+  return fileName(job.currentPath);
+}
+
 function canCancelJob(job) {
-  return job.cancelable && ['running', 'cancelling'].includes(job.status) && !job.cancelRequested;
+  return job.cancelable && ['running', 'paused', 'cancelling'].includes(job.status) && !job.cancelRequested;
+}
+
+function canPauseJob(job) {
+  return job.pausable && job.status === 'running';
+}
+
+function canResumeJob(job) {
+  return job.status === 'paused';
+}
+
+function canRetryJob(job) {
+  return job.status === 'failed' && typeof job.retryAction === 'function';
+}
+
+function canDismissJob(job) {
+  return ['completed', 'failed', 'cancelled'].includes(job.status);
 }
 
 function cancelJob(job) {
   store.cancelQueueJob(job.id);
+}
+
+function pauseJob(job) {
+  store.pauseQueueJob(job.id);
+}
+
+function resumeJob(job) {
+  store.resumeQueueJob(job.id);
+}
+
+function retryJob(job) {
+  store.retryQueueJob(job.id);
+}
+
+function dismissJob(job) {
+  store.removeQueueJob(job.id);
 }
 
 function statusLabel(status) {
@@ -426,6 +516,7 @@ function statusLabel(status) {
   if (status === 'failed') return 'Failed';
   if (status === 'cancelled') return 'Cancelled';
   if (status === 'cancelling') return 'Cancelling';
+  if (status === 'paused') return 'Paused';
   if (status === 'running') return 'Started';
   return 'Info';
 }
@@ -698,23 +789,76 @@ function logDetail(entry) {
                 <small>{{ jobStatus(job) }}</small>
               </div>
               <p :title="jobDetail(job)">{{ jobDetail(job) }}</p>
+              <p v-if="currentFileDetail(job)" class="inspector-work-current" :title="job.currentPath">
+                {{ currentFileDetail(job) }}
+              </p>
             </div>
 
-            <button
-              type="button"
-              class="inspector-icon-button"
-              :disabled="!canCancelJob(job)"
-              :aria-label="`Cancel ${job.label}`"
-              @click="cancelJob(job)"
-            >
-              <AppIcon name="x" :size="12" :stroke-width="2.4" />
-            </button>
+            <div class="inspector-work-actions" aria-label="Job actions">
+              <button
+                v-if="canPauseJob(job)"
+                v-tooltip="'Pause'"
+                type="button"
+                class="inspector-icon-button"
+                :aria-label="`Pause ${job.label}`"
+                @click="pauseJob(job)"
+              >
+                <AppIcon name="pause" :size="12" :stroke-width="2.4" />
+              </button>
+              <button
+                v-if="canResumeJob(job)"
+                v-tooltip="'Resume'"
+                type="button"
+                class="inspector-icon-button"
+                :aria-label="`Resume ${job.label}`"
+                @click="resumeJob(job)"
+              >
+                <AppIcon name="play" :size="12" :stroke-width="2.4" />
+              </button>
+              <button
+                v-if="canRetryJob(job)"
+                v-tooltip="'Retry'"
+                type="button"
+                class="inspector-icon-button"
+                :aria-label="`Retry ${job.label}`"
+                @click="retryJob(job)"
+              >
+                <AppIcon name="refresh" :size="12" :stroke-width="2.1" />
+              </button>
+              <button
+                v-if="canCancelJob(job)"
+                v-tooltip="'Cancel'"
+                type="button"
+                class="inspector-icon-button"
+                :aria-label="`Cancel ${job.label}`"
+                @click="cancelJob(job)"
+              >
+                <AppIcon name="x" :size="12" :stroke-width="2.4" />
+              </button>
+              <button
+                v-if="canDismissJob(job)"
+                v-tooltip="'Dismiss'"
+                type="button"
+                class="inspector-icon-button"
+                :aria-label="`Dismiss ${job.label}`"
+                @click="dismissJob(job)"
+              >
+                <AppIcon name="x" :size="12" :stroke-width="2.4" />
+              </button>
+            </div>
 
             <div
               class="inspector-work-progress"
               :class="{ 'inspector-work-progress--indeterminate': job.progress === null && ['running', 'cancelling'].includes(job.status) }"
             >
               <span :style="{ width: job.progress === null ? '38%' : `${Math.max(4, job.progress * 100)}%` }"></span>
+            </div>
+            <div
+              v-if="job.currentProgress !== null"
+              class="inspector-work-current-progress"
+              aria-hidden="true"
+            >
+              <span :style="{ width: `${Math.max(4, job.currentProgress * 100)}%` }"></span>
             </div>
           </article>
         </div>
@@ -1114,12 +1258,12 @@ dd {
 .inspector-work-job {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   overflow: hidden;
   border: 1px solid var(--hairline);
   border-radius: 8px;
-  padding: 9px 9px 13px;
+  padding: 9px 9px 17px;
   background: color-mix(in srgb, var(--control-glass) 74%, transparent);
 }
 
@@ -1130,6 +1274,10 @@ dd {
 .inspector-work-job--cancelled,
 .inspector-work-job--cancelling {
   border-color: rgb(var(--warning-rgb) / 0.28);
+}
+
+.inspector-work-job--paused {
+  border-color: rgb(var(--warning-rgb) / 0.34);
 }
 
 .inspector-work-main,
@@ -1150,6 +1298,7 @@ dd {
 
 .inspector-work-title span,
 .inspector-work-job p,
+.inspector-work-current,
 .inspector-log-title span,
 .inspector-log-entry p,
 .inspector-log-path {
@@ -1176,12 +1325,25 @@ dd {
 }
 
 .inspector-work-job p,
+.inspector-work-current,
 .inspector-log-entry p,
 .inspector-log-path {
   margin: 0;
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 520;
+}
+
+.inspector-work-current {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.inspector-work-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  align-self: start;
 }
 
 .inspector-icon-button {
@@ -1233,6 +1395,25 @@ dd {
 
 .inspector-work-progress--indeterminate span {
   animation: inspector-progress-slide 1s ease-in-out infinite;
+}
+
+.inspector-work-current-progress {
+  position: absolute;
+  right: 8px;
+  bottom: 2px;
+  left: 8px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-faint) 13%, transparent);
+}
+
+.inspector-work-current-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 12px;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 58%, var(--text));
 }
 
 .inspector-panel-empty {
@@ -1288,7 +1469,8 @@ dd {
 }
 
 .inspector-log-entry--cancelled .inspector-log-dot,
-.inspector-log-entry--cancelling .inspector-log-dot {
+.inspector-log-entry--cancelling .inspector-log-dot,
+.inspector-log-entry--paused .inspector-log-dot {
   background: rgb(var(--warning-rgb));
 }
 

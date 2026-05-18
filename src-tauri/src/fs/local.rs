@@ -102,11 +102,47 @@ impl LocalFileProvider {
         })
     }
 
-    fn copy_recursive(from: &Path, to: &Path) -> FsResult<()> {
+    fn destination_exists_error(path: &Path) -> FsError {
+        FsError::new(
+            "destination_exists",
+            "An item already exists at the destination.",
+            Some(path.to_string_lossy().into_owned()),
+        )
+    }
+
+    fn destination_type_error(path: &Path) -> FsError {
+        FsError::new(
+            "destination_type_conflict",
+            "The existing destination has an incompatible type.",
+            Some(path.to_string_lossy().into_owned()),
+        )
+    }
+
+    fn path_exists(path: &Path) -> FsResult<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(FsError::io(
+                "Unable to read destination metadata",
+                path,
+                error,
+            )),
+        }
+    }
+
+    fn copy_recursive(from: &Path, to: &Path, overwrite: bool) -> FsResult<()> {
         let metadata = fs::metadata(from)
             .map_err(|error| FsError::io("Unable to read source metadata", from, error))?;
 
+        if !overwrite && Self::path_exists(to)? {
+            return Err(Self::destination_exists_error(to));
+        }
+
         if metadata.is_dir() {
+            if overwrite && Self::path_exists(to)? {
+                return Err(Self::destination_type_error(to));
+            }
+
             fs::create_dir_all(to).map_err(|error| {
                 FsError::io("Unable to create destination directory", to, error)
             })?;
@@ -117,10 +153,19 @@ impl LocalFileProvider {
                 let child = child.map_err(|error| {
                     FsError::io("Unable to read source directory entry", from, error)
                 })?;
-                Self::copy_recursive(&child.path(), &to.join(child.file_name()))?;
+                Self::copy_recursive(&child.path(), &to.join(child.file_name()), overwrite)?;
             }
 
             return Ok(());
+        }
+
+        if overwrite && Self::path_exists(to)? {
+            let target_metadata = fs::metadata(to)
+                .map_err(|error| FsError::io("Unable to read destination metadata", to, error))?;
+
+            if target_metadata.is_dir() {
+                return Err(Self::destination_type_error(to));
+            }
         }
 
         fs::copy(from, to)
@@ -249,22 +294,52 @@ impl FileProvider for LocalFileProvider {
         Self::delete_path(&path)
     }
 
-    fn copy(&self, from: &str, to: &str) -> FsResult<()> {
+    fn copy(&self, from: &str, to: &str, overwrite: bool) -> FsResult<()> {
         let from = self.expand_path(from)?;
         let to = self.expand_path(to)?;
-        Self::copy_recursive(&from, &to)
+        let existed_before = Self::path_exists(&to)?;
+
+        if !overwrite && existed_before {
+            return Err(Self::destination_exists_error(&to));
+        }
+
+        match Self::copy_recursive(&from, &to, overwrite) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if !overwrite && !existed_before {
+                    Self::cleanup_partial_copy(&to);
+                }
+
+                Err(error)
+            }
+        }
     }
 
-    fn move_item(&self, from: &str, to: &str) -> FsResult<()> {
+    fn move_item(&self, from: &str, to: &str, overwrite: bool) -> FsResult<()> {
         let from = self.expand_path(from)?;
         let to = self.expand_path(to)?;
+
+        if !overwrite && Self::path_exists(&to)? {
+            return Err(Self::destination_exists_error(&to));
+        }
+
+        if overwrite && Self::path_exists(&to)? {
+            let from_metadata = fs::metadata(&from)
+                .map_err(|error| FsError::io("Unable to read source metadata", &from, error))?;
+            let target_metadata = fs::metadata(&to)
+                .map_err(|error| FsError::io("Unable to read destination metadata", &to, error))?;
+
+            if from_metadata.is_dir() || target_metadata.is_dir() {
+                return Err(Self::destination_type_error(&to));
+            }
+        }
 
         match fs::rename(&from, &to) {
             Ok(()) => Ok(()),
             Err(error) if is_cross_device_error(&error) => {
                 let temporary_to = Self::temporary_move_path(&to)?;
 
-                if let Err(copy_error) = Self::copy_recursive(&from, &temporary_to) {
+                if let Err(copy_error) = Self::copy_recursive(&from, &temporary_to, false) {
                     Self::cleanup_partial_copy(&temporary_to);
                     return Err(copy_error);
                 }
@@ -429,4 +504,158 @@ fn compare_entries(a: &FileEntry, b: &FileEntry) -> Ordering {
         .cmp(&b.kind.sort_rank())
         .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         .then_with(|| a.name.cmp(&b.name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_root(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "carelo-local-fs-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+
+        fs::create_dir_all(&root).expect("create test root");
+        root
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn copy_file_requires_explicit_overwrite_for_existing_destination() {
+        let root = test_root("copy-file-conflict");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, "incoming").expect("write source");
+        fs::write(&destination, "existing").expect("write destination");
+        let provider = LocalFileProvider::new();
+
+        let error = provider
+            .copy(
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+                false,
+            )
+            .expect_err("copy should refuse implicit overwrite");
+
+        assert_eq!(error.code, "destination_exists");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read destination"),
+            "existing"
+        );
+
+        provider
+            .copy(
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+                true,
+            )
+            .expect("copy with overwrite");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read overwritten destination"),
+            "incoming"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn move_file_requires_explicit_overwrite_for_existing_destination() {
+        let root = test_root("move-file-conflict");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, "incoming").expect("write source");
+        fs::write(&destination, "existing").expect("write destination");
+        let provider = LocalFileProvider::new();
+
+        let error = provider
+            .move_item(
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+                false,
+            )
+            .expect_err("move should refuse implicit overwrite");
+
+        assert_eq!(error.code, "destination_exists");
+        assert!(source.exists());
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read destination"),
+            "existing"
+        );
+
+        provider
+            .move_item(
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+                true,
+            )
+            .expect("move with overwrite");
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read overwritten destination"),
+            "incoming"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn directory_replacement_is_blocked_for_moves() {
+        let root = test_root("move-directory-conflict");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).expect("create source directory");
+        fs::create_dir_all(&destination).expect("create destination directory");
+        fs::write(source.join("incoming.txt"), "incoming").expect("write source child");
+        fs::write(destination.join("existing.txt"), "existing").expect("write destination child");
+        let provider = LocalFileProvider::new();
+
+        let error = provider
+            .move_item(
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+                true,
+            )
+            .expect_err("directory replacement should be blocked");
+
+        assert_eq!(error.code, "destination_type_conflict");
+        assert!(source.exists());
+        assert!(destination.join("existing.txt").exists());
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn directory_replacement_is_blocked_for_copies() {
+        let root = test_root("copy-directory-conflict");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).expect("create source directory");
+        fs::create_dir_all(&destination).expect("create destination directory");
+        fs::write(source.join("incoming.txt"), "incoming").expect("write source child");
+        fs::write(destination.join("existing.txt"), "existing").expect("write destination child");
+        let provider = LocalFileProvider::new();
+
+        let error = provider
+            .copy(
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+                true,
+            )
+            .expect_err("directory replacement should be blocked");
+
+        assert_eq!(error.code, "destination_type_conflict");
+        assert!(source.exists());
+        assert!(destination.join("existing.txt").exists());
+        assert!(!destination.join("incoming.txt").exists());
+
+        cleanup(&root);
+    }
 }

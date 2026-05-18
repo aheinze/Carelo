@@ -1023,6 +1023,74 @@ function uniqueArchiveName(seedName, existingNames) {
   return normalized;
 }
 
+async function runQueuedArchive({ paths, destination, overwrite, label, refreshPaths, successDetail }) {
+  const retryAction = () => runQueuedArchive({
+    paths,
+    destination,
+    overwrite: true,
+    label,
+    refreshPaths,
+    successDetail,
+  });
+  const jobId = store.startQueueJob({
+    operation: 'archive',
+    label,
+    retryAction,
+  });
+
+  try {
+    await archiveItems(paths, destination, overwrite, jobId);
+    await refreshDirectories(refreshPaths);
+    store.completeQueueJob(jobId, successDetail);
+  } catch (error) {
+    if (error?.code === 'operation_cancelled') {
+      store.cancelQueueJobDone(jobId);
+      return;
+    }
+
+    store.failQueueJob(jobId, error?.message || 'Archive creation failed.', {
+      failedItems: paths.map((path) => ({
+        path,
+        message: error?.message || 'Failed',
+      })),
+    });
+    throw error;
+  }
+}
+
+async function runQueuedUnarchive({ paths, destinationDirectory, label, refreshPaths }) {
+  const retryAction = () => runQueuedUnarchive({
+    paths,
+    destinationDirectory,
+    label,
+    refreshPaths,
+  });
+  const jobId = store.startQueueJob({
+    operation: 'unarchive',
+    label,
+    retryAction,
+  });
+
+  try {
+    await unarchiveItems(paths, destinationDirectory, jobId);
+    await refreshDirectories(refreshPaths);
+    store.completeQueueJob(jobId, 'Archive extracted');
+  } catch (error) {
+    if (error?.code === 'operation_cancelled') {
+      store.cancelQueueJobDone(jobId);
+      return;
+    }
+
+    store.failQueueJob(jobId, error?.message || 'Archive extraction failed.', {
+      failedItems: paths.map((path) => ({
+        path,
+        message: error?.message || 'Failed',
+      })),
+    });
+    throw error;
+  }
+}
+
 async function createZipArchive(menu) {
   const operationEntries = contextOperationEntries(menu);
   const currentPath = commonParentDirectoryFor(operationEntries);
@@ -1093,24 +1161,14 @@ async function createZipArchive(menu) {
     }
   }
 
-  const jobId = store.startQueueJob({
-    operation: 'archive',
+  await runQueuedArchive({
+    paths: operationEntries.map((item) => item.path),
+    destination,
+    overwrite,
     label: `Creating ${archiveName}`,
+    refreshPaths: [currentPath],
+    successDetail: `"${archiveName}" created`,
   });
-
-  try {
-    await archiveItems(operationEntries.map((item) => item.path), destination, overwrite, jobId);
-    await refreshDirectories([currentPath]);
-    store.completeQueueJob(jobId, `"${archiveName}" created`);
-  } catch (error) {
-    if (error?.code === 'operation_cancelled') {
-      store.cancelQueueJobDone(jobId);
-      return;
-    }
-
-    store.failQueueJob(jobId, error?.message || 'Archive creation failed.');
-    throw error;
-  }
 }
 
 async function extractZipArchive(menu) {
@@ -1126,26 +1184,14 @@ async function extractZipArchive(menu) {
     return;
   }
 
-  const jobId = store.startQueueJob({
-    operation: 'unarchive',
+  await runQueuedUnarchive({
+    paths: operationEntries.map((item) => item.path),
+    destinationDirectory: currentPath,
     label: operationEntries.length === 1
       ? `Extracting ${operationEntries[0].name}`
       : `Extracting ${operationEntries.length} archives`,
+    refreshPaths: [currentPath],
   });
-
-  try {
-    await unarchiveItems(operationEntries.map((item) => item.path), currentPath, jobId);
-    await refreshDirectories([currentPath]);
-    store.completeQueueJob(jobId, 'Archive extracted');
-  } catch (error) {
-    if (error?.code === 'operation_cancelled') {
-      store.cancelQueueJobDone(jobId);
-      return;
-    }
-
-    store.failQueueJob(jobId, error?.message || 'Archive extraction failed.');
-    throw error;
-  }
 }
 
 async function openEntryAt(index) {

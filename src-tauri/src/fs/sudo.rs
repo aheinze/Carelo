@@ -83,7 +83,7 @@ pub fn create_folder(password: &str, path: &str) -> FsResult<()> {
 }
 
 pub fn rename_item(password: &str, from: &str, to: &str) -> FsResult<()> {
-    move_item(password, from, to)
+    move_item(password, from, to, true)
 }
 
 pub fn delete_item(password: &str, path: &str) -> FsResult<()> {
@@ -110,15 +110,28 @@ pub fn delete_item(password: &str, path: &str) -> FsResult<()> {
     .map(|_| ())
 }
 
-pub fn copy_item(password: &str, from: &str, to: &str) -> FsResult<()> {
+pub fn copy_item(password: &str, from: &str, to: &str, overwrite: bool) -> FsResult<()> {
     let from = expand_path(from)?;
     let to = expand_path(to)?;
+    let destination_exists = sudo_path_exists(password, &to)?;
+
+    if !overwrite && destination_exists {
+        return Err(destination_exists_error(&to));
+    }
+
+    if overwrite
+        && destination_exists
+        && (sudo_path_is_directory(password, &from)? || sudo_path_is_directory(password, &to)?)
+    {
+        return Err(destination_type_error(&to));
+    }
 
     run_sudo_command(
         password,
         "cp",
         [
             OsString::from("-a"),
+            OsString::from("-T"),
             OsString::from("--"),
             OsString::from(from.as_os_str()),
             OsString::from(to.as_os_str()),
@@ -128,9 +141,21 @@ pub fn copy_item(password: &str, from: &str, to: &str) -> FsResult<()> {
     .map(|_| ())
 }
 
-pub fn move_item(password: &str, from: &str, to: &str) -> FsResult<()> {
+pub fn move_item(password: &str, from: &str, to: &str, overwrite: bool) -> FsResult<()> {
     let from = expand_path(from)?;
     let to = expand_path(to)?;
+    let destination_exists = sudo_path_exists(password, &to)?;
+
+    if !overwrite && destination_exists {
+        return Err(destination_exists_error(&to));
+    }
+
+    if overwrite
+        && destination_exists
+        && (sudo_path_is_directory(password, &from)? || sudo_path_is_directory(password, &to)?)
+    {
+        return Err(destination_type_error(&to));
+    }
 
     match run_sudo_command(
         password,
@@ -152,6 +177,49 @@ pub fn move_item(password: &str, from: &str, to: &str) -> FsResult<()> {
                 && to.exists() =>
         {
             Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn destination_exists_error(path: &Path) -> FsError {
+    FsError::new(
+        "destination_exists",
+        "An item already exists at the destination.",
+        Some(path.to_string_lossy().into_owned()),
+    )
+}
+
+fn destination_type_error(path: &Path) -> FsError {
+    FsError::new(
+        "destination_type_conflict",
+        "The existing destination has an incompatible type.",
+        Some(path.to_string_lossy().into_owned()),
+    )
+}
+
+fn sudo_path_exists(password: &str, path: &Path) -> FsResult<bool> {
+    if sudo_test_path(password, path, "-e")? {
+        return Ok(true);
+    }
+
+    sudo_test_path(password, path, "-L")
+}
+
+fn sudo_path_is_directory(password: &str, path: &Path) -> FsResult<bool> {
+    sudo_test_path(password, path, "-d")
+}
+
+fn sudo_test_path(password: &str, path: &Path, flag: &str) -> FsResult<bool> {
+    match run_sudo_command(
+        password,
+        "test",
+        [OsString::from(flag), OsString::from(path.as_os_str())],
+        Some(path),
+    ) {
+        Ok(_) => Ok(true),
+        Err(error) if error.code == "sudo_failed" && error.message.starts_with("test failed") => {
+            Ok(false)
         }
         Err(error) => Err(error),
     }

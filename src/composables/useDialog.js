@@ -16,7 +16,34 @@ const defaultLabels = {
     confirm: 'Save',
     cancel: 'Cancel',
   },
+  choice: {
+    cancel: 'Cancel',
+  },
 };
+
+function normalizeDialogAction(action = {}) {
+  if (typeof action === 'string') {
+    return {
+      value: action,
+      label: action,
+      variant: 'default',
+      primary: false,
+      destructive: false,
+      default: false,
+      cancel: false,
+    };
+  }
+
+  return {
+    value: action.value ?? action.id ?? '',
+    label: action.label || String(action.value ?? action.id ?? ''),
+    variant: action.variant || 'default',
+    primary: Boolean(action.primary),
+    destructive: Boolean(action.destructive || action.variant === 'danger'),
+    default: Boolean(action.default),
+    cancel: Boolean(action.cancel),
+  };
+}
 
 function normalizeDialog(options = {}) {
   const type = options.type || 'alert';
@@ -35,9 +62,15 @@ function normalizeDialog(options = {}) {
     inputValue: options.inputValue ?? options.defaultValue ?? '',
     inputPlaceholder: options.inputPlaceholder || options.placeholder || '',
     inputRequired: Boolean(options.inputRequired),
+    facts: Array.isArray(options.facts) ? options.facts : [],
+    actions: Array.isArray(options.actions)
+      ? options.actions.map(normalizeDialogAction).filter((action) => action.value || action.cancel)
+      : [],
+    checkboxLabel: options.checkboxLabel || '',
+    checkboxValue: Boolean(options.checkboxValue),
     confirmLabel: options.confirmLabel || labels.confirm,
     cancelLabel: options.cancelLabel || labels.cancel,
-    showCancel: options.showCancel ?? type !== 'alert',
+    showCancel: options.showCancel ?? (type !== 'alert' && type !== 'choice'),
     destructive: Boolean(options.destructive || options.variant === 'danger'),
     resolve: null,
   };
@@ -105,6 +138,16 @@ function promptDialog(options = {}) {
   });
 }
 
+function choiceDialog(options = {}) {
+  const config = typeof options === 'string' ? { message: options } : options;
+
+  return openDialog({
+    type: 'choice',
+    title: 'Choose Action',
+    ...config,
+  });
+}
+
 export function useDialog() {
   return {
     activeDialog: computed(() => activeDialog.value),
@@ -113,6 +156,7 @@ export function useDialog() {
     alert: alertDialog,
     confirm: confirmDialog,
     prompt: promptDialog,
+    choice: choiceDialog,
     resolve: resolveDialog,
   };
 }

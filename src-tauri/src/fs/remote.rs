@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use opendal::{Entry, EntryMode, Metadata, Operator};
+use opendal::{Entry, EntryMode, ErrorKind, Metadata, Operator};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::models::{FileEntry, FileEntryKind, FileMetadata, FsError, FsResult, VolumeEntry};
@@ -271,10 +271,12 @@ pub async fn copy_remote_item(
     state: &RemoteVolumeState,
     from: RemotePath,
     to: RemotePath,
+    overwrite: bool,
 ) -> FsResult<()> {
     ensure_same_remote(&from, &to)?;
     let config = state.config(&from.volume_id)?;
     let op = config.operator()?;
+    ensure_remote_destination_available(&op, &from, &to, overwrite).await?;
     op.copy(
         &normalize_remote_object_path(&from.path),
         &normalize_remote_object_path(&to.path),
@@ -287,8 +289,18 @@ pub async fn move_remote_item(
     state: &RemoteVolumeState,
     from: RemotePath,
     to: RemotePath,
+    overwrite: bool,
 ) -> FsResult<()> {
-    rename_remote_item(state, from, to).await
+    ensure_same_remote(&from, &to)?;
+    let config = state.config(&from.volume_id)?;
+    let op = config.operator()?;
+    ensure_remote_destination_available(&op, &from, &to, overwrite).await?;
+    op.rename(
+        &normalize_remote_object_path(&from.path),
+        &normalize_remote_object_path(&to.path),
+    )
+    .await
+    .map_err(|error| remote_error("remote_rename_failed", &from, error))
 }
 
 pub async fn stat_remote_item(
@@ -320,6 +332,52 @@ fn validate_remote_scheme(scheme: &str) -> FsResult<()> {
             None,
         )),
     }
+}
+
+async fn ensure_remote_destination_available(
+    op: &Operator,
+    from: &RemotePath,
+    to: &RemotePath,
+    overwrite: bool,
+) -> FsResult<()> {
+    let object_path = normalize_remote_object_path(&to.path);
+    let destination = match op.stat(&object_path).await {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(remote_error("remote_stat_failed", to, error)),
+    };
+
+    if !overwrite {
+        return if destination.is_some() {
+            Err(FsError::new(
+                "destination_exists",
+                "An item already exists at the destination.",
+                Some(format_remote_uri(&to.volume_id, &object_path)),
+            ))
+        } else {
+            Ok(())
+        };
+    }
+
+    let Some(destination) = destination else {
+        return Ok(());
+    };
+
+    let source_path = normalize_remote_object_path(&from.path);
+    let source = op
+        .stat(&source_path)
+        .await
+        .map_err(|error| remote_error("remote_stat_failed", from, error))?;
+
+    if source.is_dir() || destination.is_dir() {
+        return Err(FsError::new(
+            "destination_type_conflict",
+            "The existing destination has an incompatible type.",
+            Some(format_remote_uri(&to.volume_id, &object_path)),
+        ));
+    }
+
+    Ok(())
 }
 
 fn normalize_remote_object_path(path: &str) -> String {

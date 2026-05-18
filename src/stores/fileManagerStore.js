@@ -10,7 +10,9 @@ import {
   listFavorites as listStoredFavorites,
   listVolumes,
   moveFavorite as moveStoredFavorite,
+  pauseFileOperation,
   removeFavorite as removeStoredFavorite,
+  resumeFileOperation,
 } from '../composables/useFileOperations';
 import { loadUiSettings, saveUiSettings } from '../composables/useSettings';
 
@@ -733,6 +735,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
   function startQueueJob(options = {}) {
     const id = `job-${Date.now()}-${nextQueueJobId++}`;
+    const now = Date.now();
     const job = {
       id,
       operation: options.operation || 'operation',
@@ -740,14 +743,25 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       detail: options.detail || '',
       status: 'running',
       cancelable: options.cancelable ?? true,
+      pausable: options.pausable ?? true,
       cancelRequested: false,
+      pauseRequested: false,
       processedBytes: 0,
       totalBytes: 0,
       processedEntries: 0,
       totalEntries: 0,
+      currentBytes: 0,
+      currentTotalBytes: 0,
       currentPath: '',
       progress: null,
-      createdAt: Date.now(),
+      currentProgress: null,
+      bytesPerSecond: 0,
+      etaSeconds: null,
+      retryAction: typeof options.retryAction === 'function' ? options.retryAction : null,
+      failedItems: [],
+      createdAt: now,
+      updatedAt: now,
+      lastProgressAt: now,
       finishedAt: null,
     };
 
@@ -777,10 +791,31 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         return job;
       }
 
+      const previousProcessedBytes = Number(job.processedBytes || 0);
+      const previousProgressAt = Number(job.lastProgressAt || job.createdAt || Date.now());
+      const now = Date.now();
       const nextJob = {
         ...job,
         ...patch,
+        updatedAt: now,
       };
+
+      if (
+        ['running', 'cancelling'].includes(nextJob.status) &&
+        Number.isFinite(nextJob.processedBytes) &&
+        nextJob.processedBytes >= previousProcessedBytes
+      ) {
+        const deltaBytes = nextJob.processedBytes - previousProcessedBytes;
+        const deltaSeconds = Math.max((now - previousProgressAt) / 1000, 0.001);
+
+        if (deltaBytes > 0 && deltaSeconds > 0) {
+          const instantSpeed = deltaBytes / deltaSeconds;
+          nextJob.bytesPerSecond = job.bytesPerSecond > 0
+            ? (job.bytesPerSecond * 0.72) + (instantSpeed * 0.28)
+            : instantSpeed;
+          nextJob.lastProgressAt = now;
+        }
+      }
 
       if (typeof patch.progress === 'number') {
         nextJob.progress = Math.max(0, Math.min(1, patch.progress));
@@ -794,6 +829,18 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         nextJob.progress = null;
       }
 
+      if (nextJob.currentTotalBytes > 0) {
+        nextJob.currentProgress = Math.max(0, Math.min(1, nextJob.currentBytes / nextJob.currentTotalBytes));
+      } else {
+        nextJob.currentProgress = null;
+      }
+
+      if (nextJob.bytesPerSecond > 0 && nextJob.totalBytes > 0 && nextJob.processedBytes < nextJob.totalBytes) {
+        nextJob.etaSeconds = Math.max(0, Math.round((nextJob.totalBytes - nextJob.processedBytes) / nextJob.bytesPerSecond));
+      } else {
+        nextJob.etaSeconds = null;
+      }
+
       return nextJob;
     });
   }
@@ -805,6 +852,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       totalBytes: Number(progress.totalBytes || 0),
       processedEntries: Number(progress.processedEntries || 0),
       totalEntries: Number(progress.totalEntries || 0),
+      currentBytes: Number(progress.currentBytes || 0),
+      currentTotalBytes: Number(progress.currentTotalBytes || 0),
       currentPath: progress.currentPath || '',
     };
 
@@ -812,7 +861,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       patch.operation = progress.operation;
     }
 
-    if (!currentJob?.cancelRequested) {
+    if (!currentJob?.cancelRequested && !currentJob?.pauseRequested) {
       patch.status = progress.status || 'running';
     }
 
@@ -826,6 +875,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       return;
     }
 
+    const previousStatus = job.status;
+    const previousDetail = job.detail;
     updateQueueJob(id, {
       status: 'cancelling',
       cancelRequested: true,
@@ -836,10 +887,74 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       await cancelFileOperation(id);
     } catch (error) {
       updateQueueJob(id, {
-        status: 'running',
+        status: previousStatus,
         cancelRequested: false,
-        detail: error?.message || 'Unable to request cancellation.',
+        detail: previousDetail || error?.message || 'Unable to request cancellation.',
       });
+    }
+  }
+
+  async function pauseQueueJob(id) {
+    const job = queue.value.find((candidate) => candidate.id === id);
+
+    if (!job || !job.pausable || job.status !== 'running') {
+      return;
+    }
+
+    updateQueueJob(id, {
+      status: 'paused',
+      pauseRequested: true,
+      bytesPerSecond: 0,
+      etaSeconds: null,
+    });
+
+    try {
+      await pauseFileOperation(id);
+    } catch (error) {
+      updateQueueJob(id, {
+        status: 'running',
+        pauseRequested: false,
+        detail: error?.message || 'Unable to pause operation.',
+      });
+    }
+  }
+
+  async function resumeQueueJob(id) {
+    const job = queue.value.find((candidate) => candidate.id === id);
+
+    if (!job || job.status !== 'paused') {
+      return;
+    }
+
+    updateQueueJob(id, {
+      status: 'running',
+      pauseRequested: false,
+      lastProgressAt: Date.now(),
+    });
+
+    try {
+      await resumeFileOperation(id);
+    } catch (error) {
+      updateQueueJob(id, {
+        status: 'paused',
+        pauseRequested: true,
+        detail: error?.message || 'Unable to resume operation.',
+      });
+    }
+  }
+
+  async function retryQueueJob(id) {
+    const job = queue.value.find((candidate) => candidate.id === id);
+
+    if (!job || job.status !== 'failed' || typeof job.retryAction !== 'function') {
+      return;
+    }
+
+    removeQueueJob(id);
+    try {
+      await job.retryAction();
+    } catch {
+      // The retried operation owns its failure state and user-facing dialog.
     }
   }
 
@@ -848,20 +963,31 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       status: 'completed',
       detail,
       progress: 1,
+      cancelRequested: false,
+      pauseRequested: false,
       finishedAt: Date.now(),
     });
     recordQueueJob(id, 'completed', detail);
     window.setTimeout(() => removeQueueJob(id), 2800);
   }
 
-  function failQueueJob(id, detail = '') {
+  function failQueueJob(id, detail = '', options = {}) {
+    const job = queue.value.find((candidate) => candidate.id === id);
+    const failedItems = Array.isArray(options.failedItems)
+      ? options.failedItems
+      : job?.currentPath
+        ? [{ path: job.currentPath, message: detail }]
+        : [];
+
     updateQueueJob(id, {
       status: 'failed',
       detail,
+      failedItems,
+      cancelRequested: false,
+      pauseRequested: false,
       finishedAt: Date.now(),
     });
     recordQueueJob(id, 'failed', detail);
-    window.setTimeout(() => removeQueueJob(id), 6000);
   }
 
   function cancelQueueJobDone(id, detail = 'Cancelled') {
@@ -869,6 +995,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       status: 'cancelled',
       detail,
       cancelRequested: true,
+      pauseRequested: false,
       finishedAt: Date.now(),
     });
     recordQueueJob(id, 'cancelled', detail);
@@ -1679,6 +1806,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     clearOperationLog,
     updateQueueJob,
     cancelQueueJob,
+    pauseQueueJob,
+    resumeQueueJob,
+    retryQueueJob,
     completeQueueJob,
     failQueueJob,
     cancelQueueJobDone,

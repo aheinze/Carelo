@@ -217,12 +217,12 @@ export async function deleteItems(paths) {
   return invokeCommand('delete_items', { paths }, { sudo: true });
 }
 
-export async function copyItems(items) {
-  return invokeCommand('copy_items', { items }, { sudo: true });
+export async function copyItems(items, jobId = null) {
+  return invokeCommand('copy_items', { items, jobId }, { sudo: true });
 }
 
-export async function moveItems(items) {
-  return invokeCommand('move_items', { items }, { sudo: true });
+export async function moveItems(items, jobId = null) {
+  return invokeCommand('move_items', { items, jobId }, { sudo: true });
 }
 
 export async function archiveItems(paths, destination, overwrite = false, jobId = null) {
@@ -235,6 +235,14 @@ export async function unarchiveItems(paths, destinationDirectory, jobId = null) 
 
 export async function cancelFileOperation(jobId) {
   return invokeCommand('cancel_file_operation', { jobId });
+}
+
+export async function pauseFileOperation(jobId) {
+  return invokeCommand('pause_file_operation', { jobId });
+}
+
+export async function resumeFileOperation(jobId) {
+  return invokeCommand('resume_file_operation', { jobId });
 }
 
 export async function openWithDefaultApp(path) {
@@ -284,9 +292,11 @@ export function useFileOperations() {
     moveFavorite,
     moveItems,
     openWithDefaultApp,
+    pauseFileOperation,
     removeFavorite,
     removeRemoteVolume,
     renameItem,
+    resumeFileOperation,
     revealInFileManager,
     unarchiveItems,
     startTerminalSession,

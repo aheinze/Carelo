@@ -22,6 +22,8 @@ pub struct ArchiveProgress {
     pub processed_entries: u64,
     pub total_entries: u64,
     pub current_path: Option<String>,
+    pub current_bytes: u64,
+    pub current_total_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,7 +39,10 @@ struct ProgressState {
     processed_entries: u64,
     total_entries: u64,
     last_emitted_bytes: u64,
+    last_emitted_current_bytes: u64,
     last_emitted_entries: u64,
+    current_bytes: u64,
+    current_total_bytes: u64,
 }
 
 pub fn archive_items(paths: &[String], destination: &str, overwrite: bool) -> FsResult<()> {
@@ -289,7 +294,15 @@ where
 
         zip.start_file(archive_name, zip_options(&metadata))
             .map_err(|error| zip_error("Unable to add file to zip archive", path, error))?;
-        copy_with_progress(source, zip, path, progress, on_progress, should_cancel)?;
+        copy_with_progress(
+            source,
+            zip,
+            path,
+            metadata.len(),
+            progress,
+            on_progress,
+            should_cancel,
+        )?;
         progress.processed_entries += 1;
         emit_progress(progress, Some(path), true, on_progress);
 
@@ -359,6 +372,7 @@ where
             })?;
         }
 
+        let current_total_bytes = entry.size();
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -368,6 +382,7 @@ where
             entry,
             &mut output,
             &output_path,
+            current_total_bytes,
             progress,
             on_progress,
             should_cancel,
@@ -555,6 +570,7 @@ fn copy_with_progress<R, W, F, C>(
     mut reader: R,
     writer: &mut W,
     current_path: &Path,
+    current_total_bytes: u64,
     progress: &mut ProgressState,
     on_progress: &mut F,
     should_cancel: &mut C,
@@ -566,6 +582,9 @@ where
     C: FnMut() -> bool,
 {
     let mut buffer = [0_u8; 64 * 1024];
+    progress.current_bytes = 0;
+    progress.current_total_bytes = current_total_bytes;
+    emit_progress(progress, Some(current_path), true, on_progress);
 
     loop {
         check_cancelled(should_cancel, Some(current_path))?;
@@ -574,15 +593,23 @@ where
             .map_err(|error| FsError::io("Unable to read archive data", current_path, error))?;
 
         if bytes_read == 0 {
-            return Ok(());
+            break;
         }
 
         writer
             .write_all(&buffer[..bytes_read])
             .map_err(|error| FsError::io("Unable to write archive data", current_path, error))?;
         progress.processed_bytes = progress.processed_bytes.saturating_add(bytes_read as u64);
+        progress.current_bytes = progress.current_bytes.saturating_add(bytes_read as u64);
         emit_progress(progress, Some(current_path), false, on_progress);
     }
+
+    progress.current_bytes = progress.current_total_bytes;
+    emit_progress(progress, Some(current_path), true, on_progress);
+    progress.current_bytes = 0;
+    progress.current_total_bytes = 0;
+    emit_progress(progress, Some(current_path), true, on_progress);
+    Ok(())
 }
 
 fn check_cancelled<C>(should_cancel: &mut C, path: Option<&Path>) -> FsResult<()>
@@ -611,13 +638,21 @@ fn emit_progress<F>(
     let bytes_delta = state
         .processed_bytes
         .saturating_sub(state.last_emitted_bytes);
+    let current_delta = state
+        .current_bytes
+        .saturating_sub(state.last_emitted_current_bytes);
     let entries_changed = state.processed_entries != state.last_emitted_entries;
 
-    if !force && !entries_changed && bytes_delta < PROGRESS_BYTE_STEP {
+    if !force
+        && !entries_changed
+        && bytes_delta < PROGRESS_BYTE_STEP
+        && current_delta < PROGRESS_BYTE_STEP
+    {
         return;
     }
 
     state.last_emitted_bytes = state.processed_bytes;
+    state.last_emitted_current_bytes = state.current_bytes;
     state.last_emitted_entries = state.processed_entries;
 
     on_progress(ArchiveProgress {
@@ -626,6 +661,8 @@ fn emit_progress<F>(
         processed_entries: state.processed_entries.min(state.total_entries),
         total_entries: state.total_entries,
         current_path: current_path.map(|path| path.to_string_lossy().into_owned()),
+        current_bytes: state.current_bytes.min(state.current_total_bytes),
+        current_total_bytes: state.current_total_bytes,
     });
 }
 

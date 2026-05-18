@@ -4,7 +4,11 @@ import { useFileManagerStore } from '../stores/fileManagerStore';
 
 const store = useFileManagerStore();
 
-const activeJob = computed(() => store.queue[0] || null);
+const activeJob = computed(() =>
+  store.queue.find((job) => ['running', 'paused', 'cancelling'].includes(job.status))
+    || store.queue[0]
+    || null,
+);
 
 function formatPercent(job) {
   if (typeof job?.progress !== 'number') {
@@ -37,6 +41,10 @@ function operationLabel(job) {
     return 'Idle';
   }
 
+  if (job.status === 'paused') {
+    return 'Paused';
+  }
+
   if (job.status === 'completed') {
     return 'Done';
   }
@@ -48,17 +56,57 @@ function operationLabel(job) {
   return job.label;
 }
 
+function formatDuration(seconds) {
+  const value = Number(seconds);
+
+  if (!Number.isFinite(value) || value < 0) {
+    return '';
+  }
+
+  if (value < 60) {
+    return `${Math.max(1, Math.round(value))}s`;
+  }
+
+  const minutes = Math.floor(value / 60);
+  const remainingSeconds = Math.round(value % 60);
+
+  if (minutes < 60) {
+    return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function metricDetail(job) {
+  const metrics = [];
+
+  if (job?.bytesPerSecond > 0) {
+    metrics.push(`${formatBytes(job.bytesPerSecond)}/s`);
+  }
+
+  if (job?.etaSeconds !== null && job?.etaSeconds !== undefined) {
+    metrics.push(`${formatDuration(job.etaSeconds)} left`);
+  }
+
+  return metrics.join(' · ');
+}
+
 function progressDetail(job) {
   if (!job) {
     return 'No active file operations';
   }
 
+  const metric = metricDetail(job);
+
   if (job.detail) {
-    return job.detail;
+    return metric ? `${job.detail} · ${metric}` : job.detail;
   }
 
   if (job.totalBytes > 0) {
-    return `${formatBytes(job.processedBytes)} of ${formatBytes(job.totalBytes)}`;
+    const progress = `${formatBytes(job.processedBytes)} of ${formatBytes(job.totalBytes)}`;
+    return metric ? `${progress} · ${metric}` : progress;
   }
 
   if (job.totalEntries > 0) {
@@ -76,15 +124,24 @@ function progressDetail(job) {
       <span>{{ progressDetail(activeJob) }}</span>
     </div>
 
-    <div v-if="activeJob" class="progress-track" :class="{ 'progress-track--indeterminate': activeJob.progress === null }">
+    <div
+      v-if="activeJob"
+      class="progress-track"
+      :class="{ 'progress-track--indeterminate': activeJob.progress === null && ['running', 'cancelling'].includes(activeJob.status) }"
+    >
       <span
         class="progress-fill"
         :style="{ width: activeJob.progress === null ? '36%' : `${Math.max(4, activeJob.progress * 100)}%` }"
       ></span>
+      <span
+        v-if="activeJob.currentProgress !== null"
+        class="progress-fill progress-fill--current"
+        :style="{ width: `${Math.max(4, activeJob.currentProgress * 100)}%` }"
+      ></span>
     </div>
 
     <div class="status-strip">
-      <span>{{ activeJob ? formatPercent(activeJob) || 'Working' : 'Idle' }}</span>
+      <span>{{ activeJob ? activeJob.status === 'paused' ? 'Paused' : formatPercent(activeJob) || 'Working' : 'Idle' }}</span>
       <span>{{ store.queue.length === 1 ? '1 job' : `${store.queue.length} jobs` }}</span>
     </div>
   </footer>
@@ -152,7 +209,14 @@ strong {
   background: var(--accent);
 }
 
-.progress-track--indeterminate .progress-fill {
+.progress-fill--current {
+  top: auto;
+  height: 2px;
+  min-width: 12px;
+  background: color-mix(in srgb, var(--accent) 58%, var(--text));
+}
+
+.progress-track--indeterminate .progress-fill:not(.progress-fill--current) {
   animation: queue-progress-slide 1s ease-in-out infinite;
 }
 

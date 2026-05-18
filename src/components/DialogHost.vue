@@ -7,6 +7,7 @@ const dialog = useDialog();
 const dialogPanel = ref(null);
 const promptInput = ref(null);
 const inputValue = ref('');
+const checkboxValue = ref(false);
 
 const activeDialog = computed(() => dialog.activeDialog.value);
 const iconName = computed(() => {
@@ -30,6 +31,7 @@ watch(
     }
 
     inputValue.value = nextDialog.inputValue || '';
+    checkboxValue.value = Boolean(nextDialog.checkboxValue);
     await nextTick();
 
     if (nextDialog.type === 'prompt') {
@@ -48,6 +50,16 @@ function confirmDialog() {
     return;
   }
 
+  if (current.type === 'choice') {
+    const action = current.actions.find((item) => item.default);
+
+    if (action) {
+      resolveChoice(action);
+    }
+
+    return;
+  }
+
   if (current.type === 'prompt') {
     const value = inputValue.value;
 
@@ -63,6 +75,24 @@ function confirmDialog() {
   dialog.resolve(true);
 }
 
+function resolveChoice(action) {
+  const current = activeDialog.value;
+
+  if (!current) {
+    return;
+  }
+
+  if (action.cancel) {
+    dialog.resolve(null);
+    return;
+  }
+
+  dialog.resolve({
+    value: action.value,
+    applyToAll: Boolean(current.checkboxLabel && checkboxValue.value),
+  });
+}
+
 function cancelDialog() {
   const current = activeDialog.value;
 
@@ -70,7 +100,7 @@ function cancelDialog() {
     return;
   }
 
-  dialog.resolve(current.type === 'prompt' ? null : false);
+  dialog.resolve(current.type === 'prompt' || current.type === 'choice' ? null : false);
 }
 
 function handleKeydown(event) {
@@ -131,7 +161,38 @@ function handleKeydown(event) {
               />
             </label>
 
-            <footer class="dialog-actions">
+            <dl v-if="activeDialog.facts.length > 0" class="dialog-facts">
+              <div v-for="fact in activeDialog.facts" :key="fact.label">
+                <dt>{{ fact.label }}</dt>
+                <dd>{{ fact.value }}</dd>
+              </div>
+            </dl>
+
+            <label v-if="activeDialog.checkboxLabel" class="dialog-checkbox">
+              <input v-model="checkboxValue" type="checkbox" />
+              <span>{{ activeDialog.checkboxLabel }}</span>
+            </label>
+
+            <footer
+              v-if="activeDialog.type === 'choice'"
+              class="dialog-actions dialog-actions--choice"
+            >
+              <button
+                v-for="action in activeDialog.actions"
+                :key="action.value || action.label"
+                type="button"
+                class="dialog-button"
+                :class="{
+                  'dialog-button--primary': action.primary,
+                  'dialog-button--danger': action.destructive,
+                }"
+                @click="resolveChoice(action)"
+              >
+                {{ action.label }}
+              </button>
+            </footer>
+
+            <footer v-else class="dialog-actions">
               <button
                 v-if="activeDialog.showCancel"
                 type="button"
@@ -274,11 +335,78 @@ function handleKeydown(event) {
     var(--input-shadow);
 }
 
+/* ── Supporting details ───────────────────────────────────── */
+.dialog-facts {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+}
+
+.dialog-facts div {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.5fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 7px 9px;
+}
+
+.dialog-facts div + div {
+  border-top: 1px solid var(--input-border);
+}
+
+.dialog-facts dt,
+.dialog-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  line-height: 1.25;
+}
+
+.dialog-facts dt {
+  color: var(--text-faint);
+  font-weight: 700;
+}
+
+.dialog-facts dd {
+  color: var(--text-muted);
+  font-weight: 600;
+  text-align: right;
+}
+
+.dialog-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dialog-checkbox input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 /* ── Actions ──────────────────────────────────────────────── */
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.dialog-actions--choice {
+  flex-wrap: wrap;
 }
 
 .dialog-button {

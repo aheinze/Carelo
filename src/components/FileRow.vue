@@ -143,7 +143,10 @@ onBeforeUnmount(stopThumbnailObserver);
     ref="cardElement"
     type="button"
     class="file-card"
-    :class="{ 'file-card--selected': selected }"
+    :class="{
+      'file-card--selected': selected,
+      'file-card--directory': entry.kind === 'directory',
+    }"
     @dblclick="$emit('open')"
   >
     <span
@@ -187,7 +190,10 @@ onBeforeUnmount(stopThumbnailObserver);
     v-else
     type="button"
     class="file-row"
-    :class="{ 'file-row--selected': selected }"
+    :class="{
+      'file-row--selected': selected,
+      'file-row--directory': entry.kind === 'directory',
+    }"
     @dblclick="$emit('open')"
   >
     <span class="file-name">
@@ -248,7 +254,11 @@ onBeforeUnmount(stopThumbnailObserver);
   min-width: 0;
   align-items: center;
   gap: 7px;
-  font-weight: 610;
+  font-weight: 400;
+}
+
+.file-row--directory .file-name {
+  font-weight: 700;
 }
 
 .file-name span:last-child {
@@ -407,9 +417,13 @@ onBeforeUnmount(stopThumbnailObserver);
   border-radius: 5px;
   padding: 2px 7px 3px;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-card--directory .file-card-name {
+  font-weight: 700;
 }
 
 .file-card--selected .file-card-name {

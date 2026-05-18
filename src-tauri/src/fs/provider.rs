@@ -6,6 +6,6 @@ pub trait FileProvider: Send + Sync {
     fn create_dir(&self, path: &str) -> FsResult<()>;
     fn rename(&self, from: &str, to: &str) -> FsResult<()>;
     fn delete(&self, path: &str) -> FsResult<()>;
-    fn copy(&self, from: &str, to: &str) -> FsResult<()>;
-    fn move_item(&self, from: &str, to: &str) -> FsResult<()>;
+    fn copy(&self, from: &str, to: &str, overwrite: bool) -> FsResult<()>;
+    fn move_item(&self, from: &str, to: &str, overwrite: bool) -> FsResult<()>;
 }

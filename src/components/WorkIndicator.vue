@@ -10,8 +10,11 @@ const open = ref(false);
 const runningJobs = computed(() =>
   store.queue.filter((job) => ['running', 'cancelling'].includes(job.status)),
 );
+const activeJobs = computed(() =>
+  store.queue.filter((job) => ['running', 'paused', 'cancelling'].includes(job.status)),
+);
 const hasWork = computed(() => store.queue.length > 0);
-const activeCount = computed(() => runningJobs.value.length);
+const activeCount = computed(() => activeJobs.value.length);
 const aggregateProgress = computed(() => {
   const measurableJobs = store.queue.filter((job) => typeof job.progress === 'number');
 
@@ -86,16 +89,60 @@ function jobStatus(job) {
     return 'Cancelling';
   }
 
+  if (job.status === 'paused') {
+    return 'Paused';
+  }
+
   return formatPercent(job) || 'Working';
 }
 
+function formatDuration(seconds) {
+  const value = Number(seconds);
+
+  if (!Number.isFinite(value) || value < 0) {
+    return '';
+  }
+
+  if (value < 60) {
+    return `${Math.max(1, Math.round(value))}s`;
+  }
+
+  const minutes = Math.floor(value / 60);
+  const remainingSeconds = Math.round(value % 60);
+
+  if (minutes < 60) {
+    return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function metricDetail(job) {
+  const metrics = [];
+
+  if (job.bytesPerSecond > 0) {
+    metrics.push(`${formatBytes(job.bytesPerSecond)}/s`);
+  }
+
+  if (job.etaSeconds !== null && job.etaSeconds !== undefined) {
+    metrics.push(`${formatDuration(job.etaSeconds)} left`);
+  }
+
+  return metrics.join(' · ');
+}
+
 function jobDetail(job) {
+  const metric = metricDetail(job);
+
   if (job.detail) {
-    return job.detail;
+    return metric ? `${job.detail} · ${metric}` : job.detail;
   }
 
   if (job.totalBytes > 0) {
-    return `${formatBytes(job.processedBytes)} of ${formatBytes(job.totalBytes)}`;
+    const progress = `${formatBytes(job.processedBytes)} of ${formatBytes(job.totalBytes)}`;
+    return metric ? `${progress} · ${metric}` : progress;
   }
 
   if (job.totalEntries > 0) {
@@ -105,12 +152,75 @@ function jobDetail(job) {
   return job.currentPath || 'Preparing operation';
 }
 
+function jobMeta(job) {
+  const current = currentFileDetail(job);
+
+  if (current && !job.detail) {
+    return current;
+  }
+
+  if (current && job.detail) {
+    return `${current}`;
+  }
+
+  return '';
+}
+
+function fileName(path) {
+  const value = String(path || '').replace(/\/+$/, '');
+  return value.split('/').filter(Boolean).at(-1) || value || 'Current item';
+}
+
+function currentFileDetail(job) {
+  if (!job.currentPath) {
+    return '';
+  }
+
+  if (job.currentTotalBytes > 0) {
+    return `${fileName(job.currentPath)} · ${formatBytes(job.currentBytes)} of ${formatBytes(job.currentTotalBytes)}`;
+  }
+
+  return fileName(job.currentPath);
+}
+
 function canCancel(job) {
-  return job.cancelable && ['running', 'cancelling'].includes(job.status) && !job.cancelRequested;
+  return job.cancelable && ['running', 'paused', 'cancelling'].includes(job.status) && !job.cancelRequested;
+}
+
+function canPause(job) {
+  return job.pausable && job.status === 'running';
+}
+
+function canResume(job) {
+  return job.status === 'paused';
+}
+
+function canRetry(job) {
+  return job.status === 'failed' && typeof job.retryAction === 'function';
+}
+
+function canDismiss(job) {
+  return ['completed', 'failed', 'cancelled'].includes(job.status);
 }
 
 function cancelJob(job) {
   store.cancelQueueJob(job.id);
+}
+
+function pauseJob(job) {
+  store.pauseQueueJob(job.id);
+}
+
+function resumeJob(job) {
+  store.resumeQueueJob(job.id);
+}
+
+function retryJob(job) {
+  store.retryQueueJob(job.id);
+}
+
+function dismissJob(job) {
+  store.removeQueueJob(job.id);
 }
 
 onMounted(() => {
@@ -135,7 +245,7 @@ onUnmounted(() => {
       :aria-expanded="open"
       @click="toggleOpen"
     >
-      <span class="work-ring" :class="{ 'work-ring--active': activeCount > 0 }">
+      <span class="work-ring" :class="{ 'work-ring--active': runningJobs.length > 0 }">
         <AppIcon name="work-queue" :size="18" :stroke-width="1.85" />
       </span>
       <span v-if="hasWork" class="work-badge">{{ activeCount || store.queue.length }}</span>
@@ -177,17 +287,63 @@ onUnmounted(() => {
               <small>{{ jobStatus(job) }}</small>
             </div>
             <p>{{ jobDetail(job) }}</p>
+            <p v-if="jobMeta(job)" class="work-job-meta" :title="job.currentPath">
+              {{ jobMeta(job) }}
+            </p>
           </div>
 
-          <button
-            type="button"
-            class="work-cancel"
-            :disabled="!canCancel(job)"
-            :aria-label="`Cancel ${job.label}`"
-            @click="cancelJob(job)"
-          >
-            <AppIcon name="x" :size="12" :stroke-width="2.4" />
-          </button>
+          <div class="work-actions" aria-label="Job actions">
+            <button
+              v-if="canPause(job)"
+              v-tooltip="'Pause'"
+              type="button"
+              class="work-action"
+              :aria-label="`Pause ${job.label}`"
+              @click="pauseJob(job)"
+            >
+              <AppIcon name="pause" :size="12" :stroke-width="2.4" />
+            </button>
+            <button
+              v-if="canResume(job)"
+              v-tooltip="'Resume'"
+              type="button"
+              class="work-action"
+              :aria-label="`Resume ${job.label}`"
+              @click="resumeJob(job)"
+            >
+              <AppIcon name="play" :size="12" :stroke-width="2.4" />
+            </button>
+            <button
+              v-if="canRetry(job)"
+              v-tooltip="'Retry'"
+              type="button"
+              class="work-action"
+              :aria-label="`Retry ${job.label}`"
+              @click="retryJob(job)"
+            >
+              <AppIcon name="refresh" :size="12" :stroke-width="2.1" />
+            </button>
+            <button
+              v-if="canCancel(job)"
+              v-tooltip="'Cancel'"
+              type="button"
+              class="work-action"
+              :aria-label="`Cancel ${job.label}`"
+              @click="cancelJob(job)"
+            >
+              <AppIcon name="x" :size="12" :stroke-width="2.4" />
+            </button>
+            <button
+              v-if="canDismiss(job)"
+              v-tooltip="'Dismiss'"
+              type="button"
+              class="work-action"
+              :aria-label="`Dismiss ${job.label}`"
+              @click="dismissJob(job)"
+            >
+              <AppIcon name="x" :size="12" :stroke-width="2.4" />
+            </button>
+          </div>
 
           <div
             class="work-job-progress"
@@ -196,6 +352,13 @@ onUnmounted(() => {
             <span
               :style="{ width: job.progress === null ? '38%' : `${Math.max(4, job.progress * 100)}%` }"
             ></span>
+          </div>
+          <div
+            v-if="job.currentProgress !== null"
+            class="work-job-current-progress"
+            aria-hidden="true"
+          >
+            <span :style="{ width: `${Math.max(4, job.currentProgress * 100)}%` }"></span>
           </div>
         </article>
       </div>
@@ -327,7 +490,7 @@ onUnmounted(() => {
 }
 
 .work-close,
-.work-cancel {
+.work-action {
   display: inline-flex;
   width: 24px;
   height: 24px;
@@ -341,13 +504,13 @@ onUnmounted(() => {
 }
 
 .work-close:hover,
-.work-cancel:hover:not(:disabled) {
+.work-action:hover:not(:disabled) {
   background: var(--btn-hover);
   color: var(--text-muted);
 }
 
 .work-close:active,
-.work-cancel:active:not(:disabled) {
+.work-action:active:not(:disabled) {
   background: var(--btn-active-bg);
 }
 
@@ -361,12 +524,12 @@ onUnmounted(() => {
 .work-job {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   overflow: hidden;
   border: 1px solid var(--hairline);
   border-radius: 9px;
-  padding: 9px 9px 12px;
+  padding: 9px 9px 16px;
   background: color-mix(in srgb, var(--control-glass) 74%, transparent);
 }
 
@@ -377,6 +540,10 @@ onUnmounted(() => {
 .work-job--cancelled,
 .work-job--cancelling {
   border-color: rgb(var(--warning-rgb) / 0.28);
+}
+
+.work-job--paused {
+  border-color: rgb(var(--warning-rgb) / 0.34);
 }
 
 .work-job-main {
@@ -420,13 +587,24 @@ onUnmounted(() => {
   font-weight: 520;
 }
 
-.work-cancel {
-  width: 24px;
-  height: 24px;
+.work-job .work-job-meta {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.work-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
   align-self: start;
 }
 
-.work-cancel:disabled {
+.work-action {
+  width: 24px;
+  height: 24px;
+}
+
+.work-action:disabled {
   cursor: default;
   opacity: 0.35;
 }
@@ -452,6 +630,25 @@ onUnmounted(() => {
 
 .work-job-progress--indeterminate span {
   animation: work-progress-slide 1s ease-in-out infinite;
+}
+
+.work-job-current-progress {
+  position: absolute;
+  right: 8px;
+  bottom: 2px;
+  left: 8px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-faint) 13%, transparent);
+}
+
+.work-job-current-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 12px;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 58%, var(--text));
 }
 
 .work-empty {

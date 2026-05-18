@@ -1615,9 +1615,13 @@ watch(
   background: transparent;
   color: var(--text);
   font-size: 14px;
-  font-weight: 610;
+  font-weight: 400;
   text-align: left;
   transition: background 80ms ease;
+}
+
+.file-column-row--directory {
+  font-weight: 700;
 }
 
 .file-column-row:hover {
