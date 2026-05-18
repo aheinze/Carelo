@@ -133,6 +133,7 @@ function handleKeydown(event) {
           :class="{
             'dialog-panel--danger': activeDialog.variant === 'danger',
             'dialog-panel--warning': activeDialog.variant === 'warning',
+            'dialog-panel--wide': activeDialog.size === 'wide',
           }"
           role="dialog"
           aria-modal="true"
@@ -163,8 +164,13 @@ function handleKeydown(event) {
 
             <dl v-if="activeDialog.facts.length > 0" class="dialog-facts">
               <div v-for="fact in activeDialog.facts" :key="fact.label">
-                <dt>{{ fact.label }}</dt>
-                <dd>{{ fact.value }}</dd>
+                <dt :title="fact.label">{{ fact.label }}</dt>
+                <dd
+                  :class="{ 'dialog-fact--mono': fact.mono }"
+                  :title="fact.value"
+                >
+                  {{ fact.value }}
+                </dd>
               </div>
             </dl>
 
@@ -244,6 +250,10 @@ function handleKeydown(event) {
   box-shadow: var(--shadow-overlay);
   color: var(--text);
   outline: 0;
+}
+
+.dialog-panel--wide {
+  width: min(560px, calc(100vw - 48px));
 }
 
 /* ── Icon ─────────────────────────────────────────────────── */
@@ -348,7 +358,7 @@ function handleKeydown(event) {
 
 .dialog-facts div {
   display: grid;
-  grid-template-columns: minmax(88px, 0.5fr) minmax(0, 1fr);
+  grid-template-columns: minmax(108px, 0.44fr) minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   min-width: 0;
@@ -379,6 +389,12 @@ function handleKeydown(event) {
   color: var(--text-muted);
   font-weight: 600;
   text-align: right;
+}
+
+.dialog-fact--mono {
+  font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 520;
 }
 
 .dialog-checkbox {

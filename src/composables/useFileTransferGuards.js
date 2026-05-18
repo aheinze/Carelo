@@ -150,6 +150,43 @@ function entrySummary(entry, dateFormat = 'system') {
   return details.join(', ');
 }
 
+function itemName(entry) {
+  return entry?.name || entry?.path || 'Untitled';
+}
+
+function itemPath(entry) {
+  return entry?.path || '';
+}
+
+function keepBothLabel(entry, keepBothName) {
+  const name = keepBothName || entry?.name || 'Untitled';
+  return isDirectoryEntry(entry) ? `${name}/` : name;
+}
+
+function conflictFacts({
+  entry,
+  existingEntry,
+  targetPath,
+  keepBothName,
+  incomingLabel = 'Incoming',
+  dateFormat = 'system',
+}) {
+  return [
+    { label: 'Destination', value: targetPath, mono: true },
+    { label: incomingLabel, value: itemName(entry) },
+    { label: `${incomingLabel} Info`, value: entrySummary(entry, dateFormat) },
+    { label: `${incomingLabel} Path`, value: itemPath(entry), mono: true },
+    { label: 'Existing', value: itemName(existingEntry) },
+    { label: 'Existing Info', value: entrySummary(existingEntry, dateFormat) },
+    { label: 'Existing Path', value: itemPath(existingEntry), mono: true },
+    { label: 'Keep Both As', value: keepBothLabel(entry, keepBothName), mono: true },
+  ];
+}
+
+function conflictApplyLabel(conflictKind) {
+  return `Use the selected action for all ${conflictKind} conflicts in this operation`;
+}
+
 function splitCopyName(name, entry) {
   const value = String(name || '').trim() || entry?.name || 'Untitled';
 
@@ -233,6 +270,8 @@ export function useFileTransferGuards() {
     entry,
     existingEntry,
     targetName,
+    targetPath,
+    keepBothName,
     conflictKind,
     allowApplyToAll,
   }) {
@@ -242,26 +281,30 @@ export function useFileTransferGuards() {
       title: folderConflict ? 'Folder Name Conflict' : 'File Already Exists',
       message: `"${targetName}" already exists in the destination.`,
       detail: folderConflict
-        ? 'Choose a unique name for the incoming item or skip it. Replacing folders is intentionally blocked.'
-        : 'Replacing will overwrite the existing file. Keep Both creates a unique name for the incoming file.',
+        ? 'Carelo will not replace folders. Keep Both creates a unique folder name; Skip leaves the existing folder untouched.'
+        : 'Keep Both is the safe default. Replace permanently overwrites the existing destination file.',
+      size: 'wide',
       variant: 'warning',
       icon: folderConflict ? 'folder' : 'file',
-      facts: [
-        { label: 'Incoming', value: entrySummary(entry, dateFormat) },
-        { label: 'Existing', value: entrySummary(existingEntry, dateFormat) },
-      ],
-      checkboxLabel: allowApplyToAll ? `Apply to all ${conflictKind} conflicts` : '',
+      facts: conflictFacts({
+        entry,
+        existingEntry,
+        targetPath,
+        keepBothName,
+        dateFormat,
+      }),
+      checkboxLabel: allowApplyToAll ? conflictApplyLabel(conflictKind) : '',
       actions: folderConflict
         ? [
             { value: 'cancel', label: 'Cancel', cancel: true },
             { value: 'skip', label: 'Skip' },
-            { value: 'keepBoth', label: 'Keep Both', primary: true },
+            { value: 'keepBoth', label: 'Keep Both', primary: true, default: true },
           ]
         : [
             { value: 'cancel', label: 'Cancel', cancel: true },
             { value: 'skip', label: 'Skip' },
-            { value: 'keepBoth', label: 'Keep Both' },
-            { value: 'replace', label: 'Replace', primary: true },
+            { value: 'keepBoth', label: 'Keep Both', primary: true, default: true },
+            { value: 'replace', label: 'Replace', variant: 'danger', destructive: true },
           ],
     });
 
@@ -353,6 +396,7 @@ export function useFileTransferGuards() {
           const conflictKind = shouldUseFolderConflictActions(entry, existingEntry)
             ? 'folder'
             : 'file';
+          const keepBothName = uniqueTargetName(targetName, targetEntries, entry);
           let resolution = conflictPolicies[conflictKind];
 
           if (!resolution) {
@@ -360,6 +404,8 @@ export function useFileTransferGuards() {
               entry,
               existingEntry,
               targetName,
+              targetPath,
+              keepBothName,
               conflictKind,
               allowApplyToAll: sourceEntries.length > 1,
             });
@@ -379,7 +425,7 @@ export function useFileTransferGuards() {
           }
 
           if (resolution.action === 'keepBoth') {
-            targetName = uniqueTargetName(targetName, targetEntries, entry);
+            targetName = keepBothName;
             targetPath = joinPath(targetDirectory, targetName);
           } else if (resolution.action === 'replace') {
             overwrite = true;
@@ -561,27 +607,33 @@ export function useFileTransferGuards() {
     if (existingEntry && cleanPath(existingEntry.path) !== cleanPath(entry.path)) {
       const folderConflict = shouldUseFolderConflictActions(entry, existingEntry);
       const dateFormat = store.appSettings.dateFormat;
+      const keepBothName = uniqueTargetName(targetName, targetEntries, entry);
       const result = await dialog.choice({
         title: folderConflict ? 'Rename Conflict' : 'Replace Existing File?',
         message: `"${targetName}" already exists in this folder.`,
         detail: folderConflict
-          ? 'Replacing folders during rename is intentionally blocked.'
-          : 'Replacing will overwrite the existing file.',
+          ? 'Carelo will not replace folders during rename. Keep Both creates a unique name instead.'
+          : 'Keep Both is the safe default. Replace permanently overwrites the existing file.',
+        size: 'wide',
         variant: 'warning',
         icon: folderConflict ? 'folder' : 'file',
-        facts: [
-          { label: 'Renaming', value: entrySummary(entry, dateFormat) },
-          { label: 'Existing', value: entrySummary(existingEntry, dateFormat) },
-        ],
+        facts: conflictFacts({
+          entry,
+          existingEntry,
+          targetPath,
+          keepBothName,
+          incomingLabel: 'Renaming',
+          dateFormat,
+        }),
         actions: folderConflict
           ? [
               { value: 'cancel', label: 'Cancel', cancel: true },
-              { value: 'keepBoth', label: 'Keep Both', primary: true },
+              { value: 'keepBoth', label: 'Keep Both', primary: true, default: true },
             ]
           : [
               { value: 'cancel', label: 'Cancel', cancel: true },
-              { value: 'keepBoth', label: 'Keep Both' },
-              { value: 'replace', label: 'Replace', primary: true },
+              { value: 'keepBoth', label: 'Keep Both', primary: true, default: true },
+              { value: 'replace', label: 'Replace', variant: 'danger', destructive: true },
             ],
       });
 
@@ -590,8 +642,7 @@ export function useFileTransferGuards() {
       }
 
       if (result.value === 'keepBoth') {
-        const resolvedTargetName = uniqueTargetName(targetName, targetEntries, entry);
-        resolvedTargetPath = joinPath(targetDirectory, resolvedTargetName);
+        resolvedTargetPath = joinPath(targetDirectory, keepBothName);
       }
     }
 

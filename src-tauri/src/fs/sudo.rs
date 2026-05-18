@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::fs::archive::{ArchiveCompressionLevel, ArchiveFormat, ArchiveOptions};
 use crate::fs::models::{
     FileEntry, FileEntryKind, FileMetadata, FilePermissions, FsError, FsResult, PermissionSet,
 };
@@ -230,6 +231,7 @@ pub fn archive_items(
     paths: &[String],
     destination: &str,
     overwrite: bool,
+    options: &ArchiveOptions,
 ) -> FsResult<()> {
     if paths.is_empty() {
         return Err(FsError::new(
@@ -244,16 +246,32 @@ pub fn archive_items(
         .map(|path| expand_path(path))
         .collect::<FsResult<Vec<_>>>()?;
     let destination = expand_path(destination)?;
-    let extension = destination
-        .extension()
+    let destination_name = destination
+        .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or("")
         .to_ascii_lowercase();
+    let expected_extension = archive_format_extension(options.format);
 
-    if extension != "zip" {
+    if !destination_name.ends_with(expected_extension) {
         return Err(FsError::new(
             "invalid_archive_destination",
-            "Zip archive names must end in .zip.",
+            format!(
+                "{} archive names must end in {expected_extension}.",
+                archive_format_label(options.format)
+            ),
+            Some(destination.to_string_lossy().into_owned()),
+        ));
+    }
+    if options
+        .password
+        .as_ref()
+        .is_some_and(|password| !password.trim().is_empty())
+        && options.format != ArchiveFormat::Zip
+    {
+        return Err(FsError::new(
+            "archive_password_unsupported",
+            "Password protection is currently supported for zip archives only.",
             Some(destination.to_string_lossy().into_owned()),
         ));
     }
@@ -307,28 +325,22 @@ pub fn archive_items(
         Some(destination_parent),
     )?;
 
-    let mut args = vec![
-        OsString::from("-r"),
-        OsString::from("-q"),
-        OsString::from(destination.as_os_str()),
-        OsString::from("--"),
-    ];
-
-    for source_path in &source_paths {
-        let file_name = source_path.file_name().ok_or_else(|| {
-            FsError::new(
-                "invalid_archive_source",
-                "Unable to archive a path without a file name.",
-                Some(source_path.to_string_lossy().into_owned()),
-            )
-        })?;
-        args.push(OsString::from(file_name));
+    match options.format {
+        ArchiveFormat::Zip => run_sudo_zip_archive(
+            password,
+            &source_paths,
+            &destination,
+            &source_parent,
+            options,
+        ),
+        ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarZst => run_sudo_tar_archive(
+            password,
+            &source_paths,
+            &destination,
+            &source_parent,
+            options,
+        ),
     }
-
-    run_sudo_command_in_dir(password, "zip", args, Some(&destination), &source_parent)
-        .map(|_| ())
-        .map_err(|error| map_missing_tool(error, "zip"))
-        .and_then(|_| validate_zip_created(&destination))
 }
 
 pub fn unarchive_items(
@@ -490,16 +502,141 @@ fn safe_file_name(value: &str) -> String {
         .to_string()
 }
 
-fn validate_zip_created(destination: &Path) -> FsResult<()> {
+fn validate_archive_created(destination: &Path, label: &str) -> FsResult<()> {
     if destination.exists() {
         Ok(())
     } else {
         Err(FsError::new(
             "archive_failed",
-            "The zip archive was not created.",
+            format!("The {label} archive was not created."),
             Some(destination.to_string_lossy().into_owned()),
         ))
     }
+}
+
+fn archive_format_extension(format: ArchiveFormat) -> &'static str {
+    match format {
+        ArchiveFormat::Zip => ".zip",
+        ArchiveFormat::Tar => ".tar",
+        ArchiveFormat::TarGz => ".tar.gz",
+        ArchiveFormat::TarZst => ".tar.zst",
+    }
+}
+
+fn archive_format_label(format: ArchiveFormat) -> &'static str {
+    match format {
+        ArchiveFormat::Zip => "Zip",
+        ArchiveFormat::Tar => "Tar",
+        ArchiveFormat::TarGz => "Tar.gz",
+        ArchiveFormat::TarZst => "Tar.zst",
+    }
+}
+
+fn sudo_zip_compression_arg(level: ArchiveCompressionLevel) -> &'static str {
+    match level {
+        ArchiveCompressionLevel::Fast => "-1",
+        ArchiveCompressionLevel::Balanced => "-6",
+        ArchiveCompressionLevel::Best => "-9",
+    }
+}
+
+fn sudo_archive_sources(
+    password: &str,
+    source_paths: &[PathBuf],
+    source_parent: &Path,
+    options: &ArchiveOptions,
+) -> FsResult<(PathBuf, Vec<OsString>)> {
+    if source_paths.len() == 1
+        && !options.include_top_level_directory
+        && sudo_path_is_directory(password, &source_paths[0])?
+    {
+        return Ok((source_paths[0].clone(), vec![OsString::from(".")]));
+    }
+
+    let sources = source_paths
+        .iter()
+        .map(|path| {
+            let file_name = path.file_name().ok_or_else(|| {
+                FsError::new(
+                    "invalid_archive_source",
+                    "Unable to archive a path without a file name.",
+                    Some(path.to_string_lossy().into_owned()),
+                )
+            })?;
+
+            Ok(PathBuf::from(".").join(file_name).into_os_string())
+        })
+        .collect::<FsResult<Vec<_>>>()?;
+
+    Ok((source_parent.to_path_buf(), sources))
+}
+
+fn run_sudo_zip_archive(
+    password: &str,
+    source_paths: &[PathBuf],
+    destination: &Path,
+    source_parent: &Path,
+    options: &ArchiveOptions,
+) -> FsResult<()> {
+    let (current_dir, source_args) =
+        sudo_archive_sources(password, source_paths, source_parent, options)?;
+    let mut args = vec![
+        OsString::from("-r"),
+        OsString::from("-q"),
+        OsString::from(sudo_zip_compression_arg(options.compression_level)),
+    ];
+
+    if let Some(password) = options
+        .password
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        args.push(OsString::from("-P"));
+        args.push(OsString::from(password));
+    }
+
+    args.push(OsString::from(destination.as_os_str()));
+    args.extend(source_args);
+
+    run_sudo_command_in_dir(password, "zip", args, Some(destination), &current_dir)
+        .map_err(|error| map_missing_tool(error, "zip"))?;
+    validate_archive_created(destination, "zip")
+}
+
+fn run_sudo_tar_archive(
+    password: &str,
+    source_paths: &[PathBuf],
+    destination: &Path,
+    source_parent: &Path,
+    options: &ArchiveOptions,
+) -> FsResult<()> {
+    let (current_dir, source_args) =
+        sudo_archive_sources(password, source_paths, source_parent, options)?;
+    let mut args = Vec::new();
+
+    match options.format {
+        ArchiveFormat::Tar => args.push(OsString::from("-cf")),
+        ArchiveFormat::TarGz => args.push(OsString::from("-czf")),
+        ArchiveFormat::TarZst => {
+            args.push(OsString::from("--zstd"));
+            args.push(OsString::from("-cf"));
+        }
+        ArchiveFormat::Zip => {
+            return Err(FsError::new(
+                "invalid_archive_format",
+                "Zip archives must use the zip archive backend.",
+                Some(destination.to_string_lossy().into_owned()),
+            ));
+        }
+    }
+
+    args.push(OsString::from(destination.as_os_str()));
+    args.extend(source_args);
+
+    run_sudo_command_in_dir(password, "tar", args, Some(destination), &current_dir)
+        .map_err(|error| map_missing_tool(error, "tar"))?;
+    validate_archive_created(destination, archive_format_label(options.format))
 }
 
 fn map_missing_tool(error: FsError, tool: &str) -> FsError {

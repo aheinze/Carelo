@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
+import CreateArchiveDialog from './CreateArchiveDialog.vue';
 import FileContextMenu from './FileContextMenu.vue';
 import FileList from './FileList.vue';
 import {
@@ -157,6 +158,12 @@ const sortDirectionLabel = computed(() =>
   activeTab.value?.sortDirection === 'asc' ? 'Ascending' : 'Descending',
 );
 const contextMenu = ref(null);
+const archiveDialog = ref({
+  visible: false,
+  entries: [],
+  directory: '',
+  existingNames: [],
+});
 const columnSummary = ref(null);
 const draggedTabId = ref(null);
 const tabDropIndex = ref(null);
@@ -1005,24 +1012,6 @@ function pathJoin(directory, name) {
   return `${base}/${name}`;
 }
 
-function normalizeArchiveName(value) {
-  const trimmed = String(value || '').trim();
-
-  if (!trimmed || trimmed === '.' || trimmed === '..' || /[\\/]/.test(trimmed)) {
-    return '';
-  }
-
-  return /\.zip$/i.test(trimmed) ? trimmed : `${trimmed}.zip`;
-}
-
-function defaultArchiveName(operationEntries) {
-  if (operationEntries.length === 1) {
-    return `${operationEntries[0].name}.zip`;
-  }
-
-  return 'Archive.zip';
-}
-
 function commonParentDirectoryFor(operationEntries) {
   const parents = parentDirectoriesForEntries(operationEntries);
 
@@ -1035,30 +1024,11 @@ async function existingNamesInDirectory(directory) {
   return new Set(directoryEntries.map((item) => item.name.toLocaleLowerCase()));
 }
 
-function uniqueArchiveName(seedName, existingNames) {
-  const normalized = normalizeArchiveName(seedName) || 'Archive.zip';
-
-  if (!existingNames.has(normalized.toLocaleLowerCase())) {
-    return normalized;
-  }
-
-  const stem = normalized.replace(/\.zip$/i, '');
-
-  for (let index = 2; index < 1000; index += 1) {
-    const candidate = `${stem} ${index}.zip`;
-
-    if (!existingNames.has(candidate.toLocaleLowerCase())) {
-      return candidate;
-    }
-  }
-
-  return normalized;
-}
-
-async function runQueuedArchive({ paths, destination, overwrite, label, refreshPaths, successDetail }) {
+async function runQueuedArchive({ paths, destination, options, overwrite, label, refreshPaths, successDetail }) {
   const retryAction = () => runQueuedArchive({
     paths,
     destination,
+    options,
     overwrite: true,
     label,
     refreshPaths,
@@ -1071,7 +1041,7 @@ async function runQueuedArchive({ paths, destination, overwrite, label, refreshP
   });
 
   try {
-    await archiveItems(paths, destination, overwrite, jobId);
+    await archiveItems(paths, destination, options, overwrite, jobId);
     await refreshDirectories(refreshPaths);
     store.completeQueueJob(jobId, successDetail);
   } catch (error) {
@@ -1123,39 +1093,40 @@ async function runQueuedUnarchive({ paths, destinationDirectory, label, refreshP
   }
 }
 
-async function createZipArchive(menu) {
+async function createArchive(menu) {
   const operationEntries = contextOperationEntries(menu);
   const currentPath = commonParentDirectoryFor(operationEntries);
 
   if (!currentPath || operationEntries.length === 0 || operationEntries.some((item) => !isLocalEntry(item))) {
     await dialog.alert({
       title: 'Archive Not Available',
-      message: 'Zip archives can only be created from local files and folders.',
+      message: 'Archives can only be created from local files and folders.',
       variant: 'warning',
     });
     return;
   }
 
   const existingNames = await existingNamesInDirectory(currentPath);
-  const defaultName = uniqueArchiveName(defaultArchiveName(operationEntries), existingNames);
-  const requestedArchiveName = await dialog.prompt({
-    title: 'Create Zip Archive',
-    message: operationEntries.length === 1
-      ? `Create a zip archive for "${operationEntries[0].name}".`
-      : `Create a zip archive for ${operationEntries.length} selected items.`,
-    inputLabel: 'Archive name',
-    inputValue: defaultName,
-    inputRequired: true,
-    confirmLabel: 'Create',
-  });
+  archiveDialog.value = {
+    visible: true,
+    entries: operationEntries,
+    directory: currentPath,
+    existingNames: Array.from(existingNames),
+  };
+}
 
-  if (requestedArchiveName === null) {
-    return;
-  }
+function closeArchiveDialog() {
+  archiveDialog.value = {
+    ...archiveDialog.value,
+    visible: false,
+  };
+}
 
-  const archiveName = normalizeArchiveName(requestedArchiveName);
+async function handleCreateArchive(payload) {
+  const { entries: operationEntries, directory: currentPath } = archiveDialog.value;
+  const archiveName = String(payload?.archiveName || '').trim();
 
-  if (!archiveName) {
+  if (!currentPath || operationEntries.length === 0 || !archiveName || /[\\/]/.test(archiveName)) {
     await dialog.alert({
       title: 'Invalid Archive Name',
       message: 'Archive names cannot be empty or contain folder separators.',
@@ -1176,31 +1147,31 @@ async function createZipArchive(menu) {
     return;
   }
 
-  let overwrite = false;
+  closeArchiveDialog();
 
-  if (existingNames.has(archiveName.toLocaleLowerCase())) {
-    overwrite = await dialog.confirm({
-      title: 'Replace Existing File?',
-      message: `"${archiveName}" already exists.`,
-      detail: 'The existing file will be replaced by the new zip archive.',
-      confirmLabel: 'Replace',
-      variant: 'danger',
-      destructive: true,
+  try {
+    await runQueuedArchive({
+      paths: operationEntries.map((item) => item.path),
+      destination,
+      options: {
+        format: payload.format,
+        compressionLevel: payload.compressionLevel,
+        includeTopLevelDirectory: payload.includeTopLevelDirectory,
+        password: payload.password || null,
+      },
+      overwrite: Boolean(payload.overwrite),
+      label: `Creating ${archiveName}`,
+      refreshPaths: [currentPath],
+      successDetail: `"${archiveName}" created`,
     });
-
-    if (!overwrite) {
-      return;
-    }
+  } catch (error) {
+    console.error(error);
+    await dialog.alert({
+      title: 'Archive Failed',
+      message: error?.message || 'The archive could not be created.',
+      variant: 'warning',
+    });
   }
-
-  await runQueuedArchive({
-    paths: operationEntries.map((item) => item.path),
-    destination,
-    overwrite,
-    label: `Creating ${archiveName}`,
-    refreshPaths: [currentPath],
-    successDetail: `"${archiveName}" created`,
-  });
 }
 
 async function extractZipArchive(menu) {
@@ -1328,7 +1299,7 @@ async function handleContextAction(action) {
     }
 
     if (action === 'archive') {
-      await createZipArchive(menu);
+      await createArchive(menu);
       return;
     }
 
@@ -1582,6 +1553,15 @@ async function handleContextAction(action) {
       :can-transfer="canTransferToOtherPane"
       @action="handleContextAction"
       @close="closeContextMenu"
+    />
+
+    <CreateArchiveDialog
+      :visible="archiveDialog.visible"
+      :entries="archiveDialog.entries"
+      :directory="archiveDialog.directory"
+      :existing-names="archiveDialog.existingNames"
+      @cancel="closeArchiveDialog"
+      @create="handleCreateArchive"
     />
   </section>
 

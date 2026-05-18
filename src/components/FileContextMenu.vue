@@ -167,7 +167,7 @@ onUnmounted(() => {
         @click="emitAction('archive')"
       >
         <AppIcon name="archive" :size="16" />
-        <span>Create Zip Archive</span>
+        <span>Create Archive</span>
       </button>
       <button
         type="button"

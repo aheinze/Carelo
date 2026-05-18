@@ -946,7 +946,7 @@ watch(
             <span role="columnheader">Name</span>
             <span role="columnheader"></span>
             <span role="columnheader">Size</span>
-            <span role="columnheader">Date Modified</span>
+            <span role="columnheader">Modified</span>
           </div>
 
           <div class="file-list file-list--loading">
@@ -1148,7 +1148,7 @@ watch(
           @click="$emit('sort', 'modifiedAt')"
           @keydown.stop
         >
-          <span>Date Modified</span>
+          <span>Modified</span>
           <AppIcon
             v-if="sortKey === 'modifiedAt'"
             name="chevron-down"

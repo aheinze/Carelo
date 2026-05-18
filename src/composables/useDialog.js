@@ -52,6 +52,7 @@ function normalizeDialog(options = {}) {
   return {
     id: nextDialogId++,
     type,
+    size: options.size || '',
     variant: options.variant || 'default',
     icon: options.icon || '',
     title: options.title || '',

@@ -40,7 +40,7 @@ const sudoActions = {
   delete_items: 'delete the selected items',
   copy_items: 'copy the selected items',
   move_items: 'move the selected items',
-  archive_items: 'create this zip archive',
+  archive_items: 'create this archive',
   unarchive_items: 'extract this zip archive',
 };
 
@@ -237,8 +237,12 @@ export async function moveItems(items, jobId = null) {
   return invokeCommand('move_items', { items, jobId }, { sudo: true });
 }
 
-export async function archiveItems(paths, destination, overwrite = false, jobId = null) {
-  return invokeCommand('archive_items', { paths, destination, overwrite, jobId }, { sudo: true });
+export async function archiveItems(paths, destination, options = {}, overwrite = false, jobId = null) {
+  return invokeCommand(
+    'archive_items',
+    { paths, destination, options, overwrite, jobId },
+    { sudo: true },
+  );
 }
 
 export async function unarchiveItems(paths, destinationDirectory, jobId = null) {

@@ -615,6 +615,7 @@ pub async fn archive_items(
     operation_state: tauri::State<'_, FileOperationState>,
     paths: Vec<String>,
     destination: String,
+    options: Option<archive::ArchiveOptions>,
     overwrite: bool,
     job_id: Option<String>,
     sudo_password: Option<String>,
@@ -625,7 +626,7 @@ pub async fn archive_items(
     for path in &paths {
         if let Some(remote_path) = parse_remote_path(path) {
             return Err(cross_provider_error(
-                "Creating zip archives from remote volumes is not implemented yet.",
+                "Creating archives from remote volumes is not implemented yet.",
                 &remote_path.volume_id,
                 &remote_path.path,
             ));
@@ -634,7 +635,7 @@ pub async fn archive_items(
 
     if let Some(remote_path) = parse_remote_path(&destination) {
         return Err(cross_provider_error(
-            "Creating zip archives on remote volumes is not implemented yet.",
+            "Creating archives on remote volumes is not implemented yet.",
             &remote_path.volume_id,
             &remote_path.path,
         ));
@@ -642,6 +643,8 @@ pub async fn archive_items(
 
     let sudo_paths = paths.clone();
     let sudo_destination = destination.clone();
+    let options = options.unwrap_or_default();
+    let sudo_options = options.clone();
     let operation_state = operation_state.inner().clone();
     let cleanup_operation_state = operation_state.clone();
     let native_app = app.clone();
@@ -657,6 +660,7 @@ pub async fn archive_items(
                 &paths,
                 &destination,
                 overwrite,
+                &options,
                 |progress| {
                     emit_file_operation_progress(
                         &native_app,
@@ -672,7 +676,13 @@ pub async fn archive_items(
         move |password| {
             sudo_operation_state.checkpoint(&sudo_job_id, None)?;
             emit_file_operation_status(&sudo_app, &sudo_job_id, "archive", "running");
-            sudo::archive_items(&password, &sudo_paths, &sudo_destination, overwrite)
+            sudo::archive_items(
+                &password,
+                &sudo_paths,
+                &sudo_destination,
+                overwrite,
+                &sudo_options,
+            )
         },
     )
     .await;
