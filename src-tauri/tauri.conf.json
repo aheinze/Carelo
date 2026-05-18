@@ -1,0 +1,73 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Carelo",
+  "version": "0.1.0",
+  "identifier": "dev.carelo.filemanager",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1422",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Carelo",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "decorations": false,
+        "shadow": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/**",
+          "$PICTURE/**",
+          "$DESKTOP/**",
+          "$DOCUMENT/**",
+          "$DOWNLOAD/**",
+          "$VIDEO/**",
+          "$TEMP/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm"],
+    "publisher": "Carelo Contributors",
+    "copyright": "Copyright © 2026 Carelo Contributors",
+    "license": "Proprietary",
+    "category": "Utility",
+    "shortDescription": "A modern dual-pane file manager.",
+    "longDescription": "Carelo is a modern dual-pane file manager for developers and infrastructure operators.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/share/metainfo/dev.carelo.filemanager.metainfo.xml": "linux/dev.carelo.filemanager.metainfo.xml"
+        },
+        "section": "utils",
+        "priority": "optional"
+      },
+      "rpm": {
+        "files": {
+          "/usr/share/metainfo/dev.carelo.filemanager.metainfo.xml": "linux/dev.carelo.filemanager.metainfo.xml"
+        },
+        "release": "4"
+      }
+    }
+  }
+}

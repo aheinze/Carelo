@@ -1,0 +1,41 @@
+[package]
+name = "carelo"
+version = "0.1.0"
+description = "A modern dual-pane file manager for developers and infrastructure operators."
+authors = ["Carelo Contributors"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "carelo_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+opendal = { version = "0.56", features = [
+    "services-b2",
+    "services-dropbox",
+    "services-fs",
+    "services-ftp",
+    "services-gdrive",
+    "services-memory",
+    "services-onedrive",
+    "services-s3",
+    "services-sftp",
+    "services-swift",
+    "services-webdav",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+libc = "0.2"
+base64 = "0.22"
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+url = "2"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }

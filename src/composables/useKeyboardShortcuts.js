@@ -1,0 +1,1032 @@
+import { onMounted, onUnmounted } from 'vue';
+import {
+  createFolder,
+  deleteItems,
+  getFileMetadata,
+  openWithDefaultApp,
+} from './useFileOperations';
+import { useDialog } from './useDialog';
+import {
+  joinPath,
+  useFileTransferGuards,
+} from './useFileTransferGuards';
+import { useShortcutsModal } from './useShortcutsModal';
+import { useFileManagerStore } from '../stores/fileManagerStore';
+
+let fileClipboard = null;
+const FILE_CLIPBOARD_STORAGE_KEY = 'carelo.fileClipboard';
+const FILE_CLIPBOARD_MODES = new Set(['copy', 'move']);
+
+function isCommand(event) {
+  return event.metaKey || event.ctrlKey;
+}
+
+function isEditableTarget(target) {
+  return Boolean(
+    target?.closest?.('input, textarea, select, [contenteditable="true"], .terminal-panel'),
+  );
+}
+
+function otherPaneId(paneId) {
+  return paneId === 'left' ? 'right' : 'left';
+}
+
+function nameFromPath(path) {
+  const value = String(path || '').replace(/\/+$/, '');
+
+  if (!value || value === '/' || value === '~') {
+    return value || '';
+  }
+
+  if (value.startsWith('remote://')) {
+    const parts = value.slice('remote://'.length).split('/').filter(Boolean);
+    return parts.at(-1) || parts[0] || value;
+  }
+
+  return value.split('/').filter(Boolean).at(-1) || value;
+}
+
+function normalizeClipboardPath(path) {
+  return String(path || '').trim().replace(/\/+$/, '') || '/';
+}
+
+function clipboardUriForPath(path) {
+  const value = String(path || '');
+
+  if (value.startsWith('remote://')) {
+    return value;
+  }
+
+  return `file://${value.split('/').map((part) => encodeURIComponent(part)).join('/')}`;
+}
+
+function clipboardTextForEntries(mode, entries) {
+  const action = mode === 'move' ? 'cut' : 'copy';
+  const fileUris = entries.map((entry) => clipboardUriForPath(entry.path));
+
+  return ['x-special/gnome-copied-files', action, ...fileUris].join('\n');
+}
+
+function samePathList(paths, entries) {
+  const left = paths.map(normalizeClipboardPath);
+  const right = entries.map((entry) => normalizeClipboardPath(entry.path));
+
+  return left.length === right.length && left.every((path, index) => path === right[index]);
+}
+
+function stripClipboardLine(line) {
+  const trimmed = String(line || '').trim();
+
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+
+  return trimmed;
+}
+
+function pathFromClipboardLine(line) {
+  const value = stripClipboardLine(line);
+
+  if (!value) {
+    return '';
+  }
+
+  if (value.startsWith('file://')) {
+    try {
+      return decodeURIComponent(new URL(value).pathname);
+    } catch {
+      return decodeURIComponent(value.replace(/^file:\/\//, ''));
+    }
+  }
+
+  if (value.startsWith('/') || value.startsWith('~/') || value === '~' || value.startsWith('remote://')) {
+    return value;
+  }
+
+  return '';
+}
+
+function parseClipboardText(text) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return null;
+  }
+
+  let mode = 'copy';
+  let pathLines = lines;
+
+  if (lines[0] === 'x-special/gnome-copied-files') {
+    mode = lines[1] === 'cut' ? 'move' : 'copy';
+    pathLines = lines.slice(2);
+  } else if (lines[0] === 'copy' || lines[0] === 'cut') {
+    mode = lines[0] === 'cut' ? 'move' : 'copy';
+    pathLines = lines.slice(1);
+  }
+
+  const paths = [...new Set(pathLines.map(pathFromClipboardLine).filter(Boolean))];
+
+  return paths.length > 0 ? { mode, paths } : null;
+}
+
+function storedClipboard() {
+  try {
+    const parsed = JSON.parse(window.localStorage?.getItem(FILE_CLIPBOARD_STORAGE_KEY) || 'null');
+
+    if (!parsed || !FILE_CLIPBOARD_MODES.has(parsed.mode) || !Array.isArray(parsed.entries)) {
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function storeClipboard(payload) {
+  try {
+    window.localStorage?.setItem(FILE_CLIPBOARD_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // Clipboard still works in memory if persistence is unavailable.
+  }
+}
+
+function clearStoredClipboard() {
+  try {
+    window.localStorage?.removeItem(FILE_CLIPBOARD_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+}
+
+async function clipboardEntryFromPath(path) {
+  const metadata = await getFileMetadata(path);
+
+  return {
+    name: nameFromPath(metadata.path || path),
+    path: metadata.path || path,
+    kind: metadata.kind || 'file',
+    size: metadata.size,
+    modifiedAt: metadata.modifiedAt,
+    isHidden: metadata.isHidden,
+    isSymlink: metadata.isSymlink,
+    isReadonly: metadata.isReadonly,
+  };
+}
+
+async function entriesFromClipboardPaths(paths) {
+  const settled = await Promise.allSettled(paths.map((path) => clipboardEntryFromPath(path)));
+
+  return settled
+    .filter((result) => result.status === 'fulfilled')
+    .map((result) => result.value);
+}
+
+function focusSearch() {
+  const input = document.querySelector('[data-search-field]');
+
+  if (input) {
+    input.focus();
+    input.select?.();
+  }
+}
+
+function dispatchSelectedContextMenu(store) {
+  const tab = store.activeTabFor(store.activePaneId);
+  const index = tab?.selectedIndex ?? -1;
+  const row = document.querySelector(`.pane--active [data-file-index="${index}"]`);
+  const rect = row?.getBoundingClientRect();
+
+  if (!row || !rect) {
+    return;
+  }
+
+  row.dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true,
+    cancelable: true,
+    clientX: rect.left + 28,
+    clientY: rect.top + Math.min(rect.height - 4, 22),
+  }));
+}
+
+function shortcutHelpText() {
+  return [
+    'F3 Preview, F4 Open, F5 Copy, F6 Move, F7 New Folder, F8/Delete Delete',
+    'Ctrl+C Copy, Ctrl+X Cut, Ctrl+V Paste, Shift+F6 Rename, F2/Ctrl+R Refresh',
+    'Tab Switch Pane, Alt+Left/Right History, Ctrl+\\ Root, Ctrl+PageUp Parent',
+    'Insert/Space Toggle Selection, Ctrl+A/Num+ Select All, Num- Clear, Num* Invert',
+    'Ctrl+F1 Grid, Ctrl+F2 List, Ctrl+F3 Name, Ctrl+F4 Extension, Ctrl+F5 Date, Ctrl+F6 Size, Ctrl+F7 Unsorted',
+  ].join('\n');
+}
+
+export function useKeyboardShortcuts() {
+  const store = useFileManagerStore();
+  const dialog = useDialog();
+  const transfers = useFileTransferGuards();
+  const shortcutsModal = useShortcutsModal();
+
+  function activePane() {
+    return store.activePaneId;
+  }
+
+  function activeTab() {
+    return store.activeTabFor(activePane());
+  }
+
+  function currentPath(paneId = activePane()) {
+    return store.effectiveDirectoryFor(paneId) || store.activeTabFor(paneId)?.currentPath || '~';
+  }
+
+  function operationEntries() {
+    return store.operationEntriesFor(activePane());
+  }
+
+  async function reloadPane(paneId = activePane()) {
+    await store.reloadDirectoryInPanes(currentPath(paneId), [paneId]);
+  }
+
+  function parentDirectoriesForEntries(entries) {
+    return [...new Set(
+      entries
+        .map((entry) => store.parentDirectoryFor(entry.path))
+        .filter(Boolean),
+    )];
+  }
+
+  async function refreshDirectories(paths, paneIds = null) {
+    const uniquePaths = [...new Set(paths.filter(Boolean))];
+
+    await Promise.all(uniquePaths.map((path) => store.reloadDirectoryInPanes(path, paneIds)));
+  }
+
+  async function reloadTransferPanes(sourcePaneId, targetPaneId, paths = []) {
+    const paneIds = [...new Set([sourcePaneId, targetPaneId].filter(Boolean))];
+
+    if (paths.length > 0) {
+      await refreshDirectories(paths, paneIds);
+      return;
+    }
+
+    await Promise.all(paneIds.map((paneId) => reloadPane(paneId)));
+  }
+
+  async function copyToDirectory(targetDirectory, options = {}) {
+    const paneId = activePane();
+    const entries = operationEntries();
+
+    if (entries.length === 0 || !targetDirectory) {
+      return;
+    }
+
+    let nameForEntry = null;
+
+    if (options.promptRename && entries.length === 1) {
+      const nextName = (await dialog.prompt({
+        title: 'Copy Item',
+        message: entries[0].name,
+        inputLabel: 'Copy as',
+        inputValue: entries[0].name,
+        confirmLabel: 'Copy',
+      }))?.trim();
+
+      if (!nextName) {
+        return;
+      }
+
+      nameForEntry = () => nextName;
+    }
+
+    const copied = await transfers.copyEntries({
+      entries,
+      targetDirectory,
+      nameForEntry,
+    });
+
+    if (copied) {
+      await reloadTransferPanes(paneId, options.targetPaneId || paneId, [targetDirectory]);
+    }
+  }
+
+  async function moveToDirectory(targetDirectory) {
+    const paneId = activePane();
+    const entries = operationEntries();
+
+    if (entries.length === 0 || !targetDirectory) {
+      return;
+    }
+
+    const moved = await transfers.moveEntries({
+      entries,
+      targetDirectory,
+    });
+
+    if (moved) {
+      await reloadTransferPanes(paneId, otherPaneId(paneId), [
+        targetDirectory,
+        ...parentDirectoriesForEntries(entries),
+      ]);
+    }
+  }
+
+  async function renameFocused() {
+    const paneId = activePane();
+    const entry = store.selectedEntryFor(paneId);
+
+    if (!entry) {
+      return;
+    }
+
+    const nextName = (await dialog.prompt({
+      title: 'Rename Item',
+      message: entry.name,
+      inputLabel: 'Name',
+      inputValue: entry.name,
+      confirmLabel: 'Rename',
+    }))?.trim();
+
+    if (!nextName || nextName === entry.name) {
+      return;
+    }
+
+    const renamed = await transfers.renameEntry(entry, nextName);
+
+    if (renamed) {
+      await refreshDirectories([store.parentDirectoryFor(entry.path)]);
+    }
+  }
+
+  async function createDirectory(targetPaneId = activePane(), seedName = 'New Folder') {
+    const targetDirectory = currentPath(targetPaneId);
+    const name = (await dialog.prompt({
+      title: 'Create Folder',
+      icon: 'folder',
+      inputLabel: 'Folder name',
+      inputValue: seedName,
+      confirmLabel: 'Create',
+      inputRequired: true,
+    }))?.trim();
+
+    if (!name || !targetDirectory) {
+      return;
+    }
+
+    await createFolder(joinPath(targetDirectory, name));
+    await refreshDirectories([targetDirectory], [targetPaneId]);
+  }
+
+  async function deleteSelected() {
+    const paneId = activePane();
+    const entries = operationEntries();
+
+    if (entries.length === 0) {
+      return;
+    }
+
+    const label = entries.length === 1 ? `"${entries[0].name}"` : `${entries.length} items`;
+
+    const confirmed = await dialog.confirm({
+      title: 'Delete Items',
+      message: `Delete ${label}?`,
+      detail: 'This cannot be undone from inside the app.',
+      confirmLabel: 'Delete',
+      variant: 'danger',
+      destructive: true,
+    });
+
+    if (!confirmed) {
+      return;
+    }
+
+    const touchedDirectories = parentDirectoriesForEntries(entries);
+    await deleteItems(entries.map((entry) => entry.path));
+    store.clearSelection(paneId);
+    await refreshDirectories(touchedDirectories);
+  }
+
+  async function openFocusedExternally() {
+    const entry = store.selectedEntryFor(activePane());
+
+    if (!entry) {
+      return;
+    }
+
+    if (entry.kind === 'directory') {
+      store.openSelectedEntry(activePane());
+      return;
+    }
+
+    await openWithDefaultApp(entry.path);
+  }
+
+  function previewFocused() {
+    if (!store.previewPanelVisible) {
+      store.togglePreviewPanel(true);
+    }
+  }
+
+  async function readSystemClipboardText() {
+    if (!navigator.clipboard?.readText) {
+      return null;
+    }
+
+    try {
+      return await navigator.clipboard.readText();
+    } catch {
+      return null;
+    }
+  }
+
+  function clipboardPayloadForEntries(mode, entries, sourcePaneId = activePane()) {
+    return {
+      mode,
+      sourcePaneId,
+      entries: entries.map((entry) => ({
+        name: entry.name,
+        path: entry.path,
+        kind: entry.kind,
+        size: entry.size,
+        modifiedAt: entry.modifiedAt,
+        isHidden: entry.isHidden,
+        isSymlink: entry.isSymlink,
+        isReadonly: entry.isReadonly,
+      })),
+    };
+  }
+
+  async function setClipboard(mode) {
+    const entries = operationEntries();
+
+    if (!FILE_CLIPBOARD_MODES.has(mode) || entries.length === 0) {
+      return;
+    }
+
+    fileClipboard = clipboardPayloadForEntries(mode, entries);
+    storeClipboard(fileClipboard);
+
+    navigator.clipboard?.writeText(clipboardTextForEntries(mode, entries)).catch(() => {});
+  }
+
+  async function clipboardPayloadFromSystemText(text) {
+    const parsed = parseClipboardText(text);
+
+    if (!parsed) {
+      return null;
+    }
+
+    const stored = storedClipboard();
+
+    if (stored && samePathList(parsed.paths, stored.entries)) {
+      return stored;
+    }
+
+    if (fileClipboard && samePathList(parsed.paths, fileClipboard.entries)) {
+      return fileClipboard;
+    }
+
+    const entries = await entriesFromClipboardPaths(parsed.paths);
+
+    if (entries.length === 0) {
+      return null;
+    }
+
+    return clipboardPayloadForEntries(parsed.mode || 'copy', entries, null);
+  }
+
+  async function currentClipboardPayload() {
+    const clipboardText = await readSystemClipboardText();
+
+    if (clipboardText !== null) {
+      const parsed = await clipboardPayloadFromSystemText(clipboardText);
+
+      if (parsed) {
+        fileClipboard = parsed;
+        return parsed;
+      }
+
+      return null;
+    }
+
+    return fileClipboard || storedClipboard();
+  }
+
+  async function pasteClipboard() {
+    const clipboardPayload = await currentClipboardPayload();
+
+    if (!clipboardPayload?.entries?.length) {
+      return;
+    }
+
+    const targetPaneId = activePane();
+    const targetDirectory = currentPath();
+    if (clipboardPayload.mode === 'move') {
+      const moved = await transfers.moveEntries({
+        entries: clipboardPayload.entries,
+        targetDirectory,
+      });
+
+      if (moved) {
+        await reloadTransferPanes(clipboardPayload.sourcePaneId, targetPaneId, [
+          targetDirectory,
+          ...parentDirectoriesForEntries(clipboardPayload.entries),
+        ]);
+        fileClipboard = null;
+        clearStoredClipboard();
+      }
+    } else {
+      const copied = await transfers.copyEntries({
+        entries: clipboardPayload.entries,
+        targetDirectory,
+      });
+
+      if (copied) {
+        await refreshDirectories([targetDirectory], [targetPaneId]);
+      }
+    }
+  }
+
+  function copyFocusedName(fullPath = false) {
+    const entry = store.selectedEntryFor(activePane());
+    const value = fullPath ? entry?.path : entry?.name;
+
+    if (value) {
+      navigator.clipboard?.writeText(value).catch(() => {});
+    }
+  }
+
+  function copyCurrentPath() {
+    navigator.clipboard?.writeText(currentPath()).catch(() => {});
+  }
+
+  function createTabFromFocused() {
+    const entry = store.selectedEntryFor(activePane());
+
+    if (entry?.kind === 'directory') {
+      store.addPaneTab(activePane(), entry.path);
+    } else {
+      store.addPaneTab(activePane());
+    }
+  }
+
+  async function handleShortcut(event) {
+    if (isEditableTarget(event.target)) {
+      return;
+    }
+
+    const key = event.key;
+    const code = event.code;
+    const lowerKey = key.toLowerCase();
+    const command = isCommand(event);
+    const onlyCommand = command && !event.altKey && !event.shiftKey;
+    const paneId = activePane();
+    const targetPaneId = otherPaneId(paneId);
+    const targetPath = currentPath(targetPaneId);
+
+    try {
+      if (command && key === 'Tab') {
+        event.preventDefault();
+        store.activateAdjacentTab(paneId, event.shiftKey ? -1 : 1);
+        return;
+      }
+
+      if (event.altKey && !command && key === 'F1') {
+        event.preventDefault();
+        store.setActivePane('left');
+        return;
+      }
+
+      if (event.altKey && !command && key === 'F2') {
+        event.preventDefault();
+        store.setActivePane('right');
+        return;
+      }
+
+      if (event.altKey && !command && key === 'F7') {
+        event.preventDefault();
+        focusSearch();
+        return;
+      }
+
+      if (onlyCommand && key === 'F1') {
+        event.preventDefault();
+        store.setPaneView(paneId, 'grid');
+        return;
+      }
+
+      if (onlyCommand && key === 'F2') {
+        event.preventDefault();
+        store.setPaneView(paneId, 'list');
+        return;
+      }
+
+      if (onlyCommand && key === 'F3') {
+        event.preventDefault();
+        store.setPaneSortKey(paneId, 'name');
+        return;
+      }
+
+      if (onlyCommand && key === 'F4') {
+        event.preventDefault();
+        store.setPaneSortKey(paneId, 'extension');
+        return;
+      }
+
+      if (onlyCommand && key === 'F5') {
+        event.preventDefault();
+        store.setPaneSortKey(paneId, 'modifiedAt');
+        return;
+      }
+
+      if (onlyCommand && key === 'F6') {
+        event.preventDefault();
+        store.setPaneSortKey(paneId, 'size');
+        return;
+      }
+
+      if (onlyCommand && key === 'F7') {
+        event.preventDefault();
+        store.setPaneSortKey(paneId, 'none');
+        return;
+      }
+
+      if (key === 'Tab') {
+        event.preventDefault();
+        store.switchActivePane();
+        return;
+      }
+
+      if (event.shiftKey && key === 'Tab') {
+        event.preventDefault();
+        store.switchActivePane();
+        return;
+      }
+
+      if (key === 'ArrowUp') {
+        event.preventDefault();
+        store.moveSelection(paneId, -1, { extend: event.shiftKey });
+        return;
+      }
+
+      if (key === 'ArrowDown') {
+        event.preventDefault();
+        store.moveSelection(paneId, 1, { extend: event.shiftKey });
+        return;
+      }
+
+      if (key === 'Enter' && !event.altKey && !command) {
+        event.preventDefault();
+        await openFocusedExternally();
+        return;
+      }
+
+      if (key === 'Backspace' && !event.altKey && !command) {
+        event.preventDefault();
+        store.goToParent(paneId);
+        return;
+      }
+
+      if (key === 'F1') {
+        event.preventDefault();
+        shortcutsModal.show();
+        return;
+      }
+
+      if (key === 'F2' || (onlyCommand && lowerKey === 'r')) {
+        event.preventDefault();
+        await reloadPane();
+        return;
+      }
+
+      if (key === 'F3') {
+        event.preventDefault();
+        previewFocused();
+        return;
+      }
+
+      if (key === 'F4') {
+        event.preventDefault();
+        await openFocusedExternally();
+        return;
+      }
+
+      if (key === 'F5' && event.shiftKey && !command && !event.altKey) {
+        event.preventDefault();
+        await copyToDirectory(currentPath(), { promptRename: true });
+        return;
+      }
+
+      if (key === 'F5' && !command && !event.altKey) {
+        event.preventDefault();
+        await copyToDirectory(targetPath, { targetPaneId });
+        return;
+      }
+
+      if (key === 'F6' && event.shiftKey && !command && !event.altKey) {
+        event.preventDefault();
+        await renameFocused();
+        return;
+      }
+
+      if (key === 'F6' && !command && !event.altKey) {
+        event.preventDefault();
+        await moveToDirectory(targetPath);
+        return;
+      }
+
+      if (key === 'F7' && event.shiftKey && !command && !event.altKey) {
+        event.preventDefault();
+        await createDirectory(targetPaneId, store.selectedEntryFor(paneId)?.name || 'New Folder');
+        return;
+      }
+
+      if (key === 'F7' && !command && !event.altKey) {
+        event.preventDefault();
+        await createDirectory();
+        return;
+      }
+
+      if (key === 'F8' || key === 'Delete') {
+        event.preventDefault();
+        await deleteSelected();
+        return;
+      }
+
+      if ((key === 'F10' && event.shiftKey) || key === 'ContextMenu') {
+        event.preventDefault();
+        dispatchSelectedContextMenu(store);
+        return;
+      }
+
+      if (event.altKey && key === 'ArrowLeft') {
+        event.preventDefault();
+        store.goBack();
+        return;
+      }
+
+      if (event.altKey && key === 'ArrowRight') {
+        event.preventDefault();
+        store.goForward();
+        return;
+      }
+
+      if (event.altKey && key === 'Enter') {
+        event.preventDefault();
+        if (!store.previewPanelVisible) {
+          store.togglePreviewPanel(true);
+        }
+        return;
+      }
+
+      if (onlyCommand && key === '[') {
+        event.preventDefault();
+        store.goBack();
+        return;
+      }
+
+      if (onlyCommand && key === ']') {
+        event.preventDefault();
+        store.goForward();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'b') {
+        event.preventDefault();
+        store.toggleSidebar();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'i') {
+        event.preventDefault();
+        if (event.ctrlKey && !event.metaKey) {
+          store.switchActivePane();
+        } else {
+          store.togglePreviewPanel();
+        }
+        return;
+      }
+
+      if (onlyCommand && key === '`') {
+        event.preventDefault();
+        store.toggleTerminalPanel();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'f') {
+        event.preventDefault();
+        focusSearch();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 's') {
+        event.preventDefault();
+        focusSearch();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 't') {
+        event.preventDefault();
+        store.addPaneTab(paneId);
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'w') {
+        event.preventDefault();
+        store.closeActivePaneTab();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'u') {
+        event.preventDefault();
+        store.swapPanes();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'q') {
+        event.preventDefault();
+        store.togglePreviewPanel();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'p') {
+        event.preventDefault();
+        copyCurrentPath();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'm') {
+        event.preventDefault();
+        await renameFocused();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'c') {
+        event.preventDefault();
+        await setClipboard('copy');
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'x') {
+        event.preventDefault();
+        await setClipboard('move');
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'v') {
+        event.preventDefault();
+        await pasteClipboard();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'a') {
+        event.preventDefault();
+        store.selectAllEntries(paneId);
+        return;
+      }
+
+      if (onlyCommand && key === '.') {
+        event.preventDefault();
+        store.toggleHiddenFiles();
+        return;
+      }
+
+      if (command && key === 'Enter') {
+        event.preventDefault();
+        copyFocusedName(event.shiftKey);
+        return;
+      }
+
+      if (command && key === 'Insert') {
+        event.preventDefault();
+        await setClipboard('copy');
+        return;
+      }
+
+      if (event.shiftKey && key === 'Insert') {
+        event.preventDefault();
+        await pasteClipboard();
+        return;
+      }
+
+      if (onlyCommand && key === '\\') {
+        event.preventDefault();
+        store.setPanePath(paneId, '/');
+        return;
+      }
+
+      if (command && key === 'PageUp') {
+        event.preventDefault();
+        store.goToParent(paneId);
+        return;
+      }
+
+      if (command && key === 'PageDown') {
+        event.preventDefault();
+        store.openSelectedEntry(paneId);
+        return;
+      }
+
+      if (command && key === 'ArrowLeft') {
+        event.preventDefault();
+        store.openFocusedDirectoryInOtherPane(paneId);
+        return;
+      }
+
+      if (command && key === 'ArrowRight') {
+        event.preventDefault();
+        store.openFocusedDirectoryInOtherPane(paneId);
+        return;
+      }
+
+      if (command && key === 'ArrowUp') {
+        event.preventDefault();
+        createTabFromFocused();
+        return;
+      }
+
+      if (key === 'Insert' || key === ' ') {
+        event.preventDefault();
+        store.toggleEntrySelection(paneId, null, key === 'Insert');
+        return;
+      }
+
+      if (key === 'Home') {
+        event.preventDefault();
+        store.selectFirstEntry(paneId, { extend: event.shiftKey });
+        return;
+      }
+
+      if (key === 'End') {
+        event.preventDefault();
+        store.selectLastEntry(paneId, { extend: event.shiftKey });
+        return;
+      }
+
+      if (key === 'PageUp') {
+        event.preventDefault();
+        store.pageSelection(paneId, -1, { extend: event.shiftKey });
+        return;
+      }
+
+      if (key === 'PageDown') {
+        event.preventDefault();
+        store.pageSelection(paneId, 1, { extend: event.shiftKey });
+        return;
+      }
+
+      if (code === 'NumpadAdd' || key === '+') {
+        event.preventDefault();
+        if (event.altKey) {
+          store.selectEntriesWithFocusedExtension(paneId, true);
+        } else {
+          store.selectAllEntries(paneId);
+        }
+        return;
+      }
+
+      if (code === 'NumpadSubtract' || key === '-') {
+        event.preventDefault();
+        if (event.altKey) {
+          store.selectEntriesWithFocusedExtension(paneId, false);
+        } else {
+          store.clearSelection(paneId);
+        }
+        return;
+      }
+
+      if (code === 'NumpadMultiply' || key === '*') {
+        event.preventDefault();
+        store.invertSelection(paneId);
+        return;
+      }
+
+      if (code === 'NumpadDivide' || key === '/') {
+        event.preventDefault();
+        store.clearSelection(paneId);
+      }
+    } catch (error) {
+      console.error(error);
+      await dialog.alert({
+        title: 'Shortcut Action Failed',
+        message: error?.message || 'The requested shortcut action could not be completed.',
+        variant: 'warning',
+      });
+    }
+  }
+
+  function handleKeydown(event) {
+    handleShortcut(event);
+  }
+
+  onMounted(() => {
+    window.addEventListener('keydown', handleKeydown);
+  });
+
+  onUnmounted(() => {
+    window.removeEventListener('keydown', handleKeydown);
+  });
+}

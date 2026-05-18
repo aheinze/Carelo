@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.carelo.filemanager</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-Proprietary</project_license>
+  <name>Carelo</name>
+  <summary>Modern dual-pane file manager</summary>
+  <description>
+    <p>Carelo is a modern dual-pane file manager for developers and infrastructure operators.</p>
+  </description>
+  <launchable type="desktop-id">Carelo.desktop</launchable>
+  <categories>
+    <category>Utility</category>
+    <category>FileManager</category>
+  </categories>
+  <provides>
+    <binary>carelo</binary>
+  </provides>
+  <developer id="dev.carelo">
+    <name>Carelo Contributors</name>
+  </developer>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-05-17" />
+  </releases>
+</component>

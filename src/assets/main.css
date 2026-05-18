@@ -1,0 +1,613 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    "Segoe UI",
+    system-ui,
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+
+  /* Desktop and macOS-style window surfaces */
+  --desktop-bg: #151619;
+
+  /* macOS Dark surface hierarchy */
+  --window-glass:  #2a2e2c;
+  --chrome-glass:  #2b2f2d;
+  --sidebar-glass: #484c49;
+  --pane-glass:    #282d2a;
+  --control-glass: #353936;
+
+  /* Borders */
+  --control-border: rgb(255 255 255 / 0.08);
+  --hairline:       rgb(255 255 255 / 0.07);
+  --hairline-dark:  rgb(0 0 0 / 0.58);
+  --separator:      #181b1a;
+
+  /* Text — Apple system label colors */
+  --text:       rgb(247 247 242 / 0.88);
+  --text-muted: rgb(238 239 232 / 0.62);
+  --text-faint: rgb(238 239 232 / 0.36);
+  --icon:       rgb(238 239 232 / 0.50);
+
+  /* Accent — macOS systemBlue (dark) */
+  --accent:      #0a84ff;
+  --accent-dim:  rgb(10 132 255 / 0.18);
+  --accent-warm: #5e5ce6;   /* systemIndigo dark */
+
+  /* Status — Apple system colors (dark) */
+  --blue:    #0a84ff;
+  --danger:  #ff453a;
+  --warning: #ff9f0a;
+  --success: #32d74b;
+
+  /* File icons */
+  --folder-icon: #0a84ff;
+  --file-icon:   rgb(235 235 245 / 0.55);
+  --focus:       #0a84ff;
+
+  /* Shadow — stronger, blacker for OLED feel */
+  --shadow:
+    0 0 0 1px rgb(255 255 255 / 0.05),
+    0 34px 110px rgb(0 0 0 / 0.58),
+    0 12px 38px rgb(0 0 0 / 0.38);
+
+  /* ── Raw channel values for opacity composition ─────────── */
+  --accent-rgb:  10 132 255;
+  --danger-rgb:  255 69 58;
+  --warning-rgb: 255 159 10;
+
+  /* ── Base void / body ────────────────────────────────────── */
+  --void:    #181a19;
+  --body-bg: #151619;
+
+  /* ── Named surface gradients ─────────────────────────────── */
+  --sidebar-bg:    #1e2220;
+  --toolbar-bg:    #2c302e;
+  --footer-bg:     #252927;
+  --chrome-bar-bg: #2c302e;
+  --modal-bg:      linear-gradient(160deg, #2c2c2e 0%, #232325 100%);
+  --popover-bg:    #2c2c2e;
+
+  /* ── Overlay backdrop ────────────────────────────────────── */
+  --overlay-bg: rgb(0 0 0 / 0.65);
+
+  /* ── Overlay / modal shadow ──────────────────────────────── */
+  --shadow-overlay:
+    0 0 0 0.5px rgb(0 0 0 / 0.85),
+    0 32px 96px  rgb(0 0 0 / 0.85),
+    0 8px  28px  rgb(0 0 0 / 0.55);
+
+  /* ── Shared control (pill / search / nav-cluster) ────────── */
+  --control-bg:
+    linear-gradient(180deg, rgb(255 255 255 / 0.10), rgb(255 255 255 / 0.03)),
+    var(--control-glass);
+  --control-inset:
+    inset 0 1px 0 rgb(255 255 255 / 0.12),
+    inset 0 -1px 0 rgb(0 0 0 / 0.35),
+    0 1px 3px rgb(0 0 0 / 0.35);
+
+  /* ── Text input / select (subtle well appearance) ─────────── */
+  --input-bg:     rgb(0 0 0 / 0.18);
+  --input-border: rgb(255 255 255 / 0.09);
+  --input-shadow: inset 0 1px 3px rgb(0 0 0 / 0.28);
+
+  /* ── Button states ───────────────────────────────────────── */
+  --btn-hover:  rgb(255 255 255 / 0.06);
+  --btn-active-bg:
+    linear-gradient(180deg, rgb(255 255 255 / 0.10), rgb(255 255 255 / 0.04)),
+    rgb(255 255 255 / 0.05);
+  --btn-active-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.12),
+    0 1px 3px rgb(0 0 0 / 0.3);
+
+  /* ── Primary (accent) button ─────────────────────────────── */
+  --btn-primary-bg:
+    linear-gradient(180deg, #0a8eff, #0062d6);
+  --btn-primary-bg-hover:
+    linear-gradient(180deg, #1a98ff, #0070e8);
+  --btn-primary-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.22),
+    0 2px 8px rgb(10 132 255 / 0.40);
+
+  /* ── Danger button ───────────────────────────────────────── */
+  --btn-danger-bg:
+    linear-gradient(180deg, #e8382d, #b52a21);
+  --btn-danger-bg-hover:
+    linear-gradient(180deg, #f04035, #c22e24);
+  --btn-danger-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.16),
+    0 2px 8px rgb(255 69 58 / 0.35);
+
+  /* ── Accent tints ────────────────────────────────────────── */
+  --accent-border:     rgb(10 132 255 / 0.55);
+  --accent-glow:       rgb(10 132 255 / 0.16);
+  --accent-focus-ring: 0 0 0 3px rgb(10 132 255 / 0.22);
+
+  /* ── Window traffic lights ───────────────────────────────── */
+  --traffic-close:    #ff5f57;
+  --traffic-minimize: #ffbd2e;
+  --traffic-zoom:     #28c840;
+
+  /* ── Terminal palette — aligned with app chrome ─────────── */
+  --term-bg:           #222725;
+  --term-surface:      #252a27;
+  --term-header-bg:    #2c302e;
+  --term-fg:           #e6e7df;
+  --term-cursor:       #78a8ff;
+  --term-selection:    rgba(96, 144, 210, 0.32);
+  --term-selection-ia: rgba(238, 239, 232, 0.12);
+  --term-black:        #151916;
+  --term-red:          #ff6f63;
+  --term-green:        #66d66f;
+  --term-yellow:       #e7b751;
+  --term-blue:         #65a7ff;
+  --term-magenta:      #c086f2;
+  --term-cyan:         #79c8cf;
+  --term-white:        #e3e5dc;
+  --term-br-black:     #69716c;
+  --term-br-red:       #ff897f;
+  --term-br-green:     #7ce685;
+  --term-br-yellow:    #ffd36b;
+  --term-br-blue:      #83bbff;
+  --term-br-magenta:   #d19bff;
+  --term-br-cyan:      #8edbe2;
+  --term-br-white:     #f7f7f2;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    /* Desktop */
+    --desktop-bg: #d8ddd5;
+
+    /* macOS Light surface hierarchy — warm green-tinted to mirror dark theme */
+    --window-glass:  #f2f4f0;
+    --chrome-glass:  #f0f2ee;
+    --sidebar-glass: #dfe3db;
+    --pane-glass:    #f6f8f4;
+    --control-glass: #ffffff;
+
+    /* Borders */
+    --control-border: rgb(28 36 24 / 0.10);
+    --hairline:       rgb(28 36 24 / 0.08);
+    --hairline-dark:  rgb(28 36 24 / 0.16);
+    --separator:      #cdd2c8;
+
+    /* Text — warm dark */
+    --text:       rgb(20 24 18 / 0.90);
+    --text-muted: rgb(36 42 32 / 0.60);
+    --text-faint: rgb(36 42 32 / 0.36);
+    --icon:       rgb(36 42 32 / 0.50);
+
+    /* Accent — macOS systemBlue (light) */
+    --accent:      #007aff;
+    --accent-dim:  rgb(0 122 255 / 0.12);
+    --accent-warm: #5856d6;
+
+    /* Status */
+    --blue:    #007aff;
+    --danger:  #ff3b30;
+    --warning: #ff9500;
+    --success: #34c759;
+
+    /* File icons */
+    --folder-icon: #007aff;
+    --file-icon:   rgb(36 42 32 / 0.50);
+    --focus:       #007aff;
+
+    /* Shadow */
+    --shadow:
+      0 0 0 1px rgb(28 36 24 / 0.08),
+      0 30px 90px rgb(18 26 16 / 0.16),
+      0 10px 28px rgb(18 26 16 / 0.10);
+
+    /* Raw channel values for opacity composition */
+    --accent-rgb:  0 122 255;
+    --danger-rgb:  255 59 48;
+    --warning-rgb: 255 149 0;
+
+    /* Base void / body */
+    --void:    #e8ece5;
+    --body-bg: #d8ddd5;
+
+    /* Named surfaces */
+    --sidebar-bg:    #dde1da;
+    --toolbar-bg:    #eceeea;
+    --footer-bg:     #eceeea;
+    --chrome-bar-bg: #eceeea;
+    --modal-bg:      linear-gradient(160deg, #ffffff 0%, #f3f5f0 100%);
+    --popover-bg:    #ffffff;
+
+    /* Overlay backdrop */
+    --overlay-bg: rgb(18 26 16 / 0.24);
+
+    /* Overlay / modal shadow */
+    --shadow-overlay:
+      0 0 0 0.5px rgb(28 36 24 / 0.10),
+      0 28px 76px  rgb(18 26 16 / 0.20),
+      0 8px  24px  rgb(18 26 16 / 0.12);
+
+    /* Shared control */
+    --control-bg:
+      linear-gradient(180deg, rgb(255 255 255 / 0.90), rgb(244 247 241 / 0.80)),
+      var(--control-glass);
+    --control-inset:
+      inset 0 1px 0 rgb(255 255 255 / 0.94),
+      inset 0 -1px 0 rgb(28 36 24 / 0.05),
+      0 1px 3px rgb(18 26 16 / 0.08);
+
+    /* Text input / select */
+    --input-bg:     rgb(255 255 255 / 0.88);
+    --input-border: rgb(0 0 0 / 0.12);
+    --input-shadow: inset 0 1px 2px rgb(0 0 0 / 0.06);
+
+    /* Button states */
+    --btn-hover:  rgb(28 36 24 / 0.06);
+    --btn-active-bg:
+      linear-gradient(180deg, rgb(255 255 255 / 0.95), rgb(234 238 230 / 0.80)),
+      rgb(28 36 24 / 0.04);
+    --btn-active-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.94),
+      0 1px 3px rgb(18 26 16 / 0.10);
+
+    /* Primary (accent) button */
+    --btn-primary-bg:
+      linear-gradient(180deg, #1688ff, #006edb);
+    --btn-primary-bg-hover:
+      linear-gradient(180deg, #2f95ff, #007aff);
+    --btn-primary-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.30),
+      0 2px 8px rgb(0 122 255 / 0.26);
+
+    /* Danger button */
+    --btn-danger-bg:
+      linear-gradient(180deg, #ff4b40, #d82f26);
+    --btn-danger-bg-hover:
+      linear-gradient(180deg, #ff5c52, #e63a31);
+    --btn-danger-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.24),
+      0 2px 8px rgb(255 59 48 / 0.24);
+
+    /* Accent tints */
+    --accent-border:     rgb(0 122 255 / 0.38);
+    --accent-glow:       rgb(0 122 255 / 0.12);
+    --accent-focus-ring: 0 0 0 3px rgb(0 122 255 / 0.16);
+
+    /* Terminal palette — warm light */
+    --term-bg:           #f4f7f1;
+    --term-surface:      #ecf0e9;
+    --term-header-bg:    #e8ece5;
+    --term-fg:           #1c2218;
+    --term-cursor:       #005ecb;
+    --term-selection:    rgba(0, 122, 255, 0.20);
+    --term-selection-ia: rgba(20, 28, 18, 0.10);
+    --term-black:        #1c2218;
+    --term-red:          #d1242f;
+    --term-green:        #1a7f37;
+    --term-yellow:       #9a6700;
+    --term-blue:         #0969da;
+    --term-magenta:      #8250df;
+    --term-cyan:         #1b7c83;
+    --term-white:        #f4f7f1;
+    --term-br-black:     #52615a;
+    --term-br-red:       #cf222e;
+    --term-br-green:     #2da44e;
+    --term-br-yellow:    #bf8700;
+    --term-br-blue:      #218bff;
+    --term-br-magenta:   #a475f9;
+    --term-br-cyan:      #3192aa;
+    --term-br-white:     #ffffff;
+  }
+
+  * {
+    scrollbar-color: rgb(0 0 0 / 0.20) transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background:
+      linear-gradient(rgb(0 0 0 / 0.20), rgb(0 0 0 / 0.14))
+      padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background:
+      linear-gradient(rgb(0 0 0 / 0.32), rgb(0 0 0 / 0.22))
+      padding-box;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  scrollbar-color: rgb(255 255 255 / 0.24) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 40px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background:
+    linear-gradient(rgb(255 255 255 / 0.28), rgb(255 255 255 / 0.18))
+    padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background:
+    linear-gradient(rgb(255 255 255 / 0.42), rgb(255 255 255 / 0.28))
+    padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+@media (prefers-color-scheme: light) {
+  * {
+    scrollbar-color: rgb(15 23 42 / 0.22) transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background:
+      linear-gradient(rgb(15 23 42 / 0.24), rgb(15 23 42 / 0.16))
+      padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background:
+      linear-gradient(rgb(15 23 42 / 0.34), rgb(15 23 42 / 0.24))
+      padding-box;
+  }
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  min-width: 1100px;
+  background: var(--body-bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+body.is-panel-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.is-file-pointer-dragging,
+body.is-file-pointer-dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+
+body::before {
+  position: fixed;
+  inset: 0;
+  background: var(--desktop-bg);
+  content: "";
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ── App window ───────────────────────────────────────────── */
+.app-window {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--sidebar-width, 310px) 1px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+  height: 100%;
+  overflow: hidden;
+  border-radius: 12px;
+  padding: 0;
+  background: var(--pane-glass);
+  box-shadow:
+    inset 0 1px 0 var(--hairline),
+    var(--shadow);
+}
+
+.app-window--sidebar-hidden {
+  grid-template-columns: 0px 0px minmax(0, 1fr);
+}
+
+.app-window--sidebar-hidden .panel-resize-handle--sidebar,
+.workspace--preview-hidden .panel-resize-handle--preview {
+  pointer-events: none;
+}
+
+.app-window > .sidebar,
+.app-window > .main-shell,
+.app-window > .panel-resize-handle--sidebar {
+  grid-row: 1;
+}
+
+.app-window > .sidebar {
+  grid-column: 1;
+}
+
+.app-window > .panel-resize-handle--sidebar {
+  grid-column: 2;
+}
+
+.app-window > .main-shell {
+  grid-column: 3;
+}
+
+
+.panel-resize-handle {
+  position: relative;
+  z-index: 3;
+  min-width: 0;
+  min-height: 0;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.panel-resize-handle::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: var(--separator);
+  content: "";
+  transform: translateX(-50%);
+  transition: background 120ms ease, width 120ms ease;
+}
+
+.panel-resize-handle:hover::before {
+  width: 2px;
+  background: color-mix(in srgb, var(--text) 20%, transparent);
+}
+
+/* ── Shell layout ─────────────────────────────────────────── */
+.main-shell {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: 56px minmax(0, 1fr) 0 auto;
+  transition: grid-template-rows 160ms ease;
+}
+
+.main-shell--terminal-visible {
+  grid-template-rows: 56px minmax(0, 1fr) clamp(190px, var(--terminal-panel-height, 280px), 560px) auto;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 1px clamp(340px, var(--preview-panel-width, 400px), 520px);
+  min-height: 0;
+  padding-top: 0;
+  overflow: hidden;
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.workspace--preview-hidden {
+  grid-template-columns: minmax(0, 1fr) 0px 0px;
+}
+
+.pane-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, var(--left-pane-width, 48%)) 1px minmax(320px, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ── Utilities ─────────────────────────────────────────────── */
+.muted {
+  color: var(--text-muted);
+}
+
+.kbd {
+  display: inline-flex;
+  min-width: 20px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--control-border);
+  border-radius: 5px;
+  padding: 0 5px;
+  background: var(--control-bg);
+  box-shadow: var(--control-inset);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1;
+}
+
+/* ── Image thumbnail palette helpers ─────────────────────── */
+.visual-thumb {
+  background:
+    linear-gradient(160deg, rgb(255 255 255 / 0.2), rgb(255 255 255 / 0) 35%),
+    linear-gradient(135deg, #4bb2e3, #78d1f1);
+}
+
+.visual-thumb--air-balloon-jpg {
+  background:
+    radial-gradient(circle at 45% 29%, #ffe05b 0 5%, transparent 6%),
+    radial-gradient(ellipse at 42% 38%, #d8382f 0 8%, transparent 9%),
+    radial-gradient(ellipse at 52% 38%, #f4e6c8 0 8%, transparent 9%),
+    radial-gradient(ellipse at 62% 38%, #2277d7 0 8%, transparent 9%),
+    linear-gradient(180deg, #47a9d9, #b9e3f1);
+}
+
+.visual-thumb--beach-jpg {
+  background:
+    linear-gradient(160deg, rgb(249 165 88 / 0.75), transparent 42%),
+    linear-gradient(12deg, #24366d 0 30%, #cc5f89 31% 55%, #ff9a65 56% 69%, #33234d 70%);
+}
+
+.visual-thumb--bird-jpg {
+  background:
+    radial-gradient(circle at 68% 42%, #32b5de 0 5%, transparent 6%),
+    radial-gradient(circle at 72% 45%, #d97938 0 3%, transparent 4%),
+    linear-gradient(135deg, #2a361f, #647046 48%, #11170d);
+}
+
+.visual-thumb--blossom-jpg {
+  background:
+    radial-gradient(circle at 34% 56%, #ffc13f 0 5%, transparent 6%),
+    radial-gradient(circle at 46% 46%, #ffcf4c 0 5%, transparent 6%),
+    radial-gradient(circle at 58% 62%, #ef8f2d 0 5%, transparent 6%),
+    linear-gradient(145deg, #3b8e98, #d7eaa0);
+}
+
+.visual-thumb--desert-jpg {
+  background:
+    linear-gradient(170deg, #bfe3f3 0 38%, transparent 39%),
+    radial-gradient(ellipse at 58% 66%, #d78a42 0 28%, transparent 29%),
+    linear-gradient(150deg, #f0c27b, #9d5429);
+}
+
+.visual-thumb--forest-jpg {
+  background:
+    repeating-linear-gradient(100deg, #23381f 0 18px, #496a2f 19px 29px, #c4873c 30px 35px);
+}
+
+.visual-thumb--lake-jpg {
+  background:
+    linear-gradient(150deg, #bfd8f1 0 24%, #526c77 25% 38%, #e6eef6 39% 45%, #1f5e84 46% 63%, #73b6d1 64%);
+}
+
+.visual-thumb--mountains-jpg {
+  background:
+    linear-gradient(145deg, #d7ecff 0 32%, #4f99d3 33% 46%, #ecf5ff 47% 58%, #2472b8 59%);
+}
+
+.visual-thumb--red-field-jpg {
+  background:
+    radial-gradient(circle at 50% 34%, #53351e 0 10%, transparent 11%),
+    linear-gradient(170deg, #ec8c3c 0 32%, #24321f 33% 58%, #b41624 59%);
+}

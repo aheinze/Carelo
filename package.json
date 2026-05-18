@@ -1,0 +1,26 @@
+{
+  "name": "carelo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A modern dual-pane file manager for developers and infrastructure operators.",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "release": "tauri build --ci"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "pinia": "^3.0.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "vite": "^7.0.0"
+  }
+}
