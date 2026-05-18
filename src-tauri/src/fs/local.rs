@@ -131,12 +131,18 @@ impl LocalFileProvider {
     }
 
     fn copy_recursive(from: &Path, to: &Path, overwrite: bool) -> FsResult<()> {
-        let metadata = fs::metadata(from)
+        let symlink_metadata = fs::symlink_metadata(from)
             .map_err(|error| FsError::io("Unable to read source metadata", from, error))?;
 
         if !overwrite && Self::path_exists(to)? {
             return Err(Self::destination_exists_error(to));
         }
+
+        if symlink_metadata.file_type().is_symlink() {
+            return Self::copy_symlink(from, to, overwrite);
+        }
+
+        let metadata = symlink_metadata;
 
         if metadata.is_dir() {
             if overwrite && Self::path_exists(to)? {
@@ -160,12 +166,15 @@ impl LocalFileProvider {
         }
 
         if overwrite && Self::path_exists(to)? {
-            let target_metadata = fs::metadata(to)
+            let target_metadata = fs::symlink_metadata(to)
                 .map_err(|error| FsError::io("Unable to read destination metadata", to, error))?;
 
             if target_metadata.is_dir() {
                 return Err(Self::destination_type_error(to));
             }
+
+            fs::remove_file(to)
+                .map_err(|error| FsError::io("Unable to replace existing file", to, error))?;
         }
 
         fs::copy(from, to)
@@ -173,11 +182,31 @@ impl LocalFileProvider {
             .map_err(|error| FsError::io("Unable to copy file", from, error))
     }
 
+    fn copy_symlink(from: &Path, to: &Path, overwrite: bool) -> FsResult<()> {
+        if overwrite && Self::path_exists(to)? {
+            let target_metadata = fs::symlink_metadata(to)
+                .map_err(|error| FsError::io("Unable to read destination metadata", to, error))?;
+
+            if target_metadata.is_dir() && !target_metadata.file_type().is_symlink() {
+                return Err(Self::destination_type_error(to));
+            }
+
+            fs::remove_file(to).map_err(|error| {
+                FsError::io("Unable to replace existing symbolic link", to, error)
+            })?;
+        }
+
+        let target = fs::read_link(from)
+            .map_err(|error| FsError::io("Unable to read symbolic link", from, error))?;
+
+        create_symlink(&target, to, from)
+    }
+
     fn delete_path(path: &Path) -> FsResult<()> {
-        let metadata = fs::metadata(path)
+        let metadata = fs::symlink_metadata(path)
             .map_err(|error| FsError::io("Unable to read item before delete", path, error))?;
 
-        if metadata.is_dir() {
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
             fs::remove_dir_all(path)
                 .map_err(|error| FsError::io("Unable to delete directory", path, error))
         } else {
@@ -186,11 +215,11 @@ impl LocalFileProvider {
     }
 
     fn cleanup_partial_copy(path: &Path) {
-        let Ok(metadata) = fs::metadata(path) else {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
             return;
         };
 
-        let _ = if metadata.is_dir() {
+        let _ = if metadata.is_dir() && !metadata.file_type().is_symlink() {
             fs::remove_dir_all(path)
         } else {
             fs::remove_file(path)
@@ -324,9 +353,9 @@ impl FileProvider for LocalFileProvider {
         }
 
         if overwrite && Self::path_exists(&to)? {
-            let from_metadata = fs::metadata(&from)
+            let from_metadata = fs::symlink_metadata(&from)
                 .map_err(|error| FsError::io("Unable to read source metadata", &from, error))?;
-            let target_metadata = fs::metadata(&to)
+            let target_metadata = fs::symlink_metadata(&to)
                 .map_err(|error| FsError::io("Unable to read destination metadata", &to, error))?;
 
             if from_metadata.is_dir() || target_metadata.is_dir() {
@@ -363,6 +392,35 @@ impl FileProvider for LocalFileProvider {
 #[cfg(unix)]
 fn is_cross_device_error(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(18)
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path, _source_link: &Path) -> FsResult<()> {
+    std::os::unix::fs::symlink(target, link)
+        .map_err(|error| FsError::io("Unable to create symbolic link", link, error))
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path, source_link: &Path) -> FsResult<()> {
+    let target_is_dir = fs::metadata(source_link)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    let result = if target_is_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    };
+
+    result.map_err(|error| FsError::io("Unable to create symbolic link", link, error))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(_target: &Path, link: &Path, _source_link: &Path) -> FsResult<()> {
+    Err(FsError::new(
+        "symlink_unsupported",
+        "Preserving symbolic links is not supported on this platform.",
+        Some(link.to_string_lossy().into_owned()),
+    ))
 }
 
 #[cfg(windows)]

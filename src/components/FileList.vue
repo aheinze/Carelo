@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import FileRow from './FileRow.vue';
 import { listDirectory } from '../composables/useFileOperations';
+import { dropEffectFromEvent } from '../composables/useFileTransferGuards';
 
 const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
@@ -652,7 +653,7 @@ function handleEntryDragOver(entry, event, directoryPath = activeColumnDirectory
   event.preventDefault();
   event.stopPropagation();
   if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = 'move';
+    event.dataTransfer.dropEffect = dropEffectFromEvent(event);
   }
   entryDropPath.value = canDropIntoEntry ? entry.path : '';
   currentDirectoryDropActive.value = canDropIntoCurrent;
@@ -694,7 +695,7 @@ function handleCurrentDirectoryDragOver(event, directoryPath = activeColumnDirec
   event.preventDefault();
   event.stopPropagation();
   if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = 'move';
+    event.dataTransfer.dropEffect = dropEffectFromEvent(event);
   }
   entryDropPath.value = '';
   currentDirectoryDropActive.value = true;

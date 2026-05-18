@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fs::models::{FsError, FsResult};
+use serde::Deserialize;
 
 const PROGRESS_BYTE_STEP: u64 = 512 * 1024;
 
@@ -13,6 +14,15 @@ pub struct LocalTransferItem {
     pub from: String,
     pub to: String,
     pub overwrite: bool,
+    pub symlink_mode: SymlinkMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SymlinkMode {
+    #[default]
+    Preserve,
+    Follow,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -70,6 +80,7 @@ where
             &item.from,
             &item.to,
             item.overwrite,
+            item.symlink_mode,
             &mut progress,
             &mut on_progress,
             &mut checkpoint,
@@ -109,6 +120,7 @@ where
             &item.from,
             &item.to,
             item.overwrite,
+            item.symlink_mode,
             &mut progress,
             &mut on_progress,
             &mut checkpoint,
@@ -131,6 +143,7 @@ fn resolve_items(items: &[LocalTransferItem]) -> FsResult<Vec<ResolvedTransferIt
                 from: expand_path(&item.from)?,
                 to: expand_path(&item.to)?,
                 overwrite: item.overwrite,
+                symlink_mode: item.symlink_mode,
             })
         })
         .collect()
@@ -141,6 +154,7 @@ struct ResolvedTransferItem {
     from: PathBuf,
     to: PathBuf,
     overwrite: bool,
+    symlink_mode: SymlinkMode,
 }
 
 fn measure_items<C>(items: &[ResolvedTransferItem], checkpoint: &mut C) -> FsResult<Measure>
@@ -152,7 +166,12 @@ where
 
     for item in items {
         checkpoint(Some(&item.from))?;
-        let measure = measure_path(&item.from, &mut visited_directories, checkpoint)?;
+        let measure = measure_path(
+            &item.from,
+            item.symlink_mode,
+            &mut visited_directories,
+            checkpoint,
+        )?;
         total.bytes = total.bytes.saturating_add(measure.bytes);
         total.entries = total.entries.saturating_add(measure.entries);
     }
@@ -162,6 +181,7 @@ where
 
 fn measure_path<C>(
     path: &Path,
+    symlink_mode: SymlinkMode,
     visited_directories: &mut HashSet<PathBuf>,
     checkpoint: &mut C,
 ) -> FsResult<Measure>
@@ -169,8 +189,22 @@ where
     C: FnMut(Option<&Path>) -> FsResult<()>,
 {
     checkpoint(Some(path))?;
-    let metadata = fs::metadata(path)
+    let symlink_metadata = fs::symlink_metadata(path)
         .map_err(|error| FsError::io("Unable to read source metadata", path, error))?;
+
+    if symlink_metadata.file_type().is_symlink() && matches!(symlink_mode, SymlinkMode::Preserve) {
+        return Ok(Measure {
+            bytes: 0,
+            entries: 1,
+        });
+    }
+
+    let metadata = if symlink_metadata.file_type().is_symlink() {
+        fs::metadata(path)
+            .map_err(|error| FsError::io("Unable to read symlink target metadata", path, error))?
+    } else {
+        symlink_metadata
+    };
 
     if metadata.is_dir() {
         let canonical = fs::canonicalize(path)
@@ -195,7 +229,8 @@ where
             let child = child.map_err(|error| {
                 FsError::io("Unable to read source directory entry", path, error)
             })?;
-            let measure = measure_path(&child.path(), visited_directories, checkpoint)?;
+            let measure =
+                measure_path(&child.path(), symlink_mode, visited_directories, checkpoint)?;
             total.bytes = total.bytes.saturating_add(measure.bytes);
             total.entries = total.entries.saturating_add(measure.entries);
         }
@@ -213,6 +248,7 @@ fn copy_path<F, C>(
     from: &Path,
     to: &Path,
     overwrite: bool,
+    symlink_mode: SymlinkMode,
     progress: &mut ProgressState,
     on_progress: &mut F,
     checkpoint: &mut C,
@@ -222,8 +258,28 @@ where
     C: FnMut(Option<&Path>) -> FsResult<()>,
 {
     checkpoint(Some(from))?;
-    let metadata = fs::metadata(from)
+    let symlink_metadata = fs::symlink_metadata(from)
         .map_err(|error| FsError::io("Unable to read source metadata", from, error))?;
+
+    if symlink_metadata.file_type().is_symlink() && matches!(symlink_mode, SymlinkMode::Preserve) {
+        if !overwrite && path_exists(to)? {
+            return Err(destination_exists_error(to));
+        }
+
+        copy_symlink(from, to, overwrite)?;
+        progress.current_bytes = 0;
+        progress.current_total_bytes = 0;
+        progress.processed_entries = progress.processed_entries.saturating_add(1);
+        emit_progress(progress, Some(from), true, on_progress);
+        return Ok(());
+    }
+
+    let metadata = if symlink_metadata.file_type().is_symlink() {
+        fs::metadata(from)
+            .map_err(|error| FsError::io("Unable to read symlink target metadata", from, error))?
+    } else {
+        symlink_metadata
+    };
 
     if !overwrite && path_exists(to)? {
         return Err(destination_exists_error(to));
@@ -251,6 +307,7 @@ where
                 &child.path(),
                 &to.join(child.file_name()),
                 overwrite,
+                symlink_mode,
                 progress,
                 on_progress,
                 checkpoint,
@@ -261,7 +318,7 @@ where
     }
 
     if overwrite && path_exists(to)? {
-        let target_metadata = fs::metadata(to)
+        let target_metadata = fs::symlink_metadata(to)
             .map_err(|error| FsError::io("Unable to read destination metadata", to, error))?;
 
         if target_metadata.is_dir() {
@@ -284,6 +341,7 @@ fn move_path<F, C>(
     from: &Path,
     to: &Path,
     overwrite: bool,
+    symlink_mode: SymlinkMode,
     progress: &mut ProgressState,
     on_progress: &mut F,
     checkpoint: &mut C,
@@ -293,18 +351,47 @@ where
     C: FnMut(Option<&Path>) -> FsResult<()>,
 {
     checkpoint(Some(from))?;
+    let source_metadata = fs::symlink_metadata(from)
+        .map_err(|error| FsError::io("Unable to read source metadata", from, error))?;
+
+    if source_metadata.file_type().is_symlink() && matches!(symlink_mode, SymlinkMode::Follow) {
+        let temporary_to = temporary_move_path(to)?;
+
+        if let Err(copy_error) = copy_path(
+            from,
+            &temporary_to,
+            false,
+            symlink_mode,
+            progress,
+            on_progress,
+            checkpoint,
+        ) {
+            cleanup_partial_copy(&temporary_to);
+            return Err(copy_error);
+        }
+
+        if let Err(checkpoint_error) = checkpoint(Some(from)) {
+            cleanup_partial_copy(&temporary_to);
+            return Err(checkpoint_error);
+        }
+
+        if let Err(place_error) = place_temporary_move(&temporary_to, to, overwrite) {
+            cleanup_partial_copy(&temporary_to);
+            return Err(place_error);
+        }
+
+        return delete_path(from);
+    }
 
     if !overwrite && path_exists(to)? {
         return Err(destination_exists_error(to));
     }
 
     if overwrite && path_exists(to)? {
-        let from_metadata = fs::metadata(from)
-            .map_err(|error| FsError::io("Unable to read source metadata", from, error))?;
-        let target_metadata = fs::metadata(to)
+        let target_metadata = fs::symlink_metadata(to)
             .map_err(|error| FsError::io("Unable to read destination metadata", to, error))?;
 
-        if from_metadata.is_dir() || target_metadata.is_dir() {
+        if source_metadata.is_dir() || target_metadata.is_dir() {
             return Err(destination_type_error(to));
         }
     }
@@ -312,7 +399,7 @@ where
     match fs::rename(from, to) {
         Ok(()) => {
             let mut visited_directories = HashSet::new();
-            let measure = measure_path(to, &mut visited_directories, checkpoint)?;
+            let measure = measure_path(to, symlink_mode, &mut visited_directories, checkpoint)?;
             progress.processed_bytes = progress.processed_bytes.saturating_add(measure.bytes);
             progress.processed_entries = progress.processed_entries.saturating_add(measure.entries);
             progress.current_bytes = measure.bytes;
@@ -327,6 +414,7 @@ where
                 from,
                 &temporary_to,
                 false,
+                symlink_mode,
                 progress,
                 on_progress,
                 checkpoint,
@@ -335,16 +423,14 @@ where
                 return Err(copy_error);
             }
 
-            checkpoint(Some(from))?;
-
-            if !overwrite && path_exists(to)? {
+            if let Err(checkpoint_error) = checkpoint(Some(from)) {
                 cleanup_partial_copy(&temporary_to);
-                return Err(destination_exists_error(to));
+                return Err(checkpoint_error);
             }
 
-            if let Err(replace_error) = fs::rename(&temporary_to, to) {
+            if let Err(place_error) = place_temporary_move(&temporary_to, to, overwrite) {
                 cleanup_partial_copy(&temporary_to);
-                return Err(FsError::io("Unable to place moved item", to, replace_error));
+                return Err(place_error);
             }
 
             delete_path(from)
@@ -366,13 +452,15 @@ where
     F: FnMut(OperationProgress),
     C: FnMut(Option<&Path>) -> FsResult<()>,
 {
+    if overwrite && path_exists(to)? {
+        remove_existing_file_like(to)?;
+    }
+
     let mut reader =
         File::open(from).map_err(|error| FsError::io("Unable to open source file", from, error))?;
     let mut writer = OpenOptions::new()
         .write(true)
-        .create(true)
-        .create_new(!overwrite)
-        .truncate(overwrite)
+        .create_new(true)
         .open(to)
         .map_err(|error| FsError::io("Unable to create destination file", to, error))?;
     let mut buffer = [0_u8; 256 * 1024];
@@ -492,6 +580,58 @@ fn path_exists(path: &Path) -> FsResult<bool> {
     }
 }
 
+fn remove_existing_file_like(path: &Path) -> FsResult<()> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| FsError::io("Unable to read destination metadata", path, error))?;
+
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        return Err(destination_type_error(path));
+    }
+
+    fs::remove_file(path)
+        .map_err(|error| FsError::io("Unable to replace existing destination", path, error))
+}
+
+fn copy_symlink(from: &Path, to: &Path, overwrite: bool) -> FsResult<()> {
+    if overwrite && path_exists(to)? {
+        remove_existing_file_like(to)?;
+    }
+
+    let target = fs::read_link(from)
+        .map_err(|error| FsError::io("Unable to read symbolic link", from, error))?;
+
+    create_symlink(&target, to, from)
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path, _source_link: &Path) -> FsResult<()> {
+    std::os::unix::fs::symlink(target, link)
+        .map_err(|error| FsError::io("Unable to create symbolic link", link, error))
+}
+
+#[cfg(windows)]
+fn create_symlink(target: &Path, link: &Path, source_link: &Path) -> FsResult<()> {
+    let target_is_dir = fs::metadata(source_link)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
+    let result = if target_is_dir {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    };
+
+    result.map_err(|error| FsError::io("Unable to create symbolic link", link, error))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_symlink(_target: &Path, link: &Path, _source_link: &Path) -> FsResult<()> {
+    Err(FsError::new(
+        "symlink_unsupported",
+        "Preserving symbolic links is not supported on this platform.",
+        Some(link.to_string_lossy().into_owned()),
+    ))
+}
+
 fn destination_exists_error(path: &Path) -> FsError {
     FsError::new(
         "destination_exists",
@@ -509,10 +649,10 @@ fn destination_type_error(path: &Path) -> FsError {
 }
 
 fn delete_path(path: &Path) -> FsResult<()> {
-    let metadata = fs::metadata(path)
+    let metadata = fs::symlink_metadata(path)
         .map_err(|error| FsError::io("Unable to read item before delete", path, error))?;
 
-    if metadata.is_dir() {
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(path)
             .map_err(|error| FsError::io("Unable to delete directory", path, error))
     } else {
@@ -521,11 +661,11 @@ fn delete_path(path: &Path) -> FsResult<()> {
 }
 
 fn cleanup_partial_copy(path: &Path) {
-    let Ok(metadata) = fs::metadata(path) else {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
         return;
     };
 
-    let _ = if metadata.is_dir() {
+    let _ = if metadata.is_dir() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(path)
     } else {
         fs::remove_file(path)
@@ -555,6 +695,19 @@ fn temporary_move_path(to: &Path) -> FsResult<PathBuf> {
         "Unable to reserve a temporary destination for the move.",
         Some(to.to_string_lossy().into_owned()),
     ))
+}
+
+fn place_temporary_move(temporary_to: &Path, to: &Path, overwrite: bool) -> FsResult<()> {
+    if path_exists(to)? {
+        if !overwrite {
+            return Err(destination_exists_error(to));
+        }
+
+        remove_existing_file_like(to)?;
+    }
+
+    fs::rename(temporary_to, to)
+        .map_err(|error| FsError::io("Unable to place moved item", to, error))
 }
 
 #[cfg(unix)]
@@ -607,6 +760,7 @@ mod tests {
                 from: source.to_string_lossy().into_owned(),
                 to: destination.to_string_lossy().into_owned(),
                 overwrite: false,
+                symlink_mode: SymlinkMode::Preserve,
             }],
             |progress| events.push(progress),
             |_| Ok(()),
@@ -639,6 +793,7 @@ mod tests {
                 from: source.to_string_lossy().into_owned(),
                 to: destination.to_string_lossy().into_owned(),
                 overwrite: false,
+                symlink_mode: SymlinkMode::Preserve,
             }],
             |_| {},
             |_| {
@@ -658,6 +813,170 @@ mod tests {
         .expect_err("copy should stop at checkpoint");
 
         assert_eq!(error.code, "operation_cancelled");
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_preserves_symlink_by_default() {
+        let root = test_root("copy-symlink-preserve");
+        let target = root.join("target.txt");
+        let source = root.join("link.txt");
+        let destination = root.join("copied-link.txt");
+        fs::write(&target, "linked").expect("write target");
+        std::os::unix::fs::symlink("target.txt", &source).expect("create symlink");
+
+        copy_items_with_progress(
+            &[LocalTransferItem {
+                from: source.to_string_lossy().into_owned(),
+                to: destination.to_string_lossy().into_owned(),
+                overwrite: false,
+                symlink_mode: SymlinkMode::Preserve,
+            }],
+            |_| {},
+            |_| Ok(()),
+        )
+        .expect("copy symlink");
+
+        assert!(fs::symlink_metadata(&destination)
+            .expect("read copied link metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(&destination).expect("read copied link"),
+            PathBuf::from("target.txt")
+        );
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_can_follow_symlink_targets() {
+        let root = test_root("copy-symlink-follow");
+        let target = root.join("target.txt");
+        let source = root.join("link.txt");
+        let destination = root.join("copied-target.txt");
+        fs::write(&target, "linked").expect("write target");
+        std::os::unix::fs::symlink("target.txt", &source).expect("create symlink");
+
+        copy_items_with_progress(
+            &[LocalTransferItem {
+                from: source.to_string_lossy().into_owned(),
+                to: destination.to_string_lossy().into_owned(),
+                overwrite: false,
+                symlink_mode: SymlinkMode::Follow,
+            }],
+            |_| {},
+            |_| Ok(()),
+        )
+        .expect("copy symlink target");
+
+        assert!(!fs::symlink_metadata(&destination)
+            .expect("read copied target metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read copied target"),
+            "linked"
+        );
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_can_follow_symlink_targets_on_same_volume() {
+        let root = test_root("move-symlink-follow");
+        let target = root.join("target.txt");
+        let source = root.join("link.txt");
+        let destination = root.join("moved-target.txt");
+        fs::write(&target, "linked").expect("write target");
+        std::os::unix::fs::symlink("target.txt", &source).expect("create symlink");
+
+        move_items_with_progress(
+            &[LocalTransferItem {
+                from: source.to_string_lossy().into_owned(),
+                to: destination.to_string_lossy().into_owned(),
+                overwrite: false,
+                symlink_mode: SymlinkMode::Follow,
+            }],
+            |_| {},
+            |_| Ok(()),
+        )
+        .expect("move symlink target");
+
+        assert!(!source.exists());
+        assert!(target.exists());
+        assert!(!fs::symlink_metadata(&destination)
+            .expect("read moved target metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read moved target"),
+            "linked"
+        );
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_follow_symlink_cleans_temporary_copy_on_cancel() {
+        let root = test_root("move-symlink-follow-cancel");
+        let target = root.join("target.txt");
+        let source = root.join("link.txt");
+        let destination = root.join("moved-target.txt");
+        fs::write(&target, "linked").expect("write target");
+        std::os::unix::fs::symlink("target.txt", &source).expect("create symlink");
+        let checkpoint_root = root.clone();
+
+        let error = move_items_with_progress(
+            &[LocalTransferItem {
+                from: source.to_string_lossy().into_owned(),
+                to: destination.to_string_lossy().into_owned(),
+                overwrite: false,
+                symlink_mode: SymlinkMode::Follow,
+            }],
+            |_| {},
+            |_| {
+                let has_temporary_move = fs::read_dir(&checkpoint_root)
+                    .expect("read test root")
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".carelo-move-")
+                    });
+
+                if has_temporary_move {
+                    Err(FsError::new(
+                        "operation_cancelled",
+                        "The file operation was cancelled.",
+                        Some(source.to_string_lossy().into_owned()),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("move should stop when cancelled");
+
+        assert_eq!(error.code, "operation_cancelled");
+        assert!(fs::symlink_metadata(&source)
+            .expect("source link should remain")
+            .file_type()
+            .is_symlink());
+        assert!(!destination.exists());
+        assert!(!fs::read_dir(&root)
+            .expect("read test root")
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".carelo-move-")));
 
         cleanup(&root);
     }

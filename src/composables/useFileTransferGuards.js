@@ -1,4 +1,5 @@
 import {
+  areSameVolume,
   copyItems,
   listDirectory,
   moveItems,
@@ -206,6 +207,26 @@ function shouldUseFolderConflictActions(entry, existingEntry) {
   return isDirectoryEntry(entry) || isDirectoryEntry(existingEntry);
 }
 
+export function forcedTransferModeFromEvent(event) {
+  if (!event) {
+    return null;
+  }
+
+  if (event.ctrlKey || event.altKey) {
+    return 'copy';
+  }
+
+  if (event.shiftKey) {
+    return 'move';
+  }
+
+  return null;
+}
+
+export function dropEffectFromEvent(event, fallback = 'move') {
+  return forcedTransferModeFromEvent(event) || fallback;
+}
+
 export function useFileTransferGuards() {
   const dialog = useDialog();
   const store = useFileManagerStore();
@@ -255,11 +276,38 @@ export function useFileTransferGuards() {
     };
   }
 
+  async function chooseSymlinkMode(entries, mode, requestedMode = null) {
+    if (requestedMode === 'follow' || requestedMode === 'preserve') {
+      return requestedMode;
+    }
+
+    const hasSelectedSymlink = entries.some((entry) => entry?.isSymlink || entry?.kind === 'symlink');
+
+    if (!hasSelectedSymlink) {
+      return 'preserve';
+    }
+
+    const result = await dialog.choice({
+      title: mode === 'move' ? 'Move Symbolic Links' : 'Copy Symbolic Links',
+      message: 'The selection contains symbolic links.',
+      detail: 'Preserving links keeps the link itself. Resolving targets copies the linked file or folder contents.',
+      icon: 'file',
+      actions: [
+        { value: 'cancel', label: 'Cancel', cancel: true },
+        { value: 'follow', label: 'Resolve Targets' },
+        { value: 'preserve', label: 'Preserve Links', primary: true, default: true },
+      ],
+    });
+
+    return result?.value || null;
+  }
+
   async function prepareTransfer({
     entries,
     mode,
     targetDirectory,
     nameForEntry = null,
+    symlinkMode = null,
   }) {
     const sourceEntries = (Array.isArray(entries) ? entries : []).filter(Boolean);
 
@@ -271,10 +319,15 @@ export function useFileTransferGuards() {
     const invalid = [];
     const skipped = [];
     const items = [];
+    const resolvedSymlinkMode = await chooseSymlinkMode(sourceEntries, mode, symlinkMode);
     const conflictPolicies = {
       file: null,
       folder: null,
     };
+
+    if (!resolvedSymlinkMode) {
+      return null;
+    }
 
     for (const entry of sourceEntries) {
       let targetName = targetNameFor(entry, nameForEntry);
@@ -335,7 +388,12 @@ export function useFileTransferGuards() {
         }
       }
 
-      items.push({ from: entry.path, to: targetPath, overwrite });
+      items.push({
+        from: entry.path,
+        to: targetPath,
+        overwrite,
+        symlinkMode: resolvedSymlinkMode,
+      });
       reserveTarget(targetEntries, targetName, targetPath, entry);
     }
 
@@ -402,6 +460,32 @@ export function useFileTransferGuards() {
       items,
     });
     return true;
+  }
+
+  async function defaultTransferMode(entries, targetDirectory) {
+    const paths = (Array.isArray(entries) ? entries : [])
+      .map((entry) => entry?.path)
+      .filter(Boolean);
+
+    if (paths.length === 0 || !targetDirectory) {
+      return 'copy';
+    }
+
+    try {
+      return await areSameVolume(paths, targetDirectory) ? 'move' : 'copy';
+    } catch {
+      return 'copy';
+    }
+  }
+
+  async function transferModeForEvent(event, entries, targetDirectory) {
+    return forcedTransferModeFromEvent(event) || defaultTransferMode(entries, targetDirectory);
+  }
+
+  async function transferEntries(options = {}) {
+    return options.mode === 'move'
+      ? moveEntries(options)
+      : copyEntries({ ...options, mode: 'copy' });
   }
 
   async function runQueuedTransfer({ items, entries, mode, targetDirectory }) {
@@ -517,7 +601,10 @@ export function useFileTransferGuards() {
 
   return {
     copyEntries,
+    defaultTransferMode,
     moveEntries,
     renameEntry,
+    transferEntries,
+    transferModeForEvent,
   };
 }

@@ -10,6 +10,8 @@ use crate::fs::sudo;
 use crate::fs::{archive, operations};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -23,6 +25,8 @@ pub struct TransferItem {
     pub to: String,
     #[serde(default)]
     pub overwrite: bool,
+    #[serde(default)]
+    pub symlink_mode: operations::SymlinkMode,
 }
 
 #[derive(Clone, Default)]
@@ -184,6 +188,50 @@ pub async fn list_volumes(
     volumes.extend(remotes.volume_entries()?);
     sort_volumes(&mut volumes);
     Ok(volumes)
+}
+
+#[tauri::command]
+pub async fn same_volume(paths: Vec<String>, target_directory: String) -> Result<bool, FsError> {
+    let Some(first_path) = paths.first() else {
+        return Ok(true);
+    };
+
+    if let Some(remote_target) = parse_remote_path(&target_directory) {
+        return Ok(paths.iter().all(|path| {
+            parse_remote_path(path)
+                .map(|remote_path| remote_path.volume_id == remote_target.volume_id)
+                .unwrap_or(false)
+        }));
+    }
+
+    if parse_remote_path(first_path).is_some()
+        || paths.iter().any(|path| parse_remote_path(path).is_some())
+    {
+        return Ok(false);
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = expand_local_path(&target_directory)?;
+        let target_volume = local_volume_identity(&target)?;
+
+        for path in paths {
+            let source = expand_local_path(&path)?;
+
+            if local_volume_identity(&source)? != target_volume {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    })
+    .await
+    .map_err(|error| {
+        FsError::new(
+            "task_join_error",
+            format!("Volume comparison failed: {error}"),
+            None,
+        )
+    })?
 }
 
 #[tauri::command]
@@ -858,6 +906,7 @@ fn transfer_items_for_operations(items: &[TransferItem]) -> Vec<operations::Loca
             from: item.from.clone(),
             to: item.to.clone(),
             overwrite: item.overwrite,
+            symlink_mode: item.symlink_mode,
         })
         .collect()
 }
@@ -918,6 +967,67 @@ fn cross_provider_error(message: &str, volume_id: &str, path: &str) -> FsError {
         message,
         Some(crate::fs::remote::format_remote_uri(volume_id, path)),
     )
+}
+
+fn expand_local_path(path: &str) -> FsResult<PathBuf> {
+    let trimmed = path.trim();
+
+    if trimmed.is_empty() || trimmed == "~" {
+        return LocalFileProvider::home_dir();
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return Ok(LocalFileProvider::home_dir()?.join(rest));
+    }
+
+    Ok(PathBuf::from(trimmed))
+}
+
+#[cfg(unix)]
+fn local_volume_identity(path: &Path) -> FsResult<String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| FsError::io("Unable to read volume metadata", path, error))?;
+
+    Ok(metadata.dev().to_string())
+}
+
+#[cfg(windows)]
+fn local_volume_identity(path: &Path) -> FsResult<String> {
+    use std::path::Component;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                FsError::new(
+                    "volume_lookup_failed",
+                    format!("Unable to resolve current directory: {error}"),
+                    Some(path.to_string_lossy().into_owned()),
+                )
+            })?
+            .join(path)
+    };
+
+    Ok(absolute
+        .components()
+        .find_map(|component| match component {
+            Component::Prefix(prefix) => {
+                Some(prefix.as_os_str().to_string_lossy().to_ascii_lowercase())
+            }
+            _ => None,
+        })
+        .unwrap_or_default())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_volume_identity(path: &Path) -> FsResult<String> {
+    Ok(path
+        .ancestors()
+        .last()
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned())
 }
 
 async fn run_local_with_sudo<T, F, S>(

@@ -1574,7 +1574,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     };
   }
 
-  function startFileDrag(paneId, entries) {
+  function startFileDrag(paneId, entries, requestedMode = null) {
     if (!panes.value[paneId] || !Array.isArray(entries) || entries.length === 0) {
       dragOperation.value = null;
       return;
@@ -1582,11 +1582,24 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     dragOperation.value = {
       sourcePaneId: paneId,
+      requestedMode,
       entries: entries.map((entry) => ({
         name: entry.name,
         path: entry.path,
         kind: entry.kind,
+        isSymlink: entry.isSymlink,
       })),
+    };
+  }
+
+  function setFileDragMode(requestedMode = null) {
+    if (!dragOperation.value) {
+      return;
+    }
+
+    dragOperation.value = {
+      ...dragOperation.value,
+      requestedMode,
     };
   }
 
@@ -1845,6 +1858,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     setPanePath,
     setPaneView,
     startFileDrag,
+    setFileDragMode,
     clearFileDrag,
     isFavoritePath,
     addFavoritesFromEntries,

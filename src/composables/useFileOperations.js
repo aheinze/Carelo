@@ -165,6 +165,10 @@ export async function listVolumes() {
   return invokeCommand('list_volumes');
 }
 
+export async function areSameVolume(paths, targetDirectory) {
+  return invokeCommand('same_volume', { paths, targetDirectory });
+}
+
 export async function addRemoteVolume(config) {
   return invokeCommand('add_remote_volume', { config });
 }
@@ -273,6 +277,7 @@ export function useFileOperations() {
   return {
     canUseLocalFileAssets,
     archiveItems,
+    areSameVolume,
     cancelFileOperation,
     createOAuthTokens,
     copyItems,

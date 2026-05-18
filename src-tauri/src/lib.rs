@@ -9,7 +9,7 @@ use commands::fs::{
     add_remote_volume, archive_items, cancel_file_operation, copy_items, create_folder,
     delete_items, get_file_metadata, get_home_directory, list_directory, list_remote_volumes,
     list_volumes, move_items, open_with_default_app, pause_file_operation, remove_remote_volume,
-    rename_item, resume_file_operation, reveal_in_file_manager, unarchive_items,
+    rename_item, resume_file_operation, reveal_in_file_manager, same_volume, unarchive_items,
     FileOperationState,
 };
 use commands::oauth::create_oauth_tokens;
@@ -41,6 +41,7 @@ pub fn run() {
             get_file_metadata,
             get_home_directory,
             list_volumes,
+            same_volume,
             add_remote_volume,
             remove_remote_volume,
             list_remote_volumes,

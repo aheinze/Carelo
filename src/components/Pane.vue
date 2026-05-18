@@ -14,6 +14,8 @@ import {
 } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import {
+  dropEffectFromEvent,
+  forcedTransferModeFromEvent,
   useFileTransferGuards,
 } from '../composables/useFileTransferGuards';
 import { useFileManagerStore } from '../stores/fileManagerStore';
@@ -165,6 +167,7 @@ const dragGhost = ref({
   count: 0,
   label: '',
   kind: 'file',
+  operation: 'auto',
 });
 let pointerDrag = null;
 let pointerDragCleanup = null;
@@ -527,23 +530,25 @@ function draggableEntriesFor(payload) {
 }
 
 function writeDragPayload(event, entries) {
+  const requestedMode = forcedTransferModeFromEvent(event);
   const payload = {
     sourcePaneId: props.paneId,
     entries: entries.map((entry) => ({
       name: entry.name,
       path: entry.path,
       kind: entry.kind,
+      isSymlink: entry.isSymlink,
     })),
   };
 
-  store.startFileDrag(props.paneId, entries);
+  store.startFileDrag(props.paneId, entries, requestedMode);
 
   if (!event.dataTransfer) {
     return;
   }
 
   event.dataTransfer.effectAllowed = 'copyMove';
-  event.dataTransfer.dropEffect = 'move';
+  event.dataTransfer.dropEffect = dropEffectFromEvent(event, requestedMode || 'move');
   event.dataTransfer.setData(FILE_DRAG_MIME, JSON.stringify(payload));
   event.dataTransfer.setData('text/plain', entries.map((entry) => entry.path).join('\n'));
   event.dataTransfer.setData('text/uri-list', entries.map((entry) => {
@@ -662,12 +667,18 @@ async function finishPointerFileDrop(event, state) {
     return;
   }
 
-  const moved = await transfers.moveEntries({
+  const mode = await transfers.transferModeForEvent(
+    event,
+    state.entries,
+    paneDrop.targetDirectory,
+  );
+  const transferred = await transfers.transferEntries({
+    mode,
     entries: state.entries,
     targetDirectory: paneDrop.targetDirectory,
   });
 
-  if (moved) {
+  if (transferred) {
     await reloadPanesAfterPointerMove(
       state.sourcePaneId,
       paneDrop.targetPaneId,
@@ -697,12 +708,21 @@ function ghostIconName(kind) {
   return 'file';
 }
 
+function ghostOperationLabel(operation) {
+  if (operation === 'auto') {
+    return 'Auto';
+  }
+
+  return operation === 'copy' ? 'Copy' : 'Move';
+}
+
 function updateDragGhost(event, operationEntries = []) {
   if (operationEntries.length === 0) {
     dragGhost.value = { ...dragGhost.value, visible: false };
     return;
   }
 
+  const operation = forcedTransferModeFromEvent(event) || 'auto';
   dragGhost.value = {
     visible: true,
     x: event.clientX + 14,
@@ -712,6 +732,7 @@ function updateDragGhost(event, operationEntries = []) {
       ? operationEntries[0].name
       : `${operationEntries.length} items`,
     kind: ghostKindForEntries(operationEntries),
+    operation,
   };
 }
 
@@ -719,7 +740,7 @@ function cleanupPointerDrag() {
   pointerDragCleanup?.();
   pointerDragCleanup = null;
   pointerDrag = null;
-  dragGhost.value = { ...dragGhost.value, visible: false };
+  dragGhost.value = { ...dragGhost.value, visible: false, operation: 'auto' };
   document.body.classList.remove('is-file-pointer-dragging');
 }
 
@@ -764,12 +785,17 @@ function handleFilePointerDragStart(payload) {
 
       pointerDrag.entries = entries;
       pointerDrag.active = true;
-      store.startFileDrag(pointerDrag.sourcePaneId, pointerDrag.entries);
+      store.startFileDrag(
+        pointerDrag.sourcePaneId,
+        pointerDrag.entries,
+        forcedTransferModeFromEvent(moveEvent),
+      );
       updateDragGhost(moveEvent, pointerDrag.entries);
       document.body.classList.add('is-file-pointer-dragging');
     }
 
     if (pointerDrag.active) {
+      store.setFileDragMode(forcedTransferModeFromEvent(moveEvent));
       updateDragGhost(moveEvent, pointerDrag.entries);
       moveEvent.preventDefault();
       moveEvent.stopPropagation();
@@ -909,19 +935,25 @@ async function handleFileDrop(targetEntry, event, currentTargetDirectory = null)
   }
 
   try {
-    const moved = await transfers.moveEntries({
+    const mode = await transfers.transferModeForEvent(
+      event,
+      payload.entries,
+      targetDirectory,
+    );
+    const transferred = await transfers.transferEntries({
+      mode,
       entries: payload.entries,
       targetDirectory,
     });
 
-    if (moved) {
+    if (transferred) {
       await reloadPanesAfterMove(payload.sourcePaneId, targetDirectory, payload.entries);
     }
   } catch (error) {
     console.error(error);
     await dialog.alert({
-      title: 'Move Failed',
-      message: error?.message || 'The selected items could not be moved.',
+      title: 'Transfer Failed',
+      message: error?.message || 'The selected items could not be transferred.',
       variant: 'warning',
     });
   } finally {
@@ -1561,6 +1593,7 @@ async function handleContextAction(action) {
       <span class="file-drag-ghost-icon">
         <AppIcon :name="ghostIconName(dragGhost.kind)" :size="17" :stroke-width="1.9" />
       </span>
+      <span class="file-drag-ghost-operation">{{ ghostOperationLabel(dragGhost.operation) }}</span>
       <span class="file-drag-ghost-label">{{ dragGhost.label }}</span>
       <span v-if="dragGhost.count > 1" class="file-drag-ghost-count">{{ dragGhost.count }}</span>
     </div>
@@ -1585,7 +1618,7 @@ async function handleContextAction(action) {
   left: 0;
   z-index: 10000;
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px auto minmax(0, 1fr) auto;
   max-width: min(260px, calc(100vw - 28px));
   height: 31px;
   align-items: center;
@@ -1630,6 +1663,14 @@ async function handleContextAction(action) {
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-drag-ghost-operation {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .file-drag-ghost-count {
