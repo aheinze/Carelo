@@ -23,6 +23,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  canOpenWith: {
+    type: Boolean,
+    default: true,
+  },
 });
 
 const emit = defineEmits(['action', 'close']);
@@ -130,6 +134,16 @@ onUnmounted(() => {
       <button type="button" role="menuitem" class="context-menu-item" @click="emitAction('open')">
         <AppIcon :name="entry.kind === 'directory' ? 'folder' : 'file'" :size="16" />
         <span>Open</span>
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        class="context-menu-item"
+        :disabled="!canOpenWith"
+        @click="emitAction('openWith')"
+      >
+        <AppIcon name="app" :size="16" />
+        <span>Open With…</span>
       </button>
       <button
         type="button"

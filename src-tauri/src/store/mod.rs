@@ -49,6 +49,15 @@ pub struct WindowDimensions {
     pub saved_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenWithDefaultEntry {
+    pub file_type_key: String,
+    pub app_id: String,
+    pub app_name: String,
+    pub updated_at: i64,
+}
+
 pub struct AppStoreState {
     connection: Mutex<Connection>,
     path: PathBuf,
@@ -290,6 +299,74 @@ impl AppStoreState {
         Ok(())
     }
 
+    pub fn open_with_default(&self, file_type_key: &str) -> FsResult<Option<OpenWithDefaultEntry>> {
+        let connection = self.connection()?;
+
+        connection
+            .query_row(
+                "SELECT file_type_key, app_id, app_name, updated_at
+                 FROM open_with_defaults
+                 WHERE file_type_key = ?1",
+                params![file_type_key],
+                open_with_default_from_row,
+            )
+            .optional()
+            .map_err(|error| store_sql_error("Unable to read open-with default", &self.path, error))
+    }
+
+    pub fn save_open_with_default(
+        &self,
+        file_type_key: &str,
+        app_id: &str,
+        app_name: &str,
+    ) -> FsResult<()> {
+        let key = file_type_key.trim();
+        let app_id = app_id.trim();
+        let app_name = app_name.trim();
+
+        if key.is_empty() || app_id.is_empty() || app_name.is_empty() {
+            return Err(FsError::new(
+                "invalid_open_with_default",
+                "Unable to save an incomplete open-with default.",
+                None,
+            ));
+        }
+
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO open_with_defaults
+                 (file_type_key, app_id, app_name, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![key, app_id, app_name, unix_timestamp()],
+            )
+            .map_err(|error| {
+                store_sql_error("Unable to save open-with default", &self.path, error)
+            })?;
+
+        Ok(())
+    }
+
+    pub fn clear_open_with_default(&self, file_type_key: &str) -> FsResult<()> {
+        let key = file_type_key.trim();
+
+        if key.is_empty() {
+            return Ok(());
+        }
+
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "DELETE FROM open_with_defaults WHERE file_type_key = ?1",
+                params![key],
+            )
+            .map_err(|error| {
+                store_sql_error("Unable to clear open-with default", &self.path, error)
+            })?;
+
+        Ok(())
+    }
+
     fn connection(&self) -> FsResult<std::sync::MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|error| {
             FsError::new(
@@ -336,6 +413,13 @@ fn migrate(connection: &Connection, path: &Path) -> FsResult<()> {
             );
 
             CREATE INDEX IF NOT EXISTS idx_favorites_sort_order ON favorites(sort_order);
+
+            CREATE TABLE IF NOT EXISTS open_with_defaults (
+              file_type_key TEXT PRIMARY KEY,
+              app_id TEXT NOT NULL,
+              app_name TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
             "#,
         )
         .map_err(|error| store_sql_error("Unable to migrate app store", path, error))
@@ -473,6 +557,15 @@ fn favorite_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteEntry>
         sort_order: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+    })
+}
+
+fn open_with_default_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenWithDefaultEntry> {
+    Ok(OpenWithDefaultEntry {
+        file_type_key: row.get(0)?,
+        app_id: row.get(1)?,
+        app_name: row.get(2)?,
+        updated_at: row.get(3)?,
     })
 }
 

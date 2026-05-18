@@ -265,6 +265,14 @@ export async function openWithDefaultApp(path) {
   return invokeCommand('open_with_default_app', { path });
 }
 
+export async function listOpenWithApps(path) {
+  return invokeCommand('list_open_with_apps', { path });
+}
+
+export async function openWithApp(path, appId, remember = false) {
+  return invokeCommand('open_with_app', { path, appId, remember });
+}
+
 export async function revealInFileManager(path) {
   return invokeCommand('reveal_in_file_manager', { path });
 }
@@ -303,11 +311,13 @@ export function useFileOperations() {
     isRemotePath,
     listFavorites,
     listDirectory,
+    listOpenWithApps,
     listRemoteVolumes,
     listVolumes,
     localFileAssetUrl,
     moveFavorite,
     moveItems,
+    openWithApp,
     openWithDefaultApp,
     pauseFileOperation,
     removeFavorite,

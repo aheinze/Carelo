@@ -8,6 +8,8 @@ use crate::fs::remote::{
 };
 use crate::fs::sudo;
 use crate::fs::{archive, operations};
+use crate::open_with::{self, OpenWithContext};
+use crate::store::AppStoreState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
@@ -845,16 +847,57 @@ pub async fn list_remote_volumes(
 }
 
 #[tauri::command]
-pub async fn open_with_default_app(path: String) -> Result<(), FsError> {
+pub async fn open_with_default_app(
+    path: String,
+    store: tauri::State<'_, AppStoreState>,
+) -> Result<(), FsError> {
     let path = PathBuf::from(path);
+    let file_type = open_with::file_type_for_path(&path);
+    let remembered = store.open_with_default(&file_type.key)?;
 
-    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|error| {
-        FsError::new(
-            "open_failed",
-            format!("Unable to open item with the default app: {error}"),
+    open_with::open_with_default(&path, remembered)
+}
+
+#[tauri::command]
+pub async fn list_open_with_apps(
+    path: String,
+    store: tauri::State<'_, AppStoreState>,
+) -> Result<OpenWithContext, FsError> {
+    let path = PathBuf::from(path);
+    let file_type = open_with::file_type_for_path(&path);
+    let remembered = store.open_with_default(&file_type.key)?;
+
+    open_with::open_with_context(&path, remembered)
+}
+
+#[tauri::command]
+pub async fn open_with_app(
+    path: String,
+    app_id: String,
+    remember: bool,
+    store: tauri::State<'_, AppStoreState>,
+) -> Result<(), FsError> {
+    let path = PathBuf::from(path);
+    let file_type = open_with::file_type_for_path(&path);
+    let context = open_with::open_with_context(&path, store.open_with_default(&file_type.key)?)?;
+    let Some(app) = context.apps.iter().find(|app| app.id == app_id) else {
+        return Err(FsError::new(
+            "open_with_app_not_found",
+            "The selected app is no longer available.",
             Some(path.to_string_lossy().into_owned()),
-        )
-    })
+        ));
+    };
+    let app_name = app.name.clone();
+
+    open_with::open_with_app_id(&path, &app_id)?;
+
+    if remember {
+        store.save_open_with_default(&file_type.key, &app_id, &app_name)?;
+    } else {
+        store.clear_open_with_default(&file_type.key)?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]

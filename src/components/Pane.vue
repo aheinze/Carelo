@@ -4,11 +4,14 @@ import AppIcon from './AppIcon.vue';
 import CreateArchiveDialog from './CreateArchiveDialog.vue';
 import FileContextMenu from './FileContextMenu.vue';
 import FileList from './FileList.vue';
+import OpenWithDialog from './OpenWithDialog.vue';
 import {
   archiveItems,
   deleteItems,
   isRemotePath,
+  listOpenWithApps,
   listDirectory,
+  openWithApp,
   openWithDefaultApp,
   revealInFileManager,
   unarchiveItems,
@@ -164,6 +167,14 @@ const archiveDialog = ref({
   directory: '',
   existingNames: [],
 });
+const openWithDialog = ref({
+  visible: false,
+  entry: null,
+  context: null,
+  loading: false,
+  error: '',
+});
+let openWithRequestId = 0;
 const columnSummary = ref(null);
 const draggedTabId = ref(null);
 const tabDropIndex = ref(null);
@@ -191,6 +202,11 @@ const canUnarchiveContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
 
   return operationEntries.length > 0 && operationEntries.every((item) => isLocalEntry(item) && isZipEntry(item));
+});
+const canOpenWithContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  return operationEntries.length === 1 && operationEntries[0]?.kind === 'file' && isLocalEntry(operationEntries[0]);
 });
 
 function rootSummarySource() {
@@ -1232,6 +1248,110 @@ async function openEntryPayload(entry, index = null) {
   }
 }
 
+async function showOpenWithDialog(menu) {
+  const operationEntries = contextOperationEntries(menu);
+  const entry = operationEntries[0];
+  const requestId = openWithRequestId + 1;
+
+  if (operationEntries.length !== 1 || !entry || entry.kind !== 'file' || !isLocalEntry(entry)) {
+    await dialog.alert({
+      title: 'Open With Not Available',
+      message: 'Choose one local file to open with another app.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  openWithRequestId = requestId;
+  openWithDialog.value = {
+    visible: true,
+    entry,
+    context: null,
+    loading: true,
+    error: '',
+  };
+
+  try {
+    const context = await listOpenWithApps(entry.path);
+
+    if (requestId !== openWithRequestId || !openWithDialog.value.visible) {
+      return;
+    }
+
+    openWithDialog.value = {
+      visible: true,
+      entry,
+      context,
+      loading: false,
+      error: '',
+    };
+  } catch (error) {
+    console.error(error);
+
+    if (requestId !== openWithRequestId || !openWithDialog.value.visible) {
+      return;
+    }
+
+    openWithDialog.value = {
+      visible: true,
+      entry,
+      context: null,
+      loading: false,
+      error: error?.message || 'Unable to load apps for this file.',
+    };
+  }
+}
+
+function closeOpenWithDialog() {
+  openWithRequestId += 1;
+  openWithDialog.value = {
+    visible: false,
+    entry: null,
+    context: null,
+    loading: false,
+    error: '',
+  };
+}
+
+async function handleOpenWithSelection(payload) {
+  const entry = openWithDialog.value.entry;
+
+  if (!entry || !payload?.appId) {
+    return;
+  }
+
+  try {
+    await openWithApp(entry.path, payload.appId, Boolean(payload.remember));
+    closeOpenWithDialog();
+  } catch (error) {
+    console.error(error);
+    await dialog.alert({
+      title: 'Unable to Open Item',
+      message: error?.message || 'The selected app could not open this file.',
+      variant: 'warning',
+    });
+  }
+}
+
+async function revealOpenWithEntry() {
+  const entry = openWithDialog.value.entry;
+
+  if (!entry) {
+    return;
+  }
+
+  try {
+    await revealInFileManager(entry.path);
+  } catch (error) {
+    console.error(error);
+    await dialog.alert({
+      title: 'Unable to Reveal Item',
+      message: error?.message || 'The selected item could not be revealed.',
+      variant: 'warning',
+    });
+  }
+}
+
 function openSelectedEntry() {
   openEntryAt(activeTab.value.selectedIndex);
 }
@@ -1264,6 +1384,11 @@ async function handleContextAction(action) {
       if (entry.kind === 'directory') {
         store.addPaneTab(props.paneId, entry.path);
       }
+      return;
+    }
+
+    if (action === 'openWith') {
+      await showOpenWithDialog(menu);
       return;
     }
 
@@ -1550,6 +1675,7 @@ async function handleContextAction(action) {
       :position="contextMenu.position"
       :can-archive="canArchiveContext"
       :can-unarchive="canUnarchiveContext"
+      :can-open-with="canOpenWithContext"
       :can-transfer="canTransferToOtherPane"
       @action="handleContextAction"
       @close="closeContextMenu"
@@ -1562,6 +1688,17 @@ async function handleContextAction(action) {
       :existing-names="archiveDialog.existingNames"
       @cancel="closeArchiveDialog"
       @create="handleCreateArchive"
+    />
+
+    <OpenWithDialog
+      :visible="openWithDialog.visible"
+      :entry="openWithDialog.entry"
+      :context="openWithDialog.context"
+      :loading="openWithDialog.loading"
+      :error="openWithDialog.error"
+      @cancel="closeOpenWithDialog"
+      @open="handleOpenWithSelection"
+      @reveal="revealOpenWithEntry"
     />
   </section>
 
