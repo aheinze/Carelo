@@ -61,6 +61,10 @@ const props = defineProps({
     type: Object,
     default: null,
   },
+  dateFormat: {
+    type: String,
+    default: 'system',
+  },
 });
 
 const emit = defineEmits([
@@ -994,7 +998,7 @@ watch(
         <div
           v-for="(entry, index) in entries"
           :key="entry.path"
-          v-memo="[entry.path, entry.name, entry.size, entry.modifiedAt, isEntrySelected(index), entryDropPath === entry.path]"
+          v-memo="[entry.path, entry.name, entry.size, entry.modifiedAt, isEntrySelected(index), entryDropPath === entry.path, dateFormat]"
           class="file-grid-item"
           :class="{ 'file-drop-target': entryDropPath === entry.path }"
           :data-file-index="index"
@@ -1012,6 +1016,7 @@ watch(
           <FileRow
             :entry="entry"
             :selected="isEntrySelected(index)"
+            :date-format="dateFormat"
             variant="grid"
             @click="$emit('select', { index, event: $event })"
             @open="$emit('open', index)"
@@ -1178,7 +1183,7 @@ watch(
         <div
           v-for="(entry, index) in entries"
           :key="entry.path"
-          v-memo="[entry.path, entry.name, entry.size, entry.modifiedAt, isEntrySelected(index), entryDropPath === entry.path]"
+          v-memo="[entry.path, entry.name, entry.size, entry.modifiedAt, isEntrySelected(index), entryDropPath === entry.path, dateFormat]"
           class="file-list-item"
           :class="{ 'file-drop-target': entryDropPath === entry.path }"
           :data-file-index="index"
@@ -1196,6 +1201,7 @@ watch(
           <FileRow
             :entry="entry"
             :selected="isEntrySelected(index)"
+            :date-format="dateFormat"
             variant="list"
             @click="$emit('select', { index, event: $event })"
             @open="$emit('open', index)"

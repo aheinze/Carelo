@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { getFileMetadata, localFileAssetUrl } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { formatFileDateTime } from '../utils/dateFormat';
 import {
   audioMimeType,
   audioTypeLabel,
@@ -260,14 +261,7 @@ function compactSize(size) {
 }
 
 function formatModified(modifiedAt) {
-  if (!modifiedAt) return '--';
-  return new Intl.DateTimeFormat(undefined, {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(modifiedAt * 1000));
+  return formatFileDateTime(modifiedAt, store.appSettings.dateFormat);
 }
 
 function extensionFor(name) {

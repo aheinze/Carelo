@@ -1549,6 +1549,7 @@ async function handleContextAction(action) {
           :sort-direction="activeTab.sortDirection"
           :is-entry-selected="(index) => store.isEntrySelected(paneId, index)"
           :show-hidden-files="store.showHiddenFiles"
+          :date-format="store.appSettings.dateFormat"
           :refresh-key="activeTab.loadVersion"
           :column-refresh-request="store.columnRefreshRequests[paneId]"
           :dragging="isFileDragActive"

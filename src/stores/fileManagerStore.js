@@ -17,6 +17,7 @@ import {
   saveAppSettings as saveStoredAppSettings,
 } from '../composables/useFileOperations';
 import { loadUiSettings, saveUiSettings } from '../composables/useSettings';
+import { normalizeDateFormat } from '../utils/dateFormat';
 
 let nextTabId = 1;
 let nextQueueJobId = 1;
@@ -30,6 +31,7 @@ const OPERATION_LOG_LIMIT = 120;
 const DEFAULT_APP_SETTINGS = Object.freeze({
   appearanceMode: 'system',
   defaultViewMode: 'list',
+  dateFormat: 'system',
   showHiddenFiles: false,
   restoreSession: true,
   restoreTerminalPanel: false,
@@ -65,6 +67,7 @@ function normalizeAppSettings(settings = {}) {
     ...value,
     appearanceMode: normalizeAppearanceMode(value.appearanceMode),
     defaultViewMode: normalizeViewMode(value.defaultViewMode),
+    dateFormat: normalizeDateFormat(value.dateFormat),
     showHiddenFiles: value.showHiddenFiles === true,
     restoreSession: value.restoreSession !== false,
     restoreTerminalPanel: value.restoreTerminalPanel === true,

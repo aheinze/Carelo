@@ -7,6 +7,7 @@ import {
 } from './useFileOperations';
 import { useDialog } from './useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { formatFileDateTime } from '../utils/dateFormat';
 
 export function joinPath(directory, name) {
   if (!directory || directory === '/') {
@@ -125,21 +126,18 @@ function formatSize(size) {
   return `${bytes} B`;
 }
 
-function formatModified(modifiedAt) {
+function formatModified(modifiedAt, dateFormat = 'system') {
   if (!modifiedAt) {
     return '';
   }
 
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'short',
-    timeStyle: 'short',
-  }).format(new Date(modifiedAt * 1000));
+  return formatFileDateTime(modifiedAt, dateFormat, { fallback: '' });
 }
 
-function entrySummary(entry) {
+function entrySummary(entry, dateFormat = 'system') {
   const details = [entryKindLabel(entry)];
   const size = formatSize(entry?.size);
-  const modified = formatModified(entry?.modifiedAt);
+  const modified = formatModified(entry?.modifiedAt, dateFormat);
 
   if (size) {
     details.push(size);
@@ -239,6 +237,7 @@ export function useFileTransferGuards() {
     allowApplyToAll,
   }) {
     const folderConflict = conflictKind === 'folder';
+    const dateFormat = store.appSettings.dateFormat;
     const result = await dialog.choice({
       title: folderConflict ? 'Folder Name Conflict' : 'File Already Exists',
       message: `"${targetName}" already exists in the destination.`,
@@ -248,8 +247,8 @@ export function useFileTransferGuards() {
       variant: 'warning',
       icon: folderConflict ? 'folder' : 'file',
       facts: [
-        { label: 'Incoming', value: entrySummary(entry) },
-        { label: 'Existing', value: entrySummary(existingEntry) },
+        { label: 'Incoming', value: entrySummary(entry, dateFormat) },
+        { label: 'Existing', value: entrySummary(existingEntry, dateFormat) },
       ],
       checkboxLabel: allowApplyToAll ? `Apply to all ${conflictKind} conflicts` : '',
       actions: folderConflict
@@ -561,6 +560,7 @@ export function useFileTransferGuards() {
 
     if (existingEntry && cleanPath(existingEntry.path) !== cleanPath(entry.path)) {
       const folderConflict = shouldUseFolderConflictActions(entry, existingEntry);
+      const dateFormat = store.appSettings.dateFormat;
       const result = await dialog.choice({
         title: folderConflict ? 'Rename Conflict' : 'Replace Existing File?',
         message: `"${targetName}" already exists in this folder.`,
@@ -570,8 +570,8 @@ export function useFileTransferGuards() {
         variant: 'warning',
         icon: folderConflict ? 'folder' : 'file',
         facts: [
-          { label: 'Renaming', value: entrySummary(entry) },
-          { label: 'Existing', value: entrySummary(existingEntry) },
+          { label: 'Renaming', value: entrySummary(entry, dateFormat) },
+          { label: 'Existing', value: entrySummary(existingEntry, dateFormat) },
         ],
         actions: folderConflict
           ? [

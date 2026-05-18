@@ -428,7 +428,14 @@ onUnmounted(() => {
           class="terminal-tab"
           :class="{ 'terminal-tab--active': session.id === activeSessionId }"
         >
-          <button type="button" class="terminal-tab-main" role="tab" @click="activeSessionId = session.id">
+          <button
+            v-tooltip="session.cwd || 'No active directory'"
+            type="button"
+            class="terminal-tab-main"
+            role="tab"
+            :title="session.cwd || 'No active directory'"
+            @click="activeSessionId = session.id"
+          >
             <AppIcon name="terminal" :size="14" />
             <span>{{ session.title }}</span>
             <small v-if="session.exited">exited</small>

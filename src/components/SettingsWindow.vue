@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { DATE_FORMAT_OPTIONS, formatDate } from '../utils/dateFormat';
 
 const store = useFileManagerStore();
 const searchQuery = ref('');
@@ -18,7 +19,7 @@ const sections = [
     id: 'files',
     label: 'Files',
     icon: 'folder',
-    keywords: 'files hidden default view list grid columns',
+    keywords: 'files hidden default view list grid columns date format modified',
   },
   {
     id: 'startup',
@@ -55,6 +56,9 @@ const viewModes = [
 const activeSection = computed(() =>
   sections.find((section) => section.id === activeSectionId.value) || sections[0],
 );
+const dateFormatPreview = computed(() =>
+  formatDate(new Date(2026, 4, 18, 14, 30), store.appSettings.dateFormat, { includeTime: true }),
+);
 
 const visibleSections = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
@@ -74,6 +78,10 @@ function setAppearanceMode(mode) {
 
 function setDefaultViewMode(viewMode) {
   store.setAppSetting('defaultViewMode', viewMode);
+}
+
+function setDateFormat(event) {
+  store.setAppSetting('dateFormat', event.target.value);
 }
 
 function setBooleanSetting(key, event) {
@@ -232,6 +240,29 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
                       </button>
                     </div>
                   </div>
+
+                  <label class="setting-row">
+                    <span class="setting-copy">
+                      <strong>Date format</strong>
+                      <span>Used in file lists, preview metadata, and file conflict dialogs.</span>
+                    </span>
+                    <span class="settings-select-group">
+                      <span>{{ dateFormatPreview }}</span>
+                      <select
+                        :value="store.appSettings.dateFormat"
+                        aria-label="Date format"
+                        @change="setDateFormat"
+                      >
+                        <option
+                          v-for="option in DATE_FORMAT_OPTIONS"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          {{ option.label }}
+                        </option>
+                      </select>
+                    </span>
+                  </label>
 
                   <label class="setting-row setting-row--switch">
                     <span class="setting-copy">
@@ -762,6 +793,50 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
 .view-segment button.active {
   background: var(--btn-active-bg);
   color: var(--text);
+}
+
+.settings-select-group {
+  display: flex;
+  min-width: 190px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.settings-select-group > span {
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 560;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-select-group select {
+  height: 32px;
+  min-width: 150px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  padding: 0 30px 0 10px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.02)),
+    var(--input-bg);
+  box-shadow: var(--input-shadow);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  outline: 0;
+}
+
+.settings-select-group select:focus-visible {
+  border-color: var(--accent-border);
+  box-shadow:
+    var(--accent-focus-ring),
+    var(--input-shadow);
 }
 
 .switch-input {

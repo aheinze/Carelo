@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { canUseLocalFileAssets, localFileAssetUrl } from '../composables/useFileOperations';
+import { formatFileDate } from '../utils/dateFormat';
 import { isImageEntry } from '../utils/fileTypes';
 
 const props = defineProps({
@@ -16,6 +17,10 @@ const props = defineProps({
   variant: {
     type: String,
     default: 'list',
+  },
+  dateFormat: {
+    type: String,
+    default: 'system',
   },
 });
 
@@ -50,18 +55,6 @@ function formatSize(size) {
   }
 
   return `${(size / (1024 * 1024)).toFixed(1).replace('.', ',')} MB`;
-}
-
-function formatModified(modifiedAt) {
-  if (!modifiedAt) {
-    return '--';
-  }
-
-  return new Intl.DateTimeFormat(undefined, {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date(modifiedAt * 1000));
 }
 
 function shouldShowImage(entry) {
@@ -206,7 +199,7 @@ onBeforeUnmount(stopThumbnailObserver);
       <span v-if="entry.tagColor" class="tag-dot" :style="{ '--tag-color': entry.tagColor }" aria-hidden="true"></span>
     </span>
     <span class="muted">{{ formatSize(entry.size) }}</span>
-    <span class="muted">{{ formatModified(entry.modifiedAt) }}</span>
+    <span class="muted">{{ formatFileDate(entry.modifiedAt, dateFormat) }}</span>
   </button>
 </template>
 
@@ -300,7 +293,7 @@ onBeforeUnmount(stopThumbnailObserver);
   overflow: hidden;
   color: var(--text-muted);
   font-size: 14px;
-  font-weight: 560;
+  font-weight: 400;
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
