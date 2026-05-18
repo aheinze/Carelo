@@ -1444,6 +1444,7 @@ async function handleContextAction(action) {
 
     <header class="pane-header">
       <nav class="breadcrumbs" aria-label="Current path">
+        <AppIcon name="folder" :size="13" :stroke-width="1.9" class="breadcrumbs-icon" />
         <button
           v-for="(crumb, index) in breadcrumbs"
           :key="`${crumb.path}-${index}`"
@@ -1452,8 +1453,7 @@ async function handleContextAction(action) {
           @click.stop="navigateToBreadcrumb(crumb.path)"
           @keydown.stop
         >
-          <AppIcon v-if="crumb.path === '~'" name="home" :size="12" :stroke-width="2" />
-          <template v-else>{{ crumb.label }}</template>
+          {{ crumb.label }}
         </button>
       </nav>
 
@@ -1885,7 +1885,7 @@ async function handleContextAction(action) {
   width: 100%;
   min-width: 0;
   align-items: center;
-  gap: 0;
+  gap: 4px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -1893,6 +1893,11 @@ async function handleContextAction(action) {
 
 .breadcrumbs::-webkit-scrollbar {
   display: none;
+}
+
+.breadcrumbs-icon {
+  flex: 0 0 auto;
+  color: var(--text-faint);
 }
 
 .breadcrumbs button {
@@ -1948,12 +1953,6 @@ async function handleContextAction(action) {
   line-height: 1;
   top: 50%;
   transform: translateY(-50%);
-}
-
-.breadcrumbs button:first-child :deep(.app-icon) {
-  width: 14px;
-  height: 14px;
-  color: currentColor;
 }
 
 .pane-header-bottom {
