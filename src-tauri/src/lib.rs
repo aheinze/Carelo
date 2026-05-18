@@ -3,6 +3,7 @@ pub mod fs;
 pub mod queue;
 pub mod settings;
 pub mod store;
+pub mod window_state;
 
 use commands::app::quit_app;
 use commands::fs::{
@@ -14,7 +15,8 @@ use commands::fs::{
 };
 use commands::oauth::create_oauth_tokens;
 use commands::store::{
-    add_favorite, app_store_path, list_favorites, move_favorite, remove_favorite,
+    add_favorite, app_store_path, get_window_dimensions, list_favorites, move_favorite,
+    remove_favorite, save_window_dimensions,
 };
 use commands::terminal::{
     terminal_close, terminal_resize, terminal_start, terminal_write, TerminalState,
@@ -22,6 +24,7 @@ use commands::terminal::{
 use fs::remote::RemoteVolumeState;
 use store::AppStoreState;
 use tauri::Manager;
+use window_state::restore_and_show_main_window;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -32,8 +35,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let store = AppStoreState::initialize()
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.message))?;
+                .map_err(|error| std::io::Error::other(error.message))?;
             app.manage(store);
+            restore_and_show_main_window(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -62,6 +66,8 @@ pub fn run() {
             remove_favorite,
             move_favorite,
             app_store_path,
+            get_window_dimensions,
+            save_window_dimensions,
             create_oauth_tokens,
             terminal_start,
             terminal_write,

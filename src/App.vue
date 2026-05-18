@@ -12,7 +12,6 @@ import DialogHost from './components/DialogHost.vue';
 import ShortcutsModal from './components/ShortcutsModal.vue';
 import TooltipHost from './components/TooltipHost.vue';
 import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts';
-import { useWindowDimensionsPersistence } from './composables/useWindowDimensions';
 import { useFileManagerStore } from './stores/fileManagerStore';
 
 const store = useFileManagerStore();
@@ -22,7 +21,6 @@ const paneGrid = ref(null);
 let stopResize = null;
 
 useKeyboardShortcuts();
-useWindowDimensionsPersistence();
 
 const layoutStyle = computed(() => ({
   '--sidebar-width': `${store.sidebarWidth}px`,

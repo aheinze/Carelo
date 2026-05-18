@@ -11,6 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const STORE_DIRECTORY: &str = ".local/share/carelo";
 const STORE_FILE: &str = "carelo.store";
 const FAVORITES_SEEDED_KEY: &str = "favorites.seeded.v1";
+const WINDOW_DIMENSIONS_KEY: &str = "window.dimensions.v1";
+const MIN_WINDOW_WIDTH: f64 = 960.0;
+const MIN_WINDOW_HEIGHT: f64 = 640.0;
+const MAX_WINDOW_DIMENSION: f64 = 10000.0;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +37,14 @@ pub struct FavoriteInput {
     pub icon: Option<String>,
     pub color: Option<String>,
     pub sort_order: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowDimensions {
+    pub width: f64,
+    pub height: f64,
+    pub saved_at: i64,
 }
 
 pub struct AppStoreState {
@@ -176,6 +188,60 @@ impl AppStoreState {
             .map_err(|error| store_sql_error("Unable to save favorite order", &self.path, error))?;
 
         list_favorites(&connection, &self.path)
+    }
+
+    pub fn window_dimensions(&self) -> FsResult<Option<WindowDimensions>> {
+        let connection = self.connection()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = ?1",
+                params![WINDOW_DIMENSIONS_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                store_sql_error("Unable to read window dimensions", &self.path, error)
+            })?;
+
+        let Some(value) = value else {
+            return Ok(None);
+        };
+
+        let dimensions: WindowDimensions = serde_json::from_str(&value).map_err(|error| {
+            FsError::new(
+                "store_parse_error",
+                format!("Unable to parse saved window dimensions: {error}"),
+                Some(self.path.to_string_lossy().into_owned()),
+            )
+        })?;
+
+        Ok(normalize_window_dimensions(dimensions))
+    }
+
+    pub fn save_window_dimensions(&self, dimensions: WindowDimensions) -> FsResult<()> {
+        let Some(dimensions) = normalize_window_dimensions(dimensions) else {
+            return Ok(());
+        };
+
+        let value = serde_json::to_string(&dimensions).map_err(|error| {
+            FsError::new(
+                "store_serialize_error",
+                format!("Unable to serialize window dimensions: {error}"),
+                Some(self.path.to_string_lossy().into_owned()),
+            )
+        })?;
+        let connection = self.connection()?;
+
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
+                params![WINDOW_DIMENSIONS_KEY, value],
+            )
+            .map_err(|error| {
+                store_sql_error("Unable to save window dimensions", &self.path, error)
+            })?;
+
+        Ok(())
     }
 
     fn connection(&self) -> FsResult<std::sync::MutexGuard<'_, Connection>> {
@@ -432,7 +498,7 @@ fn favorite_name_for_path(path: &str) -> String {
         return rest
             .split('/')
             .filter(|part| !part.is_empty())
-            .last()
+            .next_back()
             .unwrap_or(rest)
             .to_string();
     }
@@ -440,7 +506,7 @@ fn favorite_name_for_path(path: &str) -> String {
     clean_path
         .split('/')
         .filter(|part| !part.is_empty() && *part != "~")
-        .last()
+        .next_back()
         .unwrap_or(clean_path)
         .to_string()
 }
@@ -450,6 +516,36 @@ fn unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+pub fn window_dimensions(width: f64, height: f64) -> WindowDimensions {
+    WindowDimensions {
+        width,
+        height,
+        saved_at: unix_timestamp(),
+    }
+}
+
+fn normalize_window_dimensions(dimensions: WindowDimensions) -> Option<WindowDimensions> {
+    if !dimensions.width.is_finite() || !dimensions.height.is_finite() {
+        return None;
+    }
+
+    Some(WindowDimensions {
+        width: dimensions
+            .width
+            .round()
+            .clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_DIMENSION),
+        height: dimensions
+            .height
+            .round()
+            .clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_DIMENSION),
+        saved_at: if dimensions.saved_at > 0 {
+            dimensions.saved_at
+        } else {
+            unix_timestamp()
+        },
+    })
 }
 
 fn store_io_error(action: &str, path: &Path, error: std::io::Error) -> FsError {

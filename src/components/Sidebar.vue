@@ -5,7 +5,6 @@ import RemoteVolumeModal from './RemoteVolumeModal.vue';
 import { getFileMetadata, removeRemoteVolume } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
-import { saveCurrentWindowDimensions } from '../composables/useWindowDimensions';
 import {
   closeTauriWindow,
   getTauriWindow,
@@ -461,7 +460,6 @@ function toggleMaximizeWindow(event) {
 
 function closeWindow(event) {
   event?.stopPropagation();
-  saveCurrentWindowDimensions();
   closeTauriWindow({ force: true }).catch(() => {});
 }
 
