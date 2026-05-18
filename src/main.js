@@ -53,6 +53,35 @@ function clearLegacyWindowDimensions() {
   }
 }
 
+function applyAppearanceMode(mode) {
+  if (mode === 'light' || mode === 'dark') {
+    document.documentElement.dataset.theme = mode;
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+}
+
+function legacyAppearanceMode() {
+  try {
+    const raw = window.localStorage.getItem(LEGACY_SETTINGS_KEY);
+    const settings = raw ? JSON.parse(raw) : {};
+    return settings.appSettings?.appearanceMode || null;
+  } catch {
+    return null;
+  }
+}
+
+async function applyStoredAppearanceMode() {
+  applyAppearanceMode(legacyAppearanceMode());
+
+  if (!hasTauriRuntime()) {
+    return;
+  }
+
+  const settings = await invoke('get_app_settings').catch(() => null);
+  applyAppearanceMode(settings?.appearanceMode || legacyAppearanceMode());
+}
+
 async function migrateLegacyWindowDimensions() {
   if (!hasTauriRuntime()) {
     return;
@@ -78,6 +107,7 @@ async function migrateLegacyWindowDimensions() {
   clearLegacyWindowDimensions();
 }
 
+await applyStoredAppearanceMode();
 await migrateLegacyWindowDimensions();
 
 const app = createApp(App);

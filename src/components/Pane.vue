@@ -1340,14 +1340,16 @@ async function handleContextAction(action) {
     if (action === 'delete') {
       const deleteEntries = contextOperationEntries(menu);
       const label = deleteEntries.length === 1 ? `"${deleteEntries[0].name}"` : `${deleteEntries.length} items`;
-      const confirmed = await dialog.confirm({
-        title: 'Delete Item',
-        message: `Delete ${label}?`,
-        detail: 'This cannot be undone from inside the app.',
-        confirmLabel: 'Delete',
-        variant: 'danger',
-        destructive: true,
-      });
+      const confirmed = store.appSettings.confirmDelete
+        ? await dialog.confirm({
+            title: 'Delete Item',
+            message: `Delete ${label}?`,
+            detail: 'This cannot be undone from inside the app.',
+            confirmLabel: 'Delete',
+            variant: 'danger',
+            destructive: true,
+          })
+        : true;
 
       if (confirmed) {
         const touchedDirectories = parentDirectoriesForEntries(deleteEntries);

@@ -394,14 +394,16 @@ export function useKeyboardShortcuts() {
 
     const label = entries.length === 1 ? `"${entries[0].name}"` : `${entries.length} items`;
 
-    const confirmed = await dialog.confirm({
-      title: 'Delete Items',
-      message: `Delete ${label}?`,
-      detail: 'This cannot be undone from inside the app.',
-      confirmLabel: 'Delete',
-      variant: 'danger',
-      destructive: true,
-    });
+    const confirmed = store.appSettings.confirmDelete
+      ? await dialog.confirm({
+          title: 'Delete Items',
+          message: `Delete ${label}?`,
+          detail: 'This cannot be undone from inside the app.',
+          confirmLabel: 'Delete',
+          variant: 'danger',
+          destructive: true,
+        })
+      : true;
 
     if (!confirmed) {
       return;
@@ -644,6 +646,12 @@ export function useKeyboardShortcuts() {
     const targetPath = currentPath(targetPaneId);
 
     try {
+      if (onlyCommand && key === ',') {
+        event.preventDefault();
+        store.openSettings();
+        return;
+      }
+
       if (command && key === 'Tab') {
         event.preventDefault();
         store.activateAdjacentTab(paneId, event.shiftKey ? -1 : 1);

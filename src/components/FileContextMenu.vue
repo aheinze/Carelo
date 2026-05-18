@@ -31,6 +31,7 @@ const menuRef = ref(null);
 const menuStyle = ref({
   left: `${props.position.x}px`,
   top: `${props.position.y}px`,
+  maxHeight: 'calc(100vh - 16px)',
 });
 
 const canOpenInNewTab = computed(() => props.entry?.kind === 'directory');
@@ -45,13 +46,34 @@ function updatePosition() {
     }
 
     const margin = 8;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
     const rect = menu.getBoundingClientRect();
-    const left = Math.min(props.position.x, window.innerWidth - rect.width - margin);
-    const top = Math.min(props.position.y, window.innerHeight - rect.height - margin);
+    const maxHeight = Math.max(1, viewportHeight - margin * 2);
+    const menuHeight = Math.min(menu.scrollHeight, maxHeight);
+    const wouldOverflowRight = props.position.x + rect.width + margin > viewportWidth;
+    const wouldOverflowBottom = props.position.y + menuHeight + margin > viewportHeight;
+    const canFitLeft = props.position.x - rect.width >= margin;
+    const canFitAbove = props.position.y - menuHeight >= margin;
+    const preferredLeft = wouldOverflowRight && canFitLeft
+      ? props.position.x - rect.width
+      : props.position.x;
+    const preferredTop = wouldOverflowBottom && canFitAbove
+      ? props.position.y - menuHeight
+      : props.position.y;
+    const left = Math.min(
+      Math.max(margin, preferredLeft),
+      Math.max(margin, viewportWidth - rect.width - margin),
+    );
+    const top = Math.min(
+      Math.max(margin, preferredTop),
+      Math.max(margin, viewportHeight - menuHeight - margin),
+    );
 
     menuStyle.value = {
-      left: `${Math.max(margin, left)}px`,
-      top: `${Math.max(margin, top)}px`,
+      left: `${left}px`,
+      top: `${top}px`,
+      maxHeight: `${maxHeight}px`,
     };
   });
 }
@@ -196,7 +218,9 @@ onUnmounted(() => {
   position: fixed;
   z-index: 2000;
   min-width: 224px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--control-border);
   border-radius: 13px;
   padding: 5px;
@@ -205,6 +229,23 @@ onUnmounted(() => {
   color: var(--text);
   animation: ctx-appear 130ms cubic-bezier(0.2, 0, 0, 1) both;
   transform-origin: top left;
+  scrollbar-width: thin;
+  scrollbar-color: var(--control-border) transparent;
+}
+
+.context-menu::-webkit-scrollbar {
+  width: 9px;
+}
+
+.context-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.context-menu::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--control-border);
+  background-clip: padding-box;
 }
 
 @keyframes ctx-appear {

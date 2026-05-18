@@ -1,6 +1,7 @@
 use crate::fs::models::{FsError, FsResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -12,6 +13,7 @@ const STORE_DIRECTORY: &str = ".local/share/carelo";
 const STORE_FILE: &str = "carelo.store";
 const FAVORITES_SEEDED_KEY: &str = "favorites.seeded.v1";
 const WINDOW_DIMENSIONS_KEY: &str = "window.dimensions.v1";
+const APP_SETTINGS_KEY: &str = "app.settings.v1";
 const MIN_WINDOW_WIDTH: f64 = 960.0;
 const MIN_WINDOW_HEIGHT: f64 = 640.0;
 const MAX_WINDOW_DIMENSION: f64 = 10000.0;
@@ -240,6 +242,50 @@ impl AppStoreState {
             .map_err(|error| {
                 store_sql_error("Unable to save window dimensions", &self.path, error)
             })?;
+
+        Ok(())
+    }
+
+    pub fn app_settings(&self) -> FsResult<Option<Value>> {
+        let connection = self.connection()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = ?1",
+                params![APP_SETTINGS_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| store_sql_error("Unable to read app settings", &self.path, error))?;
+
+        let Some(value) = value else {
+            return Ok(None);
+        };
+
+        serde_json::from_str(&value).map(Some).map_err(|error| {
+            FsError::new(
+                "store_parse_error",
+                format!("Unable to parse saved app settings: {error}"),
+                Some(self.path.to_string_lossy().into_owned()),
+            )
+        })
+    }
+
+    pub fn save_app_settings(&self, settings: Value) -> FsResult<()> {
+        let value = serde_json::to_string(&settings).map_err(|error| {
+            FsError::new(
+                "store_serialize_error",
+                format!("Unable to serialize app settings: {error}"),
+                Some(self.path.to_string_lossy().into_owned()),
+            )
+        })?;
+        let connection = self.connection()?;
+
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
+                params![APP_SETTINGS_KEY, value],
+            )
+            .map_err(|error| store_sql_error("Unable to save app settings", &self.path, error))?;
 
         Ok(())
     }

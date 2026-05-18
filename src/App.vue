@@ -8,6 +8,7 @@ import PreviewPanel from './components/PreviewPanel.vue';
 import TerminalPanel from './components/TerminalPanel.vue';
 import TransferQueue from './components/TransferQueue.vue';
 import CommandPalette from './components/CommandPalette.vue';
+import SettingsWindow from './components/SettingsWindow.vue';
 import DialogHost from './components/DialogHost.vue';
 import ShortcutsModal from './components/ShortcutsModal.vue';
 import TooltipHost from './components/TooltipHost.vue';
@@ -155,6 +156,7 @@ onBeforeUnmount(() => {
     </div>
 
     <CommandPalette />
+    <SettingsWindow />
     <DialogHost />
     <ShortcutsModal />
     <TooltipHost />

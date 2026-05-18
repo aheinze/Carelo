@@ -94,14 +94,16 @@ async function deleteSelection() {
     return;
   }
 
-  const confirmed = await dialog.confirm({
-    title: entries.length === 1 ? 'Delete Item' : 'Delete Items',
-    message: entries.length === 1 ? `Delete "${entries[0].name}"?` : `Delete ${entries.length} selected items?`,
-    detail: 'This cannot be undone from inside the app.',
-    confirmLabel: 'Delete',
-    variant: 'danger',
-    destructive: true,
-  });
+  const confirmed = store.appSettings.confirmDelete
+    ? await dialog.confirm({
+        title: entries.length === 1 ? 'Delete Item' : 'Delete Items',
+        message: entries.length === 1 ? `Delete "${entries[0].name}"?` : `Delete ${entries.length} selected items?`,
+        detail: 'This cannot be undone from inside the app.',
+        confirmLabel: 'Delete',
+        variant: 'danger',
+        destructive: true,
+      })
+    : true;
 
   if (!confirmed) {
     return;
@@ -327,6 +329,21 @@ async function deleteSelection() {
           @click="store.togglePreviewPanel"
         >
           <AppIcon name="panel-right" :size="19" :stroke-width="1.8" />
+        </button>
+      </div>
+
+      <div class="toolbar-divider toolbar-divider--soft" aria-hidden="true"></div>
+
+      <div class="icon-group settings-action-group" role="toolbar" aria-label="Settings">
+        <button
+          v-tooltip="'Settings'"
+          type="button"
+          class="icon-btn"
+          :class="{ active: store.settingsVisible }"
+          aria-label="Open settings"
+          @click="store.openSettings"
+        >
+          <AppIcon name="sliders" :size="19" :stroke-width="1.8" />
         </button>
       </div>
     </div>

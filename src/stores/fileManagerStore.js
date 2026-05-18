@@ -5,6 +5,7 @@ import {
   addFavorite as addStoredFavorite,
   cancelFileOperation,
   canUseLocalFileAssets,
+  getAppSettings as getStoredAppSettings,
   getHomeDirectory,
   listDirectory,
   listFavorites as listStoredFavorites,
@@ -13,6 +14,7 @@ import {
   pauseFileOperation,
   removeFavorite as removeStoredFavorite,
   resumeFileOperation,
+  saveAppSettings as saveStoredAppSettings,
 } from '../composables/useFileOperations';
 import { loadUiSettings, saveUiSettings } from '../composables/useSettings';
 
@@ -21,8 +23,19 @@ let nextQueueJobId = 1;
 let nextOperationLogId = 1;
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
 const SORT_DIRECTIONS = ['asc', 'desc'];
+const VIEW_MODES = ['list', 'grid', 'columns'];
+const APPEARANCE_MODES = ['system', 'light', 'dark'];
 const NAV_HISTORY_LIMIT = 80;
 const OPERATION_LOG_LIMIT = 120;
+const DEFAULT_APP_SETTINGS = Object.freeze({
+  appearanceMode: 'system',
+  defaultViewMode: 'list',
+  showHiddenFiles: false,
+  restoreSession: true,
+  restoreTerminalPanel: false,
+  confirmDelete: true,
+  terminalStartsInActiveFolder: true,
+});
 const NAME_COLLATOR = new Intl.Collator(undefined, {
   numeric: true,
   sensitivity: 'base',
@@ -34,6 +47,44 @@ function normalizeSortKey(sortKey) {
 
 function normalizeSortDirection(direction) {
   return SORT_DIRECTIONS.includes(direction) ? direction : 'asc';
+}
+
+function normalizeViewMode(viewMode) {
+  return VIEW_MODES.includes(viewMode) ? viewMode : DEFAULT_APP_SETTINGS.defaultViewMode;
+}
+
+function normalizeAppearanceMode(mode) {
+  return APPEARANCE_MODES.includes(mode) ? mode : DEFAULT_APP_SETTINGS.appearanceMode;
+}
+
+function normalizeAppSettings(settings = {}) {
+  const value = settings && typeof settings === 'object' ? settings : {};
+
+  return {
+    ...DEFAULT_APP_SETTINGS,
+    ...value,
+    appearanceMode: normalizeAppearanceMode(value.appearanceMode),
+    defaultViewMode: normalizeViewMode(value.defaultViewMode),
+    showHiddenFiles: value.showHiddenFiles === true,
+    restoreSession: value.restoreSession !== false,
+    restoreTerminalPanel: value.restoreTerminalPanel === true,
+    confirmDelete: value.confirmDelete !== false,
+    terminalStartsInActiveFolder: value.terminalStartsInActiveFolder !== false,
+  };
+}
+
+function applyAppearanceMode(mode) {
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  const normalizedMode = normalizeAppearanceMode(mode);
+
+  if (normalizedMode === 'system') {
+    document.documentElement.removeAttribute('data-theme');
+  } else {
+    document.documentElement.dataset.theme = normalizedMode;
+  }
 }
 
 function defaultDirectionForSort(sortKey) {
@@ -307,19 +358,29 @@ function clampIndex(index, min, max) {
 
 export const useFileManagerStore = defineStore('file-manager', () => {
   const savedSettings = loadUiSettings();
+  const initialAppSettings = normalizeAppSettings({
+    ...(savedSettings.appSettings || {}),
+    showHiddenFiles: savedSettings.appSettings?.showHiddenFiles ?? savedSettings.showHiddenFiles ?? false,
+  });
+  const appSettings = ref(initialAppSettings);
+  const shouldRestoreSession = appSettings.value.restoreSession;
+  const defaultViewMode = appSettings.value.defaultViewMode;
+  const restoredPaneSettings = shouldRestoreSession ? savedSettings : {};
+
+  applyAppearanceMode(appSettings.value.appearanceMode);
 
   const panes = ref({
     left: createPane(
       'left',
-      savedTabsFor(savedSettings, 'left', savedSettings.leftPath || '~', 'list'),
-      savedSettings.leftPath || '~',
-      'list',
+      savedTabsFor(restoredPaneSettings, 'left', restoredPaneSettings.leftPath || '~', defaultViewMode),
+      restoredPaneSettings.leftPath || '~',
+      defaultViewMode,
     ),
     right: createPane(
       'right',
-      savedTabsFor(savedSettings, 'right', savedSettings.rightPath || '~', 'grid'),
-      savedSettings.rightPath || '~',
-      'grid',
+      savedTabsFor(restoredPaneSettings, 'right', restoredPaneSettings.rightPath || '~', defaultViewMode),
+      restoredPaneSettings.rightPath || '~',
+      defaultViewMode,
     ),
   });
 
@@ -329,9 +390,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const previewPanelVisible = ref(savedSettings.previewPanelVisible ?? true);
   const previewPanelWidth = ref(savedSettings.previewPanelWidth ?? 400);
   const paneSplitPercent = ref(savedSettings.paneSplitPercent ?? 48);
-  const terminalPanelVisible = ref(savedSettings.terminalPanelVisible ?? false);
+  const terminalPanelVisible = ref(
+    appSettings.value.restoreTerminalPanel ? (savedSettings.terminalPanelVisible ?? false) : false,
+  );
   const terminalPanelHeight = ref(savedSettings.terminalPanelHeight ?? 280);
-  const showHiddenFiles = ref(savedSettings.showHiddenFiles ?? false);
+  const showHiddenFiles = ref(appSettings.value.showHiddenFiles);
+  const settingsVisible = ref(false);
   const searchQuery = ref('');
   const queue = ref([]);
   const operationLog = ref([]);
@@ -421,6 +485,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     }
 
     initializePromise = (async () => {
+      await loadAppSettings();
       await initializeOperationProgressListener();
       await Promise.all([
         loadFavorites(),
@@ -428,10 +493,13 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       ]);
 
       if (
-        savedSettings.leftPath ||
-        savedSettings.rightPath ||
-        savedSettings.leftTabs ||
-        savedSettings.rightTabs
+        shouldRestoreSession &&
+        (
+          savedSettings.leftPath ||
+          savedSettings.rightPath ||
+          savedSettings.leftTabs ||
+          savedSettings.rightTabs
+        )
       ) {
         return;
       }
@@ -455,6 +523,24 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     })();
 
     return initializePromise;
+  }
+
+  async function loadAppSettings() {
+    try {
+      const storedSettings = await getStoredAppSettings();
+
+      if (storedSettings && typeof storedSettings === 'object') {
+        appSettings.value = normalizeAppSettings({
+          ...appSettings.value,
+          ...storedSettings,
+        });
+        showHiddenFiles.value = appSettings.value.showHiddenFiles;
+      } else {
+        saveStoredAppSettings(appSettings.value).catch(() => {});
+      }
+    } catch {
+      // Browser fallback: localStorage settings are loaded synchronously above.
+    }
   }
 
   async function initializeOperationProgressListener() {
@@ -1044,7 +1130,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       return;
     }
 
-    const tab = createTab(path || sourceTab.currentPath, sourceTab.viewMode);
+    const tab = createTab(path || sourceTab.currentPath, appSettings.value.defaultViewMode);
     pane.tabs.push(tab);
     pane.activeTabId = tab.id;
     setActivePane(paneId);
@@ -1741,8 +1827,40 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     terminalPanelHeight.value = Math.max(180, Math.min(560, Number(height) || 280));
   }
 
+  function setShowHiddenFiles(value) {
+    const nextValue = Boolean(value);
+    showHiddenFiles.value = nextValue;
+
+    if (appSettings.value.showHiddenFiles !== nextValue) {
+      appSettings.value = normalizeAppSettings({
+        ...appSettings.value,
+        showHiddenFiles: nextValue,
+      });
+    }
+  }
+
   function toggleHiddenFiles() {
-    showHiddenFiles.value = !showHiddenFiles.value;
+    setShowHiddenFiles(!showHiddenFiles.value);
+  }
+
+  function setAppSetting(key, value) {
+    const nextSettings = normalizeAppSettings({
+      ...appSettings.value,
+      [key]: value,
+    });
+    appSettings.value = nextSettings;
+  }
+
+  function openSettings() {
+    settingsVisible.value = true;
+  }
+
+  function closeSettings() {
+    settingsVisible.value = false;
+  }
+
+  function toggleSettings() {
+    settingsVisible.value = !settingsVisible.value;
   }
 
   watch(
@@ -1778,6 +1896,17 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     { deep: true },
   );
 
+  watch(
+    appSettings,
+    (settings) => {
+      const normalizedSettings = normalizeAppSettings(settings);
+      applyAppearanceMode(normalizedSettings.appearanceMode);
+      saveUiSettings({ appSettings: normalizedSettings });
+      saveStoredAppSettings(normalizedSettings).catch(() => {});
+    },
+    { deep: true },
+  );
+
   return {
     panes,
     activePaneId,
@@ -1792,6 +1921,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     terminalPanelVisible,
     terminalPanelHeight,
     showHiddenFiles,
+    settingsVisible,
+    appSettings,
     searchQuery,
     queue,
     operationLog,
@@ -1874,6 +2005,11 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     togglePreviewPanel,
     toggleTerminalPanel,
     setTerminalPanelHeight,
+    setShowHiddenFiles,
     toggleHiddenFiles,
+    setAppSetting,
+    openSettings,
+    closeSettings,
+    toggleSettings,
   };
 });

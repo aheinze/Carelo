@@ -126,6 +126,57 @@ defineProps({
       <path d="m16 16 4 4" />
     </template>
 
+    <template v-else-if="name === 'settings'">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 3.8v2.1" />
+      <path d="M12 18.1v2.1" />
+      <path d="m5.8 5.8 1.5 1.5" />
+      <path d="m16.7 16.7 1.5 1.5" />
+      <path d="M3.8 12h2.1" />
+      <path d="M18.1 12h2.1" />
+      <path d="m5.8 18.2 1.5-1.5" />
+      <path d="m16.7 7.3 1.5-1.5" />
+    </template>
+
+    <template v-else-if="name === 'sliders'">
+      <path d="M4 6.5h8.2" />
+      <path d="M16.8 6.5H20" />
+      <circle cx="14.3" cy="6.5" r="2.1" />
+      <path d="M4 12h3.2" />
+      <path d="M11.8 12H20" />
+      <circle cx="9.3" cy="12" r="2.1" />
+      <path d="M4 17.5h9.2" />
+      <path d="M17.8 17.5H20" />
+      <circle cx="15.3" cy="17.5" r="2.1" />
+    </template>
+
+    <template v-else-if="name === 'monitor'">
+      <rect x="4" y="5" width="16" height="11" rx="2" />
+      <path d="M9 20h6" />
+      <path d="M12 16v4" />
+    </template>
+
+    <template v-else-if="name === 'sun'">
+      <circle cx="12" cy="12" r="3.7" />
+      <path d="M12 3.5v2" />
+      <path d="M12 18.5v2" />
+      <path d="M4.6 4.6 6 6" />
+      <path d="m18 18 1.4 1.4" />
+      <path d="M3.5 12h2" />
+      <path d="M18.5 12h2" />
+      <path d="M4.6 19.4 6 18" />
+      <path d="m18 6 1.4-1.4" />
+    </template>
+
+    <template v-else-if="name === 'moon'">
+      <path d="M18.8 14.2A7.1 7.1 0 0 1 9.8 5.2 7.4 7.4 0 1 0 18.8 14.2Z" />
+    </template>
+
+    <template v-else-if="name === 'shield'">
+      <path d="M12 3.8 19 6.5v5.2c0 4.1-2.8 7-7 8.5-4.2-1.5-7-4.4-7-8.5V6.5Z" />
+      <path d="m9.2 12 2 2 4-4" />
+    </template>
+
     <template v-else-if="name === 'sidebar'">
       <rect x="4" y="5" width="16" height="14" rx="2.2" />
       <path d="M9.5 5v14" />

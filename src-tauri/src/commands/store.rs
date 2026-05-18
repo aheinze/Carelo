@@ -3,6 +3,7 @@ use crate::store::{
     window_dimensions as build_window_dimensions, AppStoreState, FavoriteEntry, FavoriteInput,
     WindowDimensions,
 };
+use serde_json::Value;
 
 #[tauri::command]
 pub fn list_favorites(store: tauri::State<'_, AppStoreState>) -> FsResult<Vec<FavoriteEntry>> {
@@ -50,4 +51,14 @@ pub fn save_window_dimensions(
     store: tauri::State<'_, AppStoreState>,
 ) -> FsResult<()> {
     store.save_window_dimensions(build_window_dimensions(width, height))
+}
+
+#[tauri::command]
+pub fn get_app_settings(store: tauri::State<'_, AppStoreState>) -> FsResult<Option<Value>> {
+    store.app_settings()
+}
+
+#[tauri::command]
+pub fn save_app_settings(settings: Value, store: tauri::State<'_, AppStoreState>) -> FsResult<()> {
+    store.save_app_settings(settings)
 }

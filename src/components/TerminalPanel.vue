@@ -34,7 +34,11 @@ let colorSchemeListener = null;
 const activeSession = computed(() =>
   sessions.value.find((session) => session.id === activeSessionId.value) || sessions.value[0] || null,
 );
-const activeCwd = computed(() => store.activePane?.currentPath || undefined);
+const activeCwd = computed(() =>
+  store.appSettings.terminalStartsInActiveFolder
+    ? (store.effectiveDirectoryFor(store.activePaneId) || store.activePane?.currentPath || undefined)
+    : undefined,
+);
 
 function titleForShell(shell) {
   const parts = String(shell || 'shell').split('/');
@@ -352,6 +356,13 @@ watch(
 watch(activeSessionId, () => {
   nextTick(attachActiveSession);
 });
+
+watch(
+  () => store.appSettings.appearanceMode,
+  () => {
+    window.requestAnimationFrame(() => applyTerminalThemes());
+  },
+);
 
 onMounted(async () => {
   unlistenOutput = await listen('terminal://output', (event) => {

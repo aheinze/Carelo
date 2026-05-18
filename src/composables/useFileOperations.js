@@ -201,6 +201,14 @@ export async function appStorePath() {
   return invokeCommand('app_store_path');
 }
 
+export async function getAppSettings() {
+  return invokeCommand('get_app_settings');
+}
+
+export async function saveAppSettings(settings) {
+  return invokeCommand('save_app_settings', { settings });
+}
+
 export async function createOAuthTokens(provider, clientId, clientSecret = '') {
   return invokeCommand('create_oauth_tokens', {
     provider,
