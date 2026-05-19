@@ -250,6 +250,10 @@ export async function unarchiveItems(paths, destinationDirectory, jobId = null) 
   return invokeCommand('unarchive_items', { paths, destinationDirectory, jobId }, { sudo: true });
 }
 
+export async function measureItemsSize(paths, jobId = null) {
+  return invokeCommand('measure_items_size', { paths, jobId });
+}
+
 export async function cancelFileOperation(jobId) {
   return invokeCommand('cancel_file_operation', { jobId });
 }
@@ -316,6 +320,7 @@ export function useFileOperations() {
     listRemoteVolumes,
     listVolumes,
     localFileAssetUrl,
+    measureItemsSize,
     moveFavorite,
     moveItems,
     openWithApp,

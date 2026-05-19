@@ -12,6 +12,7 @@ use crate::open_with::{self, OpenWithContext};
 use crate::store::AppStoreState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -147,6 +148,17 @@ struct FileOperationProgress {
     current_path: Option<String>,
     current_bytes: u64,
     current_total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SizeMeasureResult {
+    pub logical_bytes: u64,
+    pub disk_bytes: u64,
+    pub files: u64,
+    pub directories: u64,
+    pub symlinks: u64,
+    pub skipped: u64,
 }
 
 #[tauri::command]
@@ -877,6 +889,58 @@ pub async fn unarchive_items(
 }
 
 #[tauri::command]
+pub async fn measure_items_size(
+    app: AppHandle,
+    operation_state: tauri::State<'_, FileOperationState>,
+    paths: Vec<String>,
+    job_id: Option<String>,
+) -> Result<SizeMeasureResult, FsError> {
+    let _operation_cleanup =
+        OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
+
+    if paths.is_empty() {
+        return Ok(SizeMeasureResult::default());
+    }
+
+    for path in &paths {
+        if archive::is_archive_uri(path) {
+            return Err(FsError::new(
+                "unsupported_size_measure",
+                "Folder size measurement is available for local files and folders only.",
+                Some(path.clone()),
+            ));
+        }
+
+        if let Some(remote_path) = parse_remote_path(path) {
+            return Err(cross_provider_error(
+                "Measuring remote folder sizes is not implemented yet.",
+                &remote_path.volume_id,
+                &remote_path.path,
+            ));
+        }
+    }
+
+    let local_paths = paths
+        .iter()
+        .map(|path| expand_local_path(path))
+        .collect::<FsResult<Vec<_>>>()?;
+
+    let measure_app = app.clone();
+    let measure_job_id = job_id.clone();
+    let measure_operation_state = operation_state.inner().clone();
+
+    run_local(move |_| {
+        measure_local_items_size(
+            &measure_app,
+            &measure_operation_state,
+            &measure_job_id,
+            local_paths,
+        )
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn cancel_file_operation(
     job_id: String,
     operation_state: tauri::State<'_, FileOperationState>,
@@ -1033,6 +1097,206 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), FsError> {
             Some(path.to_string_lossy().into_owned()),
         )
     })
+}
+
+#[derive(Debug, Default)]
+struct SizeMeasureAccumulator {
+    logical_bytes: u64,
+    disk_bytes: u64,
+    files: u64,
+    directories: u64,
+    symlinks: u64,
+    skipped: u64,
+    processed_entries: u64,
+}
+
+impl From<SizeMeasureAccumulator> for SizeMeasureResult {
+    fn from(value: SizeMeasureAccumulator) -> Self {
+        Self {
+            logical_bytes: value.logical_bytes,
+            disk_bytes: value.disk_bytes,
+            files: value.files,
+            directories: value.directories,
+            symlinks: value.symlinks,
+            skipped: value.skipped,
+        }
+    }
+}
+
+fn measure_local_items_size(
+    app: &AppHandle,
+    operation_state: &FileOperationState,
+    job_id: &Option<String>,
+    roots: Vec<PathBuf>,
+) -> FsResult<SizeMeasureResult> {
+    let mut accumulator = SizeMeasureAccumulator::default();
+    let mut stack = roots.into_iter().rev().collect::<Vec<_>>();
+    #[cfg(unix)]
+    let mut seen_directories = HashSet::new();
+    #[cfg(not(unix))]
+    let mut seen_directories = ();
+    #[cfg(unix)]
+    let mut seen_regular_files = HashSet::new();
+    #[cfg(not(unix))]
+    let mut seen_regular_files = ();
+
+    emit_size_measure_progress(app, job_id, &accumulator, None);
+
+    while let Some(path) = stack.pop() {
+        operation_state.checkpoint(job_id, Some(&path))?;
+
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                accumulator.skipped = accumulator.skipped.saturating_add(1);
+                accumulator.processed_entries = accumulator.processed_entries.saturating_add(1);
+                maybe_emit_size_measure_progress(app, job_id, &accumulator, &path);
+                continue;
+            }
+        };
+
+        accumulator.processed_entries = accumulator.processed_entries.saturating_add(1);
+        let file_type = metadata.file_type();
+
+        if file_type.is_symlink() {
+            accumulator.symlinks = accumulator.symlinks.saturating_add(1);
+            accumulator.logical_bytes = accumulator.logical_bytes.saturating_add(metadata.len());
+            accumulator.disk_bytes = accumulator
+                .disk_bytes
+                .saturating_add(metadata_disk_usage_bytes(&metadata));
+            maybe_emit_size_measure_progress(app, job_id, &accumulator, &path);
+            continue;
+        }
+
+        if metadata.is_file() {
+            accumulator.files = accumulator.files.saturating_add(1);
+
+            if should_count_regular_file(&metadata, &mut seen_regular_files) {
+                accumulator.logical_bytes =
+                    accumulator.logical_bytes.saturating_add(metadata.len());
+                accumulator.disk_bytes = accumulator
+                    .disk_bytes
+                    .saturating_add(metadata_disk_usage_bytes(&metadata));
+            }
+
+            maybe_emit_size_measure_progress(app, job_id, &accumulator, &path);
+            continue;
+        }
+
+        if metadata.is_dir() {
+            if !should_count_directory(&metadata, &mut seen_directories) {
+                maybe_emit_size_measure_progress(app, job_id, &accumulator, &path);
+                continue;
+            }
+
+            accumulator.directories = accumulator.directories.saturating_add(1);
+            accumulator.disk_bytes = accumulator
+                .disk_bytes
+                .saturating_add(metadata_disk_usage_bytes(&metadata));
+
+            match fs::read_dir(&path) {
+                Ok(entries) => {
+                    for entry in entries {
+                        operation_state.checkpoint(job_id, Some(&path))?;
+
+                        match entry {
+                            Ok(entry) => stack.push(entry.path()),
+                            Err(_) => {
+                                accumulator.skipped = accumulator.skipped.saturating_add(1);
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    accumulator.skipped = accumulator.skipped.saturating_add(1);
+                }
+            }
+
+            maybe_emit_size_measure_progress(app, job_id, &accumulator, &path);
+            continue;
+        }
+
+        accumulator.files = accumulator.files.saturating_add(1);
+        accumulator.logical_bytes = accumulator.logical_bytes.saturating_add(metadata.len());
+        accumulator.disk_bytes = accumulator
+            .disk_bytes
+            .saturating_add(metadata_disk_usage_bytes(&metadata));
+        maybe_emit_size_measure_progress(app, job_id, &accumulator, &path);
+    }
+
+    emit_size_measure_progress(app, job_id, &accumulator, None);
+    Ok(accumulator.into())
+}
+
+fn maybe_emit_size_measure_progress(
+    app: &AppHandle,
+    job_id: &Option<String>,
+    accumulator: &SizeMeasureAccumulator,
+    current_path: &Path,
+) {
+    if accumulator.processed_entries % 128 != 0 {
+        return;
+    }
+
+    emit_size_measure_progress(app, job_id, accumulator, Some(current_path));
+}
+
+fn emit_size_measure_progress(
+    app: &AppHandle,
+    job_id: &Option<String>,
+    accumulator: &SizeMeasureAccumulator,
+    current_path: Option<&Path>,
+) {
+    emit_file_operation_progress(
+        app,
+        job_id,
+        "measure",
+        "running",
+        ProgressSnapshot {
+            processed_bytes: accumulator.logical_bytes,
+            processed_entries: accumulator.processed_entries,
+            current_path: current_path.map(|path| path.to_string_lossy().into_owned()),
+            ..ProgressSnapshot::default()
+        },
+    );
+}
+
+#[cfg(unix)]
+fn should_count_directory(
+    metadata: &fs::Metadata,
+    seen_directories: &mut HashSet<(u64, u64)>,
+) -> bool {
+    seen_directories.insert((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn should_count_directory(metadata: &fs::Metadata, seen_directories: &mut ()) -> bool {
+    let _ = (metadata, seen_directories);
+    true
+}
+
+#[cfg(unix)]
+fn should_count_regular_file(
+    metadata: &fs::Metadata,
+    seen_regular_files: &mut HashSet<(u64, u64)>,
+) -> bool {
+    metadata.nlink() <= 1 || seen_regular_files.insert((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn should_count_regular_file(metadata: &fs::Metadata, seen_regular_files: &mut ()) -> bool {
+    let _ = (metadata, seen_regular_files);
+    true
+}
+
+#[cfg(unix)]
+fn metadata_disk_usage_bytes(metadata: &fs::Metadata) -> u64 {
+    metadata.blocks().saturating_mul(512)
+}
+
+#[cfg(not(unix))]
+fn metadata_disk_usage_bytes(metadata: &fs::Metadata) -> u64 {
+    metadata.len()
 }
 
 #[derive(Debug, Clone, Default)]

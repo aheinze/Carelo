@@ -1,7 +1,13 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
-import { getFileMetadata, localFileAssetUrl } from '../composables/useFileOperations';
+import {
+  cancelFileOperation,
+  getFileMetadata,
+  isRemotePath,
+  localFileAssetUrl,
+  measureItemsSize,
+} from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
 import { formatFileDateTime } from '../utils/dateFormat';
@@ -20,9 +26,145 @@ import {
 const store = useFileManagerStore();
 const VIDEO_BLOB_PREVIEW_LIMIT = 256 * 1024 * 1024;
 const AUDIO_BLOB_PREVIEW_LIMIT = 128 * 1024 * 1024;
-const selectedEntry = computed(() => {
-  const fallbackPaneId = store.activePaneId === 'left' ? 'right' : 'left';
-  return store.selectedEntryFor(store.activePaneId) || store.selectedEntryFor(fallbackPaneId);
+const fallbackPaneId = computed(() => (store.activePaneId === 'left' ? 'right' : 'left'));
+const previewSelectionEntries = computed(() => {
+  const activeSelection = store.selectedEntriesFor(store.activePaneId);
+
+  if (activeSelection.length > 0) {
+    return activeSelection;
+  }
+
+  const activeEntry = store.selectedEntryFor(store.activePaneId);
+
+  if (activeEntry) {
+    return [activeEntry];
+  }
+
+  const fallbackSelection = store.selectedEntriesFor(fallbackPaneId.value);
+
+  if (fallbackSelection.length > 0) {
+    return fallbackSelection;
+  }
+
+  const fallbackEntry = store.selectedEntryFor(fallbackPaneId.value);
+  return fallbackEntry ? [fallbackEntry] : [];
+});
+const hasMultipleSelection = computed(() => previewSelectionEntries.value.length > 1);
+const selectedEntry = computed(() => (
+  hasMultipleSelection.value ? null : previewSelectionEntries.value[0] || null
+));
+const folderSizeMeasurement = ref(null);
+const folderSizeMeasurementLoading = ref(false);
+const folderSizeMeasurementError = ref('');
+let folderSizeMeasureVersion = 0;
+let folderSizeMeasureJobId = null;
+let folderSizeMeasureSequence = 0;
+const measurableFolderEntries = computed(() =>
+  previewSelectionEntries.value.filter((entry) => isMeasurableFolderEntry(entry)),
+);
+const measurableFolderPaths = computed(() =>
+  measurableFolderEntries.value.map((entry) => entry.path),
+);
+const measurableFolderPathSet = computed(() => new Set(measurableFolderPaths.value));
+const directKnownSelectionSize = computed(() =>
+  previewSelectionEntries.value.reduce((total, entry) => (
+    entry.kind !== 'directory' && hasKnownSize(entry) ? total + Number(entry.size) : total
+  ), 0),
+);
+const measuredFolderSize = computed(() => Number(folderSizeMeasurement.value?.logicalBytes || 0));
+const measuredFolderEntryCount = computed(() => {
+  const measurement = folderSizeMeasurement.value;
+
+  return Number(measurement?.files || 0) +
+    Number(measurement?.directories || 0) +
+    Number(measurement?.symlinks || 0);
+});
+const selectionKnownSize = computed(() => directKnownSelectionSize.value + measuredFolderSize.value);
+const selectionUnknownSizeCount = computed(() =>
+  previewSelectionEntries.value.reduce((count, entry) => {
+    if (entry.kind === 'directory') {
+      if (!measurableFolderPathSet.value.has(entry.path)) {
+        return count + 1;
+      }
+
+      if (!folderSizeMeasurement.value) {
+        return count + 1;
+      }
+
+      return measuredFolderEntryCount.value > 0 ? count : count + 1;
+    }
+
+    return hasKnownSize(entry) ? count : count + 1;
+  }, 0),
+);
+const selectionTypeSummary = computed(() => {
+  const counts = previewSelectionEntries.value.reduce((summary, entry) => {
+    if (entry.kind === 'directory') {
+      summary.folders += 1;
+    } else if (entry.kind === 'file') {
+      summary.files += 1;
+    } else {
+      summary.other += 1;
+    }
+
+    return summary;
+  }, { files: 0, folders: 0, other: 0 });
+  const parts = [
+    countLabel(counts.files, 'file'),
+    countLabel(counts.folders, 'folder'),
+    countLabel(counts.other, 'item'),
+  ].filter(Boolean);
+
+  return parts.join(', ');
+});
+const selectionSizeLabel = computed(() =>
+  folderSizeMeasurementLoading.value && measurableFolderPaths.value.length > 0
+    ? 'Calculating size'
+    : selectionUnknownSizeCount.value > 0
+      ? 'Known size'
+      : 'Overall size',
+);
+const selectionSizeValue = computed(() => {
+  if (selectionKnownSize.value > 0) {
+    return formatBytes(selectionKnownSize.value);
+  }
+
+  if (folderSizeMeasurementLoading.value && measurableFolderPaths.value.length > 0) {
+    return 'Calculating...';
+  }
+
+  if (folderSizeMeasurement.value && selectionUnknownSizeCount.value > 0) {
+    return 'Size unavailable';
+  }
+
+  return selectionUnknownSizeCount.value > 0 ? 'Size unavailable' : '0 B';
+});
+const selectionSizeDetail = computed(() => {
+  const details = [];
+  const missing = selectionUnknownSizeCount.value;
+
+  if (folderSizeMeasurementLoading.value && measurableFolderPaths.value.length > 0) {
+    details.push(`Scanning ${countLabel(measurableFolderPaths.value.length, 'folder')}`);
+  }
+
+  if (folderSizeMeasurement.value?.skipped) {
+    details.push(`${countLabel(folderSizeMeasurement.value.skipped, 'item')} skipped`);
+  }
+
+  if (folderSizeMeasurementError.value) {
+    details.push(folderSizeMeasurementError.value);
+  }
+
+  if (missing > 0 && !folderSizeMeasurementLoading.value) {
+    details.push(`${countLabel(missing, 'item')} not counted`);
+  }
+
+  return details.join(' · ');
+});
+const selectionCommonLocation = computed(() => {
+  const parents = [...new Set(previewSelectionEntries.value.map((entry) => parentPathFor(entry.path)))];
+
+  return parents.length === 1 ? parents[0] : 'Multiple locations';
 });
 const imageFailed = ref(false);
 const audioFailed = ref(false);
@@ -119,6 +261,14 @@ watch(
         metadataLoading.value = false;
       }
     }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [store.previewPanelVisible, measurableFolderPaths.value.join('\0')],
+  () => {
+    startFolderSizeMeasurement();
   },
   { immediate: true },
 );
@@ -245,9 +395,125 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  cancelActiveFolderSizeMeasurement();
   revokeAudioPreviewUrl();
   revokeVideoPreviewUrl();
 });
+
+function countLabel(count, singular, plural = `${singular}s`) {
+  if (!count) {
+    return '';
+  }
+
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function hasKnownSize(entry) {
+  return entry?.size !== null && entry?.size !== undefined && Number.isFinite(Number(entry.size));
+}
+
+function isMeasurableFolderEntry(entry) {
+  return (
+    entry?.kind === 'directory' &&
+    Boolean(entry.path) &&
+    !isArchivePath(entry.path) &&
+    !isRemotePath(entry.path)
+  );
+}
+
+function isOperationCancelled(error) {
+  return (
+    error?.code === 'operation_cancelled' ||
+    /cancelled/i.test(String(error?.message || error || ''))
+  );
+}
+
+function folderSizeSkippedLabel() {
+  const skipped = Number(folderSizeMeasurement.value?.skipped || 0);
+
+  return skipped > 0 ? `${countLabel(skipped, 'item')} skipped while calculating size.` : '';
+}
+
+function displaySizeForEntry(entry) {
+  if (entry?.kind === 'directory' && isMeasurableFolderEntry(entry)) {
+    if (folderSizeMeasurement.value) {
+      if (measuredFolderEntryCount.value === 0 && folderSizeMeasurement.value.skipped > 0) {
+        return 'Size unavailable';
+      }
+
+      return formatBytes(folderSizeMeasurement.value.logicalBytes);
+    }
+
+    if (folderSizeMeasurementLoading.value) {
+      return 'Calculating...';
+    }
+  }
+
+  return formatSize(entry?.size);
+}
+
+function hasDisplaySize(entry) {
+  return displaySizeForEntry(entry) !== '--';
+}
+
+function cancelActiveFolderSizeMeasurement() {
+  if (!folderSizeMeasureJobId) {
+    return;
+  }
+
+  const jobId = folderSizeMeasureJobId;
+  folderSizeMeasureJobId = null;
+  cancelFileOperation(jobId).catch(() => {});
+}
+
+async function startFolderSizeMeasurement() {
+  folderSizeMeasureVersion += 1;
+  const measureVersion = folderSizeMeasureVersion;
+
+  cancelActiveFolderSizeMeasurement();
+  folderSizeMeasurement.value = null;
+  folderSizeMeasurementError.value = '';
+
+  if (!store.previewPanelVisible) {
+    folderSizeMeasurementLoading.value = false;
+    return;
+  }
+
+  const paths = measurableFolderPaths.value;
+
+  if (paths.length === 0) {
+    folderSizeMeasurementLoading.value = false;
+    return;
+  }
+
+  folderSizeMeasureSequence += 1;
+  const jobId = `preview-folder-size-${Date.now()}-${folderSizeMeasureSequence}`;
+
+  folderSizeMeasureJobId = jobId;
+  folderSizeMeasurementLoading.value = true;
+
+  try {
+    const result = await measureItemsSize(paths, jobId);
+
+    if (folderSizeMeasureVersion === measureVersion) {
+      folderSizeMeasurement.value = result;
+      folderSizeMeasurementError.value = '';
+    }
+  } catch (error) {
+    if (!isOperationCancelled(error)) {
+      const message = error?.message || 'Unable to calculate folder size.';
+
+      if (folderSizeMeasureVersion === measureVersion) {
+        folderSizeMeasurementError.value = message;
+      }
+    }
+  } finally {
+    if (folderSizeMeasureVersion === measureVersion) {
+      folderSizeMeasureJobId = null;
+      folderSizeMeasurementLoading.value = false;
+    }
+  }
+}
 
 function formatSize(size) {
   if (size === null || size === undefined) return '--';
@@ -563,7 +829,48 @@ function logDetail(entry) {
 
     <div class="inspector-content">
     <template v-if="activeInspectorSection === 'info'">
-      <template v-if="inspectedEntry">
+      <template v-if="hasMultipleSelection">
+        <section class="selection-overview" aria-label="Selection summary">
+          <div class="selection-stack-art" aria-hidden="true">
+            <span class="selection-stack-card selection-stack-card--back"></span>
+            <span class="selection-stack-card selection-stack-card--middle"></span>
+            <span class="selection-stack-card selection-stack-card--front">
+              <AppIcon name="file" :size="38" :stroke-width="1.35" />
+            </span>
+          </div>
+
+          <div class="selection-identity">
+            <h2>{{ previewSelectionEntries.length }} items selected</h2>
+            <p>{{ selectionTypeSummary }}</p>
+          </div>
+
+          <div class="selection-metrics">
+            <div class="selection-metric">
+              <span>Items</span>
+              <strong>{{ previewSelectionEntries.length }}</strong>
+            </div>
+            <div class="selection-metric">
+              <span>{{ selectionSizeLabel }}</span>
+              <strong>{{ selectionSizeValue }}</strong>
+              <small v-if="selectionSizeDetail">{{ selectionSizeDetail }}</small>
+            </div>
+          </div>
+
+          <dl class="selection-general">
+            <div>
+              <dt>Location</dt>
+              <dd :title="selectionCommonLocation">{{ selectionCommonLocation }}</dd>
+            </div>
+            <div>
+              <dt>Selection</dt>
+              <dd>{{ selectionTypeSummary }}</dd>
+            </div>
+          </dl>
+        </section>
+
+      </template>
+
+      <template v-else-if="inspectedEntry">
 
         <!-- ── Hero ───────────────────────────────────── -->
         <div class="preview-hero">
@@ -642,8 +949,8 @@ function logDetail(entry) {
           <h2 :title="inspectedEntry.name">{{ inspectedEntry.name }}</h2>
           <div class="file-meta-row">
             <span>{{ displayTypeFor(inspectedEntry.name) || typeLabel(inspectedEntry) }}</span>
-            <span v-if="inspectedEntry.size !== null && inspectedEntry.size !== undefined">
-              - {{ compactSize(inspectedEntry.size) }}
+            <span v-if="hasDisplaySize(inspectedEntry)">
+              - {{ displaySizeForEntry(inspectedEntry) }}
             </span>
           </div>
         </div>
@@ -663,7 +970,7 @@ function logDetail(entry) {
             </div>
             <div>
               <dt>Size</dt>
-              <dd>{{ formatSize(inspectedEntry.size) }}</dd>
+              <dd>{{ displaySizeForEntry(inspectedEntry) }}</dd>
             </div>
             <div>
               <dt>Modified</dt>
@@ -694,6 +1001,15 @@ function logDetail(entry) {
               </dd>
             </div>
           </dl>
+          <p v-if="folderSizeMeasurementLoading && isMeasurableFolderEntry(inspectedEntry)" class="metadata-note">
+            Calculating folder size...
+          </p>
+          <p v-else-if="folderSizeMeasurementError && isMeasurableFolderEntry(inspectedEntry)" class="metadata-note metadata-note--warning">
+            {{ folderSizeMeasurementError }}
+          </p>
+          <p v-else-if="folderSizeSkippedLabel() && isMeasurableFolderEntry(inspectedEntry)" class="metadata-note">
+            {{ folderSizeSkippedLabel() }}
+          </p>
           <p v-if="metadataLoading" class="metadata-note">Loading file metadata...</p>
           <p v-else-if="metadataError" class="metadata-note metadata-note--warning">
             {{ metadataError }}
@@ -1128,6 +1444,112 @@ h2 {
   color: var(--text-faint);
   font-size: 11.5px;
   font-weight: 500;
+}
+
+/* ── Multi-selection summary ──────────────────────────────── */
+.selection-overview {
+  display: grid;
+  gap: 16px;
+  margin: 37px 20px 0;
+}
+
+.selection-stack-art {
+  position: relative;
+  display: grid;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.selection-stack-card {
+  position: absolute;
+  display: grid;
+  width: 128px;
+  height: 86px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: 8px;
+  background: var(--popover-bg);
+  color: var(--accent);
+  box-shadow: 0 1px 0 rgb(255 255 255 / 0.07);
+}
+
+.selection-stack-card--back {
+  transform: translate(-18px, -12px) rotate(-7deg);
+  opacity: 0.48;
+}
+
+.selection-stack-card--middle {
+  transform: translate(10px, -2px) rotate(4deg);
+  opacity: 0.7;
+}
+
+.selection-stack-card--front {
+  transform: translate(0, 12px);
+}
+
+.selection-identity {
+  min-width: 0;
+  padding: 0 14px;
+}
+
+.selection-identity p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-metrics {
+  display: grid;
+  grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
+  gap: 8px;
+}
+
+.selection-metric {
+  display: grid;
+  min-width: 0;
+  min-height: 72px;
+  align-content: center;
+  gap: 3px;
+  border-radius: 7px;
+  padding: 12px 13px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.selection-metric span,
+.selection-metric small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 670;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-metric strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 760;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selection-metric small {
+  color: var(--text-faint);
+  font-weight: 620;
+}
+
+.selection-general {
+  border-radius: 7px;
 }
 
 /* ── Inspector sections ───────────────────────────────────── */
