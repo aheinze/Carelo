@@ -30,6 +30,10 @@ const props = defineProps({
     type: Boolean,
     required: true,
   },
+  loaded: {
+    type: Boolean,
+    default: false,
+  },
   viewMode: {
     type: String,
     required: true,
@@ -125,7 +129,7 @@ const baseColumn = computed(() => ({
   entries: props.entries,
   rawEntryCount: props.rawEntryCount,
   selectedIndex: props.selectedIndex,
-  loading: props.loading,
+  loading: props.loading && !props.loaded,
   error: '',
   base: true,
 }));
@@ -811,7 +815,7 @@ function handleBackgroundClick(event) {
 }
 
 function syncBaseColumnSelection() {
-  if (props.viewMode !== 'columns' || props.loading) {
+  if (props.viewMode !== 'columns' || (props.loading && !props.loaded)) {
     return;
   }
 
@@ -846,11 +850,12 @@ async function refreshColumnDirectory(path) {
   }
 
   const columnPath = columnTrail.value[columnIndex].path;
+  const shouldShowLoadingState = columnTrail.value[columnIndex].entries.length === 0;
   columnTrail.value = [
     ...columnTrail.value.slice(0, columnIndex),
     {
       ...columnTrail.value[columnIndex],
-      loading: true,
+      loading: shouldShowLoadingState,
       error: '',
     },
     ...columnTrail.value.slice(columnIndex + 1),
@@ -896,7 +901,9 @@ async function refreshColumnDirectory(path) {
       {
         ...columnTrail.value[currentIndex],
         loading: false,
-        error: error?.message || 'Unable to refresh folder.',
+        error: columnTrail.value[currentIndex].entries.length > 0
+          ? ''
+          : error?.message || 'Unable to refresh folder.',
       },
       ...columnTrail.value.slice(currentIndex + 1),
     ];
@@ -972,7 +979,7 @@ watch(
     @drop="handleCurrentDirectoryDrop"
     @click="handleBackgroundClick"
   >
-    <template v-if="loading">
+    <template v-if="loading && !loaded">
       <div class="file-loading-state" role="status" aria-live="polite">
         <span class="visually-hidden">Loading directory contents</span>
 

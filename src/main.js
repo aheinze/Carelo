@@ -1,10 +1,11 @@
-import { createApp } from 'vue';
+import { createApp, nextTick } from 'vue';
 import { createPinia } from 'pinia';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import App from './App.vue';
 import './assets/main.css';
 import { vTooltip } from './directives/vTooltip';
+import { applyColorScheme } from './utils/colorSchemes';
 
 const LEGACY_SETTINGS_KEY = 'carelo.phase1.settings';
 const MIN_WINDOW_WIDTH = 960;
@@ -71,8 +72,19 @@ function legacyAppearanceMode() {
   }
 }
 
+function legacyColorScheme() {
+  try {
+    const raw = window.localStorage.getItem(LEGACY_SETTINGS_KEY);
+    const settings = raw ? JSON.parse(raw) : {};
+    return settings.appSettings?.colorScheme || null;
+  } catch {
+    return null;
+  }
+}
+
 async function applyStoredAppearanceMode() {
   applyAppearanceMode(legacyAppearanceMode());
+  applyColorScheme(legacyColorScheme());
 
   if (!hasTauriRuntime()) {
     return;
@@ -80,6 +92,7 @@ async function applyStoredAppearanceMode() {
 
   const settings = await invoke('get_app_settings').catch(() => null);
   applyAppearanceMode(settings?.appearanceMode || legacyAppearanceMode());
+  applyColorScheme(settings?.colorScheme || legacyColorScheme());
 }
 
 async function migrateLegacyWindowDimensions() {
@@ -107,6 +120,15 @@ async function migrateLegacyWindowDimensions() {
   clearLegacyWindowDimensions();
 }
 
+async function showMainWindowWhenReady() {
+  if (!hasTauriRuntime()) {
+    return;
+  }
+
+  await nextTick();
+  await getCurrentWindow().show().catch(() => {});
+}
+
 await applyStoredAppearanceMode();
 await migrateLegacyWindowDimensions();
 
@@ -115,3 +137,4 @@ const app = createApp(App);
 app.use(createPinia());
 app.directive('tooltip', vTooltip);
 app.mount('#app');
+await showMainWindowWhenReady();

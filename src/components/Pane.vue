@@ -1764,6 +1764,7 @@ async function handleContextAction(action) {
           :search-query="activeSearchQuery"
           :selected-index="activeTab.selectedIndex"
           :loading="activeTab.loading"
+          :loaded="activeTab.loaded"
           :view-mode="activeTab.viewMode"
           :directory-key="activeTab.currentPath"
           :sort-key="activeTab.sortKey"

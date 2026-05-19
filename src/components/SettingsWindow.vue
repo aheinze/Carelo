@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { COLOR_SCHEME_OPTIONS } from '../utils/colorSchemes';
 import { DATE_FORMAT_OPTIONS, formatDate } from '../utils/dateFormat';
 
 const store = useFileManagerStore();
@@ -13,7 +14,7 @@ const sections = [
     id: 'appearance',
     label: 'Appearance',
     icon: 'monitor',
-    keywords: 'appearance theme color dark light auto system',
+    keywords: 'appearance theme color scheme dark light auto system material one dark pro tokyo night',
   },
   {
     id: 'files',
@@ -46,6 +47,7 @@ const appearanceModes = [
   { value: 'light', label: 'Light', icon: 'sun' },
   { value: 'dark', label: 'Dark', icon: 'moon' },
 ];
+const colorSchemeOptions = COLOR_SCHEME_OPTIONS;
 
 const viewModes = [
   { value: 'list', label: 'List', icon: 'list' },
@@ -74,6 +76,19 @@ const visibleSections = computed(() => {
 
 function setAppearanceMode(mode) {
   store.setAppSetting('appearanceMode', mode);
+}
+
+function setColorScheme(scheme) {
+  store.setAppSetting('colorScheme', scheme);
+}
+
+function colorSchemePreviewStyle(option) {
+  return {
+    '--scheme-sidebar': option.preview.sidebar,
+    '--scheme-toolbar': option.preview.toolbar,
+    '--scheme-pane': option.preview.pane,
+    '--scheme-accent': option.preview.accent,
+  };
 }
 
 function setDefaultViewMode(viewMode) {
@@ -130,12 +145,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
       >
         <section class="settings-window" @pointerdown.stop>
           <aside class="settings-sidebar" aria-label="Settings sections">
-            <div class="settings-traffic" aria-hidden="true">
-              <span class="traffic-dot traffic-dot--close"></span>
-              <span class="traffic-dot traffic-dot--minimize"></span>
-              <span class="traffic-dot traffic-dot--zoom"></span>
-            </div>
-
             <label class="settings-search">
               <AppIcon name="search" :size="14" />
               <input v-model="searchQuery" type="search" placeholder="Search" />
@@ -206,6 +215,44 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
                         <span class="appearance-label">
                           <AppIcon :name="mode.icon" :size="14" :stroke-width="1.8" />
                           {{ mode.label }}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="setting-row setting-row--stacked">
+                    <div class="setting-copy">
+                      <strong>Color theme</strong>
+                      <span>Sets the palette Carelo uses in light, dark, and system appearance.</span>
+                    </div>
+
+                    <div class="scheme-options" role="group" aria-label="Color theme">
+                      <button
+                        v-for="scheme in colorSchemeOptions"
+                        :key="scheme.value"
+                        type="button"
+                        class="scheme-option"
+                        :class="{ active: store.appSettings.colorScheme === scheme.value }"
+                        :style="colorSchemePreviewStyle(scheme)"
+                        :aria-pressed="store.appSettings.colorScheme === scheme.value"
+                        @click="setColorScheme(scheme.value)"
+                      >
+                        <span class="scheme-preview" aria-hidden="true">
+                          <span class="scheme-preview-sidebar"></span>
+                          <span class="scheme-preview-toolbar"></span>
+                          <span class="scheme-preview-pane"></span>
+                          <span class="scheme-preview-accent"></span>
+                        </span>
+                        <span class="scheme-details">
+                          <span class="scheme-name">{{ scheme.label }}</span>
+                          <span class="scheme-description">{{ scheme.description }}</span>
+                        </span>
+                        <span class="scheme-swatches" aria-hidden="true">
+                          <span
+                            v-for="swatch in scheme.swatches"
+                            :key="`${scheme.value}-${swatch}`"
+                            :style="{ background: swatch }"
+                          ></span>
                         </span>
                       </button>
                     </div>
@@ -405,26 +452,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   border-right: 1px solid var(--separator);
   background: color-mix(in srgb, var(--sidebar-bg) 84%, transparent);
 }
-
-.settings-traffic {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 18px;
-  padding-left: 2px;
-}
-
-.traffic-dot {
-  display: block;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 0.5px rgb(0 0 0 / 0.28);
-}
-
-.traffic-dot--close { background: var(--traffic-close); }
-.traffic-dot--minimize { background: var(--traffic-minimize); }
-.traffic-dot--zoom { background: var(--traffic-zoom); }
 
 .settings-search {
   display: flex;
@@ -756,6 +783,115 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   font-weight: 680;
 }
 
+.scheme-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.scheme-option {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 2.5%, transparent);
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.scheme-option:hover {
+  border-color: var(--control-border);
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+.scheme-option.active {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px rgb(var(--accent-rgb) / 0.22);
+  color: var(--text);
+}
+
+.scheme-preview {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34% 1fr;
+  grid-template-rows: 16px 1fr;
+  height: 54px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--scheme-pane);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.10);
+}
+
+.scheme-preview-sidebar {
+  grid-row: 1 / 3;
+  background: var(--scheme-sidebar);
+}
+
+.scheme-preview-toolbar {
+  background: var(--scheme-toolbar);
+}
+
+.scheme-preview-pane {
+  background: var(--scheme-pane);
+}
+
+.scheme-preview-accent {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: 28px;
+  height: 5px;
+  border-radius: 5px;
+  background: var(--scheme-accent);
+}
+
+.scheme-details {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.scheme-name {
+  overflow: hidden;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheme-description {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 540;
+  line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.scheme-swatches {
+  display: inline-flex;
+  align-self: start;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.scheme-swatches span {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.18);
+}
+
 .view-segment {
   display: inline-flex;
   width: fit-content;
@@ -929,6 +1065,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
 
   .appearance-options {
     grid-template-columns: 1fr;
+  }
+
+  .scheme-options {
+    grid-template-columns: 1fr;
+  }
+
+  .scheme-option {
+    grid-template-columns: 80px minmax(0, 1fr) auto;
   }
 
   .view-segment {

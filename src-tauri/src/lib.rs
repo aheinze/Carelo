@@ -26,7 +26,7 @@ use commands::terminal::{
 use fs::remote::RemoteVolumeState;
 use store::AppStoreState;
 use tauri::Manager;
-use window_state::restore_and_show_main_window;
+use window_state::restore_main_window_state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -39,7 +39,7 @@ pub fn run() {
             let store = AppStoreState::initialize()
                 .map_err(|error| std::io::Error::other(error.message))?;
             app.manage(store);
-            restore_and_show_main_window(app);
+            restore_main_window_state(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

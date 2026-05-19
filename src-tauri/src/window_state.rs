@@ -3,7 +3,7 @@ use tauri::{App, AppHandle, LogicalSize, Manager, Runtime, WebviewWindow, Window
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
-pub fn restore_and_show_main_window<R: Runtime>(app: &App<R>) {
+pub fn restore_main_window_state<R: Runtime>(app: &App<R>) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         return;
     };
@@ -15,7 +15,6 @@ pub fn restore_and_show_main_window<R: Runtime>(app: &App<R>) {
     }
 
     register_window_dimension_persistence(&window, app.handle().clone());
-    let _ = window.show();
 }
 
 pub fn save_main_window_dimensions<R: Runtime>(app: &AppHandle<R>) {

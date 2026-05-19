@@ -24,6 +24,7 @@ import {
   isArchiveEntry,
   isArchivePath,
 } from '../utils/archivePaths';
+import { applyColorScheme, normalizeColorScheme } from '../utils/colorSchemes';
 import { normalizeDateFormat } from '../utils/dateFormat';
 
 let nextTabId = 1;
@@ -40,6 +41,7 @@ const LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT = 1500;
 const OPERATION_LOG_LIMIT = 120;
 const DEFAULT_APP_SETTINGS = Object.freeze({
   appearanceMode: 'system',
+  colorScheme: 'carelo',
   defaultViewMode: 'list',
   dateFormat: 'system',
   showHiddenFiles: false,
@@ -76,6 +78,7 @@ function normalizeAppSettings(settings = {}) {
     ...DEFAULT_APP_SETTINGS,
     ...value,
     appearanceMode: normalizeAppearanceMode(value.appearanceMode),
+    colorScheme: normalizeColorScheme(value.colorScheme),
     defaultViewMode: normalizeViewMode(value.defaultViewMode),
     dateFormat: normalizeDateFormat(value.dateFormat),
     showHiddenFiles: value.showHiddenFiles === true,
@@ -116,6 +119,7 @@ function clearTabEntryCache(tab) {
   }
 
   tab.entries = [];
+  tab.entriesPath = '';
   tab.loaded = false;
   tab.selectedIndex = 0;
   tab.selectionAnchorIndex = 0;
@@ -166,6 +170,7 @@ function createTab(
     lastActiveAt: nextTabActivityId++,
     loadVersion: 0,
     entries: [],
+    entriesPath: '',
     selectedIndex: 0,
     selectionAnchorIndex: 0,
     selectedPaths: [],
@@ -431,6 +436,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const restoredPaneSettings = shouldRestoreSession ? savedSettings : {};
 
   applyAppearanceMode(appSettings.value.appearanceMode);
+  applyColorScheme(appSettings.value.colorScheme);
 
   const panes = ref({
     left: createPane(
@@ -754,31 +760,49 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       return;
     }
 
+    const requestedPath = tab.currentPath;
+    const query = searchQuery.value.trim().toLowerCase();
+    const isRefreshingLoadedPath = tab.loaded && tab.entriesPath === requestedPath;
+    const focusedPath = isRefreshingLoadedPath
+      ? visibleEntriesForTab(tab, query, showHiddenFiles.value)[tab.selectedIndex]?.path || ''
+      : '';
+
     tab.loading = true;
     tab.error = '';
     clearColumnPreviewEntry(paneId);
     clearColumnSelectionState(paneId);
     clearColumnTargetDirectory(paneId);
+
+    if (!isRefreshingLoadedPath) {
+      tab.entries = [];
+      tab.entriesPath = '';
+      tab.loaded = false;
+      tab.selectedIndex = 0;
+      tab.selectionAnchorIndex = 0;
+      tab.selectedPaths = [];
+    }
+
     const loadVersion = tab.loadVersion + 1;
     tab.loadVersion = loadVersion;
 
     try {
-      const entries = await listDirectory(tab.currentPath);
+      const entries = await listDirectory(requestedPath);
 
       if (tab.loadVersion !== loadVersion) {
         return;
       }
 
       tab.entries = entries;
+      tab.entriesPath = requestedPath;
       tab.loaded = true;
       tab.selectedPaths = tab.selectedPaths.filter((path) =>
         entries.some((entry) => entry.path === path),
       );
-      tab.selectedIndex = visibleEntriesForTab(
-        tab,
-        searchQuery.value.trim().toLowerCase(),
-        showHiddenFiles.value,
-      ).length > 0 ? 0 : -1;
+      const visibleEntries = visibleEntriesForTab(tab, query, showHiddenFiles.value);
+      const focusedIndex = focusedPath
+        ? visibleEntries.findIndex((entry) => entry.path === focusedPath)
+        : -1;
+      tab.selectedIndex = focusedIndex >= 0 ? focusedIndex : visibleEntries.length > 0 ? 0 : -1;
       tab.selectionAnchorIndex = tab.selectedIndex;
     } catch (error) {
       if (tab.loadVersion !== loadVersion) {
@@ -786,6 +810,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       }
 
       tab.entries = [];
+      tab.entriesPath = requestedPath;
       tab.selectedIndex = -1;
       tab.selectionAnchorIndex = -1;
       tab.loaded = true;
@@ -2041,6 +2066,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     (settings) => {
       const normalizedSettings = normalizeAppSettings(settings);
       applyAppearanceMode(normalizedSettings.appearanceMode);
+      applyColorScheme(normalizedSettings.colorScheme);
       saveUiSettings({ appSettings: normalizedSettings });
       saveStoredAppSettings(normalizedSettings).catch(() => {});
     },
