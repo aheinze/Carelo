@@ -583,6 +583,31 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
+/* Desktop shell text should not highlight while clicking, dragging, or navigating. */
+.app-window,
+.app-tooltip {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Preserve selection in real text-entry/content surfaces. */
+:where(
+  input,
+  textarea,
+  select,
+  option,
+  [contenteditable="true"],
+  [contenteditable=""],
+  .terminal-host,
+  .terminal-host *,
+  .xterm,
+  .xterm *,
+  .text-selectable
+) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* ── App window ───────────────────────────────────────────── */
 .app-window {
   position: relative;
