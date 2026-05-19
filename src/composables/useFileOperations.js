@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { useDialog } from './useDialog';
+import { isArchivePath } from '../utils/archivePaths';
 
 function hasTauriBridge() {
   return (
@@ -25,7 +26,7 @@ export function isRemotePath(path) {
 }
 
 export function localFileAssetUrl(path) {
-  if (!hasTauriBridge() || !path || isRemotePath(path)) {
+  if (!hasTauriBridge() || !path || isRemotePath(path) || isArchivePath(path)) {
     return '';
   }
 

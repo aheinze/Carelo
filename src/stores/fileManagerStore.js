@@ -17,6 +17,13 @@ import {
   saveAppSettings as saveStoredAppSettings,
 } from '../composables/useFileOperations';
 import { loadUiSettings, saveUiSettings } from '../composables/useSettings';
+import {
+  archiveDisplayName,
+  archiveParentPath,
+  archiveRootPath,
+  isArchiveEntry,
+  isArchivePath,
+} from '../utils/archivePaths';
 import { normalizeDateFormat } from '../utils/dateFormat';
 
 let nextTabId = 1;
@@ -156,6 +163,10 @@ function createPane(id, initialTabs, fallbackPath, fallbackViewMode) {
 }
 
 function parentPathFor(path) {
+  if (isArchivePath(path)) {
+    return archiveParentPath(path);
+  }
+
   const cleanPath = String(path || '').replace(/\/+$/, '');
 
   if (!cleanPath || cleanPath === '/' || cleanPath === '~') {
@@ -193,6 +204,10 @@ function normalizeComparablePath(path) {
     return value || '~';
   }
 
+  if (isArchivePath(value)) {
+    return value.endsWith('!/') ? value : value.replace(/\/+$/, '');
+  }
+
   return value.replace(/\/+$/, '');
 }
 
@@ -209,6 +224,10 @@ function normalizeError(error) {
 }
 
 function tabTitleForPath(path) {
+  if (isArchivePath(path)) {
+    return archiveDisplayName(path) || 'Archive';
+  }
+
   const cleanPath = String(path || '~').replace(/\/+$/, '');
 
   if (!cleanPath || cleanPath === '~') {
@@ -1472,6 +1491,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     if (entry && entry.kind === 'directory') {
       setPanePath(paneId, entry.path);
+    } else if (isArchiveEntry(entry)) {
+      setPanePath(paneId, archiveRootPath(entry.path));
     }
   }
 
@@ -1555,7 +1576,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     const focusedEntry = selectedEntryFor(sourcePaneId);
     const nextPath = focusedEntry?.kind === 'directory'
       ? focusedEntry.path
-      : effectiveDirectoryFor(sourcePaneId) || sourceTab?.currentPath;
+      : isArchiveEntry(focusedEntry)
+        ? archiveRootPath(focusedEntry.path)
+        : effectiveDirectoryFor(sourcePaneId) || sourceTab?.currentPath;
 
     if (nextPath) {
       setPanePath(targetPaneId, nextPath);
@@ -1714,7 +1737,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   }
 
   async function addFavoritesFromEntries(entries, targetIndex = null) {
-    const directories = (entries || []).filter((entry) => entry?.kind === 'directory' && entry.path);
+    const directories = (entries || []).filter((entry) =>
+      entry?.kind === 'directory' && entry.path && !isArchivePath(entry.path),
+    );
 
     if (directories.length === 0) {
       return [];

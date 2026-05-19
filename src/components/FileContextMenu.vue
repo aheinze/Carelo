@@ -27,6 +27,14 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  canModify: {
+    type: Boolean,
+    default: true,
+  },
+  canMove: {
+    type: Boolean,
+    default: true,
+  },
 });
 
 const emit = defineEmits(['action', 'close']);
@@ -166,7 +174,13 @@ onUnmounted(() => {
         <AppIcon name="copy" :size="16" />
         <span>Copy Path</span>
       </button>
-      <button type="button" role="menuitem" class="context-menu-item" @click="emitAction('rename')">
+      <button
+        type="button"
+        role="menuitem"
+        class="context-menu-item"
+        :disabled="!canModify"
+        @click="emitAction('rename')"
+      >
         <AppIcon name="file" :size="16" />
         <span>Rename</span>
       </button>
@@ -210,7 +224,7 @@ onUnmounted(() => {
         type="button"
         role="menuitem"
         class="context-menu-item"
-        :disabled="!canTransfer"
+        :disabled="!canMove"
         @click="emitAction('moveToOtherPane')"
       >
         <AppIcon name="chevron-right" :size="16" />
@@ -219,7 +233,13 @@ onUnmounted(() => {
 
       <div class="context-menu-separator"></div>
 
-      <button type="button" role="menuitem" class="context-menu-item context-menu-item--danger" @click="emitAction('delete')">
+      <button
+        type="button"
+        role="menuitem"
+        class="context-menu-item context-menu-item--danger"
+        :disabled="!canModify"
+        @click="emitAction('delete')"
+      >
         <AppIcon name="trash" :size="16" />
         <span>Delete</span>
       </button>

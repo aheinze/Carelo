@@ -155,6 +155,10 @@ pub async fn list_directory(
     sudo_password: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<Vec<FileEntry>, FsError> {
+    if let Some(archive_path) = archive::parse_archive_uri(&path) {
+        return run_local(move |_| archive::list_archive_directory(&archive_path)).await;
+    }
+
     if let Some(remote_path) = parse_remote_path(&path) {
         return list_remote_directory(&remotes, remote_path).await;
     }
@@ -197,6 +201,12 @@ pub async fn same_volume(paths: Vec<String>, target_directory: String) -> Result
     let Some(first_path) = paths.first() else {
         return Ok(true);
     };
+
+    if archive::is_archive_uri(&target_directory)
+        || paths.iter().any(|path| archive::is_archive_uri(path))
+    {
+        return Ok(false);
+    }
 
     if let Some(remote_target) = parse_remote_path(&target_directory) {
         return Ok(paths.iter().all(|path| {
@@ -242,6 +252,10 @@ pub async fn get_file_metadata(
     sudo_password: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<FileMetadata, FsError> {
+    if let Some(archive_path) = archive::parse_archive_uri(&path) {
+        return run_local(move |_| archive::stat_archive_entry(&archive_path)).await;
+    }
+
     if let Some(remote_path) = parse_remote_path(&path) {
         return stat_remote_item(&remotes, remote_path).await;
     }
@@ -261,6 +275,10 @@ pub async fn create_folder(
     sudo_password: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<(), FsError> {
+    if archive::is_archive_uri(&path) {
+        return Err(archive_read_only_error(&path));
+    }
+
     if let Some(remote_path) = parse_remote_path(&path) {
         return create_remote_folder(&remotes, remote_path).await;
     }
@@ -281,6 +299,14 @@ pub async fn rename_item(
     sudo_password: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<(), FsError> {
+    if archive::is_archive_uri(&from) || archive::is_archive_uri(&to) {
+        return Err(archive_read_only_error(if archive::is_archive_uri(&from) {
+            &from
+        } else {
+            &to
+        }));
+    }
+
     match (parse_remote_path(&from), parse_remote_path(&to)) {
         (Some(remote_from), Some(remote_to)) => {
             return rename_remote_item(&remotes, remote_from, remote_to).await;
@@ -321,7 +347,9 @@ pub async fn delete_items(
     let mut local_paths = Vec::new();
 
     for path in paths {
-        if let Some(remote_path) = parse_remote_path(&path) {
+        if archive::is_archive_uri(&path) {
+            return Err(archive_read_only_error(&path));
+        } else if let Some(remote_path) = parse_remote_path(&path) {
             delete_remote_item(&remotes, remote_path).await?;
         } else {
             local_paths.push(path);
@@ -364,6 +392,7 @@ pub async fn copy_items(
 ) -> Result<(), FsError> {
     let _operation_cleanup =
         OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
+    let mut archive_items = Vec::new();
     let mut local_items = Vec::new();
     let total_items = items.len() as u64;
     let mut processed_items = 0_u64;
@@ -371,8 +400,23 @@ pub async fn copy_items(
     for item in items {
         operation_state.checkpoint(&job_id, None)?;
 
-        match (parse_remote_path(&item.from), parse_remote_path(&item.to)) {
-            (Some(remote_from), Some(remote_to)) => {
+        match (
+            archive::parse_archive_uri(&item.from),
+            archive::parse_archive_uri(&item.to),
+            parse_remote_path(&item.from),
+            parse_remote_path(&item.to),
+        ) {
+            (Some(archive_from), None, None, None) => archive_items.push((item, archive_from)),
+            (Some(_), _, _, _) | (_, Some(_), _, _) => {
+                return Err(archive_read_only_error(
+                    if archive::is_archive_uri(&item.from) {
+                        &item.from
+                    } else {
+                        &item.to
+                    },
+                ));
+            }
+            (None, None, Some(remote_from), Some(remote_to)) => {
                 let target_uri =
                     crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
                 copy_remote_item(&remotes, remote_from, remote_to, item.overwrite).await?;
@@ -390,22 +434,55 @@ pub async fn copy_items(
                     },
                 );
             }
-            (Some(remote_from), None) => {
+            (None, None, Some(remote_from), None) => {
                 return Err(cross_provider_error(
                     "Copying from a remote volume to a local path is not implemented yet.",
                     &remote_from.volume_id,
                     &remote_from.path,
                 ));
             }
-            (None, Some(remote_to)) => {
+            (None, None, None, Some(remote_to)) => {
                 return Err(cross_provider_error(
                     "Copying from a local path to a remote volume is not implemented yet.",
                     &remote_to.volume_id,
                     &remote_to.path,
                 ));
             }
-            (None, None) => local_items.push(item),
+            (None, None, None, None) => local_items.push(item),
         }
+    }
+
+    if !archive_items.is_empty() {
+        let archive_app = app.clone();
+        let archive_job_id = job_id.clone();
+        let archive_operation_state = operation_state.inner().clone();
+        let archive_start = processed_items;
+
+        run_local(move |_| {
+            for (index, (item, archive_path)) in archive_items.iter().enumerate() {
+                archive_operation_state.checkpoint(&archive_job_id, None)?;
+                archive::extract_archive_entry_to(
+                    archive_path,
+                    Path::new(&item.to),
+                    item.overwrite,
+                )?;
+                emit_file_operation_progress(
+                    &archive_app,
+                    &archive_job_id,
+                    "copy",
+                    "running",
+                    ProgressSnapshot {
+                        processed_entries: archive_start + index as u64 + 1,
+                        total_entries: total_items,
+                        current_path: Some(item.to.clone()),
+                        ..ProgressSnapshot::default()
+                    },
+                );
+            }
+
+            Ok(())
+        })
+        .await?;
     }
 
     if local_items.is_empty() {
@@ -499,6 +576,18 @@ pub async fn move_items(
 
     for item in items {
         operation_state.checkpoint(&job_id, None)?;
+
+        if archive::is_archive_uri(&item.from) || archive::is_archive_uri(&item.to) {
+            return Err(FsError::new(
+                "archive_read_only",
+                "Archive browsing is read-only. Copy items out of the archive instead.",
+                Some(if archive::is_archive_uri(&item.from) {
+                    item.from
+                } else {
+                    item.to
+                }),
+            ));
+        }
 
         match (parse_remote_path(&item.from), parse_remote_path(&item.to)) {
             (Some(remote_from), Some(remote_to)) => {
@@ -626,6 +715,10 @@ pub async fn archive_items(
         OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
 
     for path in &paths {
+        if archive::is_archive_uri(path) {
+            return Err(archive_read_only_error(path));
+        }
+
         if let Some(remote_path) = parse_remote_path(path) {
             return Err(cross_provider_error(
                 "Creating archives from remote volumes is not implemented yet.",
@@ -633,6 +726,10 @@ pub async fn archive_items(
                 &remote_path.path,
             ));
         }
+    }
+
+    if archive::is_archive_uri(&destination) {
+        return Err(archive_read_only_error(&destination));
     }
 
     if let Some(remote_path) = parse_remote_path(&destination) {
@@ -710,6 +807,10 @@ pub async fn unarchive_items(
         OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
 
     for path in &paths {
+        if archive::is_archive_uri(path) {
+            return Err(archive_read_only_error(path));
+        }
+
         if let Some(remote_path) = parse_remote_path(path) {
             return Err(cross_provider_error(
                 "Extracting zip archives from remote volumes is not implemented yet.",
@@ -717,6 +818,10 @@ pub async fn unarchive_items(
                 &remote_path.path,
             ));
         }
+    }
+
+    if archive::is_archive_uri(&destination_directory) {
+        return Err(archive_read_only_error(&destination_directory));
     }
 
     if let Some(remote_path) = parse_remote_path(&destination_directory) {
@@ -851,11 +956,16 @@ pub async fn open_with_default_app(
     path: String,
     store: tauri::State<'_, AppStoreState>,
 ) -> Result<(), FsError> {
-    let path = PathBuf::from(path);
-    let file_type = open_with::file_type_for_path(&path);
+    let file_type = open_with::file_type_for_path(Path::new(&path));
     let remembered = store.open_with_default(&file_type.key)?;
 
-    open_with::open_with_default(&path, remembered)
+    if let Some(archive_path) = archive::parse_archive_uri(&path) {
+        let materialized_path =
+            run_local(move |_| archive::materialize_archive_file(&archive_path)).await?;
+        return open_with::open_with_default(&materialized_path, remembered);
+    }
+
+    open_with::open_with_default(&PathBuf::from(path), remembered)
 }
 
 #[tauri::command]
@@ -863,11 +973,16 @@ pub async fn list_open_with_apps(
     path: String,
     store: tauri::State<'_, AppStoreState>,
 ) -> Result<OpenWithContext, FsError> {
-    let path = PathBuf::from(path);
-    let file_type = open_with::file_type_for_path(&path);
+    let file_type = open_with::file_type_for_path(Path::new(&path));
     let remembered = store.open_with_default(&file_type.key)?;
 
-    open_with::open_with_context(&path, remembered)
+    if let Some(archive_path) = archive::parse_archive_uri(&path) {
+        let materialized_path =
+            run_local(move |_| archive::materialize_archive_file(&archive_path)).await?;
+        return open_with::open_with_context(&materialized_path, remembered);
+    }
+
+    open_with::open_with_context(&PathBuf::from(path), remembered)
 }
 
 #[tauri::command]
@@ -877,19 +992,24 @@ pub async fn open_with_app(
     remember: bool,
     store: tauri::State<'_, AppStoreState>,
 ) -> Result<(), FsError> {
-    let path = PathBuf::from(path);
-    let file_type = open_with::file_type_for_path(&path);
-    let context = open_with::open_with_context(&path, store.open_with_default(&file_type.key)?)?;
+    let file_type = open_with::file_type_for_path(Path::new(&path));
+    let remembered = store.open_with_default(&file_type.key)?;
+    let materialized_path = if let Some(archive_path) = archive::parse_archive_uri(&path) {
+        run_local(move |_| archive::materialize_archive_file(&archive_path)).await?
+    } else {
+        PathBuf::from(&path)
+    };
+    let context = open_with::open_with_context(&materialized_path, remembered)?;
     let Some(app) = context.apps.iter().find(|app| app.id == app_id) else {
         return Err(FsError::new(
             "open_with_app_not_found",
             "The selected app is no longer available.",
-            Some(path.to_string_lossy().into_owned()),
+            Some(path),
         ));
     };
     let app_name = app.name.clone();
 
-    open_with::open_with_app_id(&path, &app_id)?;
+    open_with::open_with_app_id(&materialized_path, &app_id)?;
 
     if remember {
         store.save_open_with_default(&file_type.key, &app_id, &app_name)?;
@@ -902,7 +1022,9 @@ pub async fn open_with_app(
 
 #[tauri::command]
 pub async fn reveal_in_file_manager(path: String) -> Result<(), FsError> {
-    let path = PathBuf::from(path);
+    let path = archive::parse_archive_uri(&path)
+        .map(|archive_path| archive_path.archive_path)
+        .unwrap_or_else(|| PathBuf::from(path));
 
     tauri_plugin_opener::reveal_item_in_dir(&path).map_err(|error| {
         FsError::new(
@@ -1019,6 +1141,14 @@ fn cross_provider_error(message: &str, volume_id: &str, path: &str) -> FsError {
         "cross_provider_operation",
         message,
         Some(crate::fs::remote::format_remote_uri(volume_id, path)),
+    )
+}
+
+fn archive_read_only_error(path: &str) -> FsError {
+    FsError::new(
+        "archive_read_only",
+        "Archive browsing is read-only. Copy items out of the archive instead.",
+        Some(path.to_string()),
     )
 }
 

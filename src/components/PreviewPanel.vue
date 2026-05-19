@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { getFileMetadata, localFileAssetUrl } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
 import { formatFileDateTime } from '../utils/dateFormat';
 import {
   audioMimeType,
@@ -279,7 +280,7 @@ function typeLabel(entry) {
 }
 
 function shouldShowImage(entry) {
-  return isImageEntry(entry) && !imageFailed.value;
+  return isImageEntry(entry) && !isArchivePath(entry.path) && !imageFailed.value;
 }
 
 function revokeVideoPreviewUrl() {
@@ -335,6 +336,10 @@ function handleVideoError(event) {
 }
 
 function parentPathFor(path) {
+  if (isArchivePath(path)) {
+    return archiveParentPath(path);
+  }
+
   const value = String(path || '');
   const trimmed = value.endsWith('/') && value.length > 1 ? value.slice(0, -1) : value;
   const index = trimmed.lastIndexOf('/');

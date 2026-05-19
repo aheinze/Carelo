@@ -4,6 +4,7 @@ import AppIcon from './AppIcon.vue';
 import FileRow from './FileRow.vue';
 import { listDirectory } from '../composables/useFileOperations';
 import { dropEffectFromEvent } from '../composables/useFileTransferGuards';
+import { archiveParentPath, archiveRootPath, isArchiveEntry, isArchivePath, isBrowsableEntry } from '../utils/archivePaths';
 
 const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
@@ -12,6 +13,14 @@ const props = defineProps({
   entries: {
     type: Array,
     required: true,
+  },
+  rawEntryCount: {
+    type: Number,
+    default: 0,
+  },
+  searchQuery: {
+    type: String,
+    default: '',
   },
   selectedIndex: {
     type: Number,
@@ -94,10 +103,27 @@ const currentDirectoryDropActive = ref(false);
 const currentDirectoryDropPath = ref('');
 let columnLoadVersion = 0;
 
+const activeSearchQuery = computed(() => props.searchQuery.trim().toLowerCase());
+const isSearchFiltering = computed(() => activeSearchQuery.value.length > 0);
+const hasFilteredOutEntries = computed(() =>
+  isSearchFiltering.value && props.rawEntryCount > 0 && props.entries.length === 0,
+);
+const hasHiddenOnlyEntries = computed(() =>
+  !isSearchFiltering.value && !props.showHiddenFiles && props.rawEntryCount > 0 && props.entries.length === 0,
+);
+const emptyDirectoryMessage = computed(() =>
+  hasFilteredOutEntries.value
+    ? 'No items match your search.'
+    : hasHiddenOnlyEntries.value
+      ? 'Only hidden items'
+      : 'No entries',
+);
+
 const baseColumn = computed(() => ({
   path: props.directoryKey,
   title: props.directoryKey,
   entries: props.entries,
+  rawEntryCount: props.rawEntryCount,
   selectedIndex: props.selectedIndex,
   loading: props.loading,
   error: '',
@@ -178,6 +204,10 @@ function compareOptionalNumber(a, b, fallback = 0) {
 
 function parentPathForDirectory(path) {
   const value = String(path || '').trim();
+
+  if (isArchivePath(value)) {
+    return archiveParentPath(value);
+  }
 
   if (!value || value === '/' || value === '~') {
     return '';
@@ -262,11 +292,29 @@ function visibleEntriesForColumn(column) {
     return column.entries;
   }
 
-  const entries = props.showHiddenFiles
+  const visibleEntries = props.showHiddenFiles
     ? column.entries
     : column.entries.filter((entry) => !entry.isHidden);
+  const entries = activeSearchQuery.value
+    ? visibleEntries.filter((entry) => String(entry.name || '').toLowerCase().includes(activeSearchQuery.value))
+    : visibleEntries;
 
   return sortEntries(entries);
+}
+
+function emptyMessageForColumn(column) {
+  const rawCount = column.rawEntryCount ?? column.entries?.length ?? 0;
+  const visibleCount = visibleEntriesForColumn(column).length;
+
+  if (isSearchFiltering.value && rawCount > 0 && visibleCount === 0) {
+    return 'No items match your search.';
+  }
+
+  if (!isSearchFiltering.value && !props.showHiddenFiles && rawCount > 0 && visibleCount === 0) {
+    return 'Only hidden items';
+  }
+
+  return 'No entries';
 }
 
 function selectedEntriesForColumn(column, columnIndex) {
@@ -330,6 +378,9 @@ function activeColumnState() {
     loading: Boolean(column.loading),
     error: column.error || '',
     entries: visibleEntries,
+    rawEntryCount: column.rawEntryCount ?? column.entries?.length ?? visibleEntries.length,
+    searchQuery: props.searchQuery.trim(),
+    showHiddenFiles: props.showHiddenFiles,
     selectedEntries,
     focusedEntry: focusedEntryForColumn(column, activeColumnIndex),
   };
@@ -445,20 +496,22 @@ function scrollColumnsToEnd() {
 async function loadChildColumn(entry, columnIndex, selectedIndex = -1) {
   const nextTrail = updateColumnSelection(columnIndex, selectedIndex);
 
-  if (entry.kind !== 'directory') {
+  if (!isBrowsableEntry(entry)) {
     columnTrail.value = nextTrail;
     return;
   }
 
+  const childPath = entry.kind === 'directory' ? entry.path : archiveRootPath(entry.path);
   const childPosition = columnIndex;
   const loadVersion = columnLoadVersion + 1;
   columnLoadVersion = loadVersion;
   columnTrail.value = [
     ...nextTrail,
     {
-      path: entry.path,
+      path: childPath,
       title: entry.name,
       entries: [],
+      rawEntryCount: 0,
       selectedIndex: -1,
       selectionAnchorIndex: -1,
       selectedPaths: [],
@@ -470,9 +523,9 @@ async function loadChildColumn(entry, columnIndex, selectedIndex = -1) {
   scrollColumnsToEnd();
 
   try {
-    const entries = await listDirectory(entry.path);
+    const entries = await listDirectory(childPath);
 
-    if (columnLoadVersion !== loadVersion || columnTrail.value[childPosition]?.path !== entry.path) {
+    if (columnLoadVersion !== loadVersion || columnTrail.value[childPosition]?.path !== childPath) {
       return;
     }
 
@@ -481,13 +534,14 @@ async function loadChildColumn(entry, columnIndex, selectedIndex = -1) {
       {
         ...columnTrail.value[childPosition],
         entries,
+        rawEntryCount: entries.length,
         loading: false,
         error: '',
       },
     ];
     scrollColumnsToEnd();
   } catch (error) {
-    if (columnLoadVersion !== loadVersion || columnTrail.value[childPosition]?.path !== entry.path) {
+    if (columnLoadVersion !== loadVersion || columnTrail.value[childPosition]?.path !== childPath) {
       return;
     }
 
@@ -515,7 +569,7 @@ function handleColumnSelect(entry, index, columnIndex, event = null) {
   } else {
     updateChildColumnSelection(entry, index, columnIndex, event);
 
-    if (isModifiedSelection || entry.kind !== 'directory') {
+    if (isModifiedSelection || !isBrowsableEntry(entry)) {
       return;
     }
   }
@@ -558,7 +612,13 @@ function handleColumnContext(entry, index, columnIndex, event) {
 }
 
 function cleanPath(path) {
-  return String(path || '').replace(/\/+$/, '') || '/';
+  const value = String(path || '');
+
+  if (isArchivePath(value)) {
+    return value.endsWith('!/') ? value : value.replace(/\/+$/, '');
+  }
+
+  return value.replace(/\/+$/, '') || '/';
 }
 
 function isSameOrChildPath(path, parentPath) {
@@ -569,7 +629,7 @@ function isSameOrChildPath(path, parentPath) {
 }
 
 function canDropOnEntry(entry) {
-  if (!props.dragging || entry?.kind !== 'directory') {
+  if (!props.dragging || entry?.kind !== 'directory' || isArchivePath(entry?.path)) {
     return false;
   }
 
@@ -579,7 +639,7 @@ function canDropOnEntry(entry) {
 }
 
 function canDropOnDirectory(directoryPath = activeColumnDirectory()) {
-  if (!props.dragging) {
+  if (!props.dragging || isArchivePath(directoryPath)) {
     return false;
   }
 
@@ -758,12 +818,14 @@ function syncBaseColumnSelection() {
   const entry = props.entries[props.selectedIndex];
   const selectedEntries = props.entries.filter((candidate, index) => props.isEntrySelected(index));
 
-  if (selectedEntries.length !== 1 || !entry || entry.kind !== 'directory') {
+  if (selectedEntries.length !== 1 || !entry || !isBrowsableEntry(entry)) {
     resetColumnTrail();
     return;
   }
 
-  if (columnTrail.value[0]?.path === entry.path) {
+  const childPath = entry.kind === 'directory' ? entry.path : archiveRootPath(entry.path);
+
+  if (columnTrail.value[0]?.path === childPath) {
     return;
   }
 
@@ -813,6 +875,7 @@ async function refreshColumnDirectory(path) {
       {
         ...columnTrail.value[currentIndex],
         entries,
+        rawEntryCount: entries.length,
         selectedIndex,
         selectedPaths: (columnTrail.value[currentIndex].selectedPaths || [])
           .filter((path) => refreshedPaths.has(path)),
@@ -857,6 +920,8 @@ watch(
     props.entries,
     props.selectedIndex,
     props.loading,
+    props.rawEntryCount,
+    props.searchQuery,
     props.showHiddenFiles,
     props.sortKey,
     props.sortDirection,
@@ -967,7 +1032,7 @@ watch(
       v-else-if="entries.length === 0 && !parentDirectory && viewMode !== 'columns'"
       class="file-list-empty"
     >
-      No entries
+      {{ emptyDirectoryMessage }}
     </div>
 
     <div
@@ -993,6 +1058,10 @@ watch(
             </span>
             <span class="file-parent-card-name">Parent Folder</span>
           </button>
+        </div>
+
+        <div v-if="entries.length === 0 && parentDirectory" class="file-grid-empty-message">
+          {{ emptyDirectoryMessage }}
         </div>
 
         <div
@@ -1054,7 +1123,9 @@ watch(
           </div>
 
           <p v-else-if="column.error" class="file-column-message">{{ column.error }}</p>
-          <p v-else-if="visibleEntriesForColumn(column).length === 0" class="file-column-message">No entries</p>
+          <p v-else-if="visibleEntriesForColumn(column).length === 0" class="file-column-message">
+            {{ emptyMessageForColumn(column) }}
+          </p>
 
           <template v-else>
             <button
@@ -1065,6 +1136,7 @@ watch(
               :class="{
                 'file-column-row--selected': columnSelectionClass(column, columnIndex, index),
                 'file-column-row--directory': entry.kind === 'directory',
+                'file-column-row--archive': isArchiveEntry(entry),
                 'file-drop-target': entryDropPath === entry.path,
               }"
               :data-file-index="columnIndex === 0 ? index : null"
@@ -1084,11 +1156,15 @@ watch(
               @contextmenu.prevent="handleColumnContext(entry, index, columnIndex, $event)"
             >
               <span class="file-column-glyph" :class="`file-column-glyph--${entry.kind}`">
-                <AppIcon :name="entry.kind === 'directory' ? 'folder' : 'file'" :size="17" :stroke-width="1.8" />
+                <AppIcon
+                  :name="entry.kind === 'directory' ? 'folder' : isArchiveEntry(entry) ? 'archive' : 'file'"
+                  :size="17"
+                  :stroke-width="1.8"
+                />
               </span>
               <span class="file-column-name">{{ entry.name }}</span>
               <AppIcon
-                v-if="entry.kind === 'directory'"
+                v-if="isBrowsableEntry(entry)"
                 class="file-column-chevron"
                 name="chevron-right"
                 :size="14"
@@ -1178,6 +1254,10 @@ watch(
             <span class="file-parent-muted">Parent</span>
             <span class="file-parent-muted file-parent-path">{{ parentDirectory }}</span>
           </button>
+        </div>
+
+        <div v-if="entries.length === 0 && parentDirectory" class="file-list-empty file-list-empty--inline">
+          {{ emptyDirectoryMessage }}
         </div>
 
         <div
@@ -1386,6 +1466,10 @@ watch(
   font-size: 14px;
 }
 
+.file-list-empty--inline {
+  padding-left: 34px;
+}
+
 .loading-row {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) 46px 88px 126px;
@@ -1543,6 +1627,14 @@ watch(
   column-gap: 34px;
   row-gap: 38px;
   padding: 36px 30px 52px;
+}
+
+.file-grid-empty-message {
+  align-self: start;
+  grid-column: 1 / -1;
+  padding: 2px 8px;
+  color: var(--text-muted);
+  font-size: 14px;
 }
 
 .file-card--loading {

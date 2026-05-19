@@ -5,6 +5,7 @@ import WorkIndicator from './WorkIndicator.vue';
 import { createFolder, deleteItems } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { archiveDisplayName, isArchivePath } from '../utils/archivePaths';
 import {
   closeTauriWindow,
   getTauriWindow,
@@ -17,10 +18,21 @@ const dialog = useDialog();
 
 const activeTitle = computed(() => {
   const path = store.activePane?.currentPath || '~';
+
+  if (isArchivePath(path)) {
+    return archiveDisplayName(path) || 'Archive';
+  }
+
   const cleanPath = path.replace(/\/+$/, '');
   const name = cleanPath.split('/').filter(Boolean).at(-1);
   return name || cleanPath || 'Home';
 });
+const activeDirectoryIsArchive = computed(() =>
+  isArchivePath(store.effectiveDirectoryFor(store.activePaneId) || ''),
+);
+const activeSelectionHasArchiveEntries = computed(() =>
+  store.operationEntriesFor(store.activePaneId).some((entry) => isArchivePath(entry.path)),
+);
 
 function startDragging(event) {
   if (event.button !== 0 || event.detail > 1) return;
@@ -70,6 +82,16 @@ async function copySelectedPath() {
 
 async function createFolderInActivePane() {
   const targetDirectory = store.effectiveDirectoryFor(store.activePaneId) || '~';
+
+  if (isArchivePath(targetDirectory)) {
+    await dialog.alert({
+      title: 'New Folder Not Available',
+      message: 'Archive contents are read-only while browsing.',
+      variant: 'warning',
+    });
+    return;
+  }
+
   const name = (await dialog.prompt({
     title: 'New Folder',
     icon: 'folder',
@@ -91,6 +113,15 @@ async function deleteSelection() {
   const entries = store.operationEntriesFor(store.activePaneId);
 
   if (entries.length === 0) {
+    return;
+  }
+
+  if (entries.some((entry) => isArchivePath(entry.path))) {
+    await dialog.alert({
+      title: 'Delete Not Available',
+      message: 'Archive contents are read-only while browsing.',
+      variant: 'warning',
+    });
     return;
   }
 
@@ -277,6 +308,7 @@ async function deleteSelection() {
           type="button"
           class="icon-btn"
           aria-label="New folder"
+          :disabled="activeDirectoryIsArchive"
           @click="createFolderInActivePane"
         >
           <AppIcon name="folder-plus" :size="19" :stroke-width="1.8" />
@@ -286,6 +318,7 @@ async function deleteSelection() {
           type="button"
           class="icon-btn"
           aria-label="Delete selected items"
+          :disabled="activeSelectionHasArchiveEntries"
           @click="deleteSelection"
         >
           <AppIcon name="trash" :size="19" :stroke-width="1.8" />

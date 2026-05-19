@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { canUseLocalFileAssets, localFileAssetUrl } from '../composables/useFileOperations';
+import { isArchiveEntry } from '../utils/archivePaths';
 import { formatFileDate } from '../utils/dateFormat';
 import { isImageEntry } from '../utils/fileTypes';
 
@@ -146,6 +147,7 @@ onBeforeUnmount(stopThumbnailObserver);
       class="file-card-frame"
       :class="{
         'file-card-frame--icon': entry.kind === 'directory',
+        'file-card-frame--archive': isArchiveEntry(entry),
         'file-card-frame--file': entry.kind !== 'directory' && !shouldShowImage(entry),
         'file-card-frame--photo': entry.kind !== 'directory' && shouldShowImage(entry),
       }"
@@ -174,6 +176,7 @@ onBeforeUnmount(stopThumbnailObserver);
           @error="handleImageError"
         />
       </span>
+      <AppIcon v-else-if="isArchiveEntry(entry)" name="archive" :size="46" :stroke-width="1.55" />
       <AppIcon v-else name="file" :size="46" :stroke-width="1.55" />
     </span>
     <span class="file-card-name">{{ entry.name }}</span>
@@ -186,12 +189,17 @@ onBeforeUnmount(stopThumbnailObserver);
     :class="{
       'file-row--selected': selected,
       'file-row--directory': entry.kind === 'directory',
+      'file-row--archive': isArchiveEntry(entry),
     }"
     @dblclick="$emit('open')"
   >
     <span class="file-name">
       <span class="file-glyph" :class="`file-glyph--${entry.kind}`">
-        <AppIcon :name="entry.kind === 'directory' ? 'folder' : 'file'" :size="18" :stroke-width="1.8" />
+        <AppIcon
+          :name="entry.kind === 'directory' ? 'folder' : isArchiveEntry(entry) ? 'archive' : 'file'"
+          :size="18"
+          :stroke-width="1.8"
+        />
       </span>
       <span>{{ entry.name }}</span>
     </span>
@@ -335,6 +343,10 @@ onBeforeUnmount(stopThumbnailObserver);
 }
 
 .file-card-frame--file {
+  color: var(--file-icon);
+}
+
+.file-card-frame--archive {
   color: var(--file-icon);
 }
 

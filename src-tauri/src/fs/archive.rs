@@ -1,14 +1,17 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
+use tar::Archive as TarArchive;
 use tar::Builder as TarBuilder;
 use zip::read::ZipFile;
 use zip::result::ZipError;
@@ -16,11 +19,13 @@ use zip::unstable::write::FileOptionsExt;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::fs::models::{FsError, FsResult};
+use crate::fs::models::{FileEntry, FileEntryKind, FileMetadata, FsError, FsResult};
 
 const PROGRESS_BYTE_STEP: u64 = 512 * 1024;
 const DEFAULT_ARCHIVE_FORMAT: ArchiveFormat = ArchiveFormat::Zip;
 const DEFAULT_COMPRESSION_LEVEL: ArchiveCompressionLevel = ArchiveCompressionLevel::Balanced;
+const ARCHIVE_URI_PREFIX: &str = "archive://";
+const ARCHIVE_URI_SEPARATOR: &str = "!/";
 
 #[derive(Debug, Clone, Default)]
 pub struct ArchiveProgress {
@@ -50,6 +55,39 @@ struct ProgressState {
     last_emitted_entries: u64,
     current_bytes: u64,
     current_total_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivePath {
+    pub archive_path: PathBuf,
+    pub inner_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowsableArchiveFormat {
+    Zip,
+    Tar,
+    TarGz,
+    TarZst,
+}
+
+#[derive(Debug, Clone)]
+struct ArchiveEntryInfo {
+    path: String,
+    kind: FileEntryKind,
+    size: Option<u64>,
+    modified_at: Option<u64>,
+    is_symlink: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ArchiveChildInfo {
+    name: String,
+    inner_path: String,
+    kind: FileEntryKind,
+    size: Option<u64>,
+    modified_at: Option<u64>,
+    is_symlink: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,6 +131,221 @@ impl Default for ArchiveOptions {
     }
 }
 
+pub fn parse_archive_uri(path: &str) -> Option<ArchivePath> {
+    let raw = path.strip_prefix(ARCHIVE_URI_PREFIX)?;
+    let (archive_path, inner_path) = raw.split_once(ARCHIVE_URI_SEPARATOR)?;
+    let archive_path = percent_decode(archive_path)?;
+    let inner_path = normalize_archive_inner_path(inner_path)?;
+
+    if archive_path.trim().is_empty() {
+        return None;
+    }
+
+    Some(ArchivePath {
+        archive_path: PathBuf::from(archive_path),
+        inner_path,
+    })
+}
+
+pub fn archive_root_uri(path: &Path) -> String {
+    format!(
+        "{ARCHIVE_URI_PREFIX}{}{ARCHIVE_URI_SEPARATOR}",
+        percent_encode(&path.to_string_lossy())
+    )
+}
+
+pub fn format_archive_uri(path: &Path, inner_path: &str) -> String {
+    let inner_path = normalize_archive_inner_path(inner_path).unwrap_or_default();
+    let separator = if inner_path.is_empty() {
+        ""
+    } else {
+        &inner_path
+    };
+
+    format!(
+        "{ARCHIVE_URI_PREFIX}{}{ARCHIVE_URI_SEPARATOR}{separator}",
+        percent_encode(&path.to_string_lossy())
+    )
+}
+
+pub fn is_archive_uri(path: &str) -> bool {
+    parse_archive_uri(path).is_some()
+}
+
+pub fn is_supported_archive_path(path: &Path) -> bool {
+    archive_format_for_path(path).is_some()
+}
+
+pub fn list_archive_directory(path: &ArchivePath) -> FsResult<Vec<FileEntry>> {
+    ensure_archive_file(&path.archive_path)?;
+
+    let children = match archive_format_for_path(&path.archive_path) {
+        Some(BrowsableArchiveFormat::Zip) => list_zip_directory(path)?,
+        Some(BrowsableArchiveFormat::Tar) => {
+            let file = open_archive_file(&path.archive_path)?;
+            list_tar_directory(path, file)?
+        }
+        Some(BrowsableArchiveFormat::TarGz) => {
+            let file = open_archive_file(&path.archive_path)?;
+            let decoder = GzDecoder::new(file);
+            list_tar_directory(path, decoder)?
+        }
+        Some(BrowsableArchiveFormat::TarZst) => {
+            let file = open_archive_file(&path.archive_path)?;
+            let decoder = zstd::stream::read::Decoder::new(file).map_err(|error| {
+                archive_io_error("Unable to read tar.zst archive", &path.archive_path, error)
+            })?;
+            list_tar_directory(path, decoder)?
+        }
+        None => {
+            return Err(FsError::new(
+                "unsupported_archive_format",
+                "This archive format is not supported for browsing.",
+                Some(path.archive_path.to_string_lossy().into_owned()),
+            ));
+        }
+    };
+
+    Ok(children
+        .into_values()
+        .map(|child| child_to_file_entry(&path.archive_path, child))
+        .collect())
+}
+
+pub fn stat_archive_entry(path: &ArchivePath) -> FsResult<FileMetadata> {
+    ensure_archive_file(&path.archive_path)?;
+
+    if path.inner_path.is_empty() {
+        return Ok(FileMetadata {
+            path: format_archive_uri(&path.archive_path, ""),
+            kind: FileEntryKind::Directory,
+            size: None,
+            modified_at: archive_modified_at(&path.archive_path),
+            created_at: None,
+            accessed_at: None,
+            is_hidden: false,
+            is_symlink: false,
+            is_readonly: true,
+            permissions: None,
+        });
+    }
+
+    let entry = archive_entry_info(path)?.ok_or_else(|| {
+        FsError::new(
+            "archive_entry_not_found",
+            "The archive entry could not be found.",
+            Some(format_archive_uri(&path.archive_path, &path.inner_path)),
+        )
+    })?;
+
+    let name = archive_name_for_inner_path(&entry.path);
+
+    Ok(FileMetadata {
+        path: format_archive_uri(&path.archive_path, &entry.path),
+        kind: entry.kind,
+        size: entry.size,
+        modified_at: entry.modified_at,
+        created_at: None,
+        accessed_at: None,
+        is_hidden: name.starts_with('.'),
+        is_symlink: entry.is_symlink,
+        is_readonly: true,
+        permissions: None,
+    })
+}
+
+pub fn materialize_archive_file(path: &ArchivePath) -> FsResult<PathBuf> {
+    let entry = archive_entry_info(path)?.ok_or_else(|| {
+        FsError::new(
+            "archive_entry_not_found",
+            "The archive entry could not be found.",
+            Some(format_archive_uri(&path.archive_path, &path.inner_path)),
+        )
+    })?;
+
+    if entry.kind == FileEntryKind::Directory {
+        return Err(FsError::new(
+            "archive_entry_is_directory",
+            "Choose a file inside the archive.",
+            Some(format_archive_uri(&path.archive_path, &path.inner_path)),
+        ));
+    }
+
+    let file_name = archive_name_for_inner_path(&entry.path);
+    let target_directory = std::env::temp_dir()
+        .join("carelo-archive-open")
+        .join(format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+    fs::create_dir_all(&target_directory).map_err(|error| {
+        FsError::io(
+            "Unable to create temporary archive preview directory",
+            &target_directory,
+            error,
+        )
+    })?;
+
+    let target = target_directory.join(file_name);
+    extract_archive_entry_to(path, &target, true)?;
+    Ok(target)
+}
+
+pub fn extract_archive_entry_to(
+    path: &ArchivePath,
+    destination: &Path,
+    overwrite: bool,
+) -> FsResult<()> {
+    ensure_archive_file(&path.archive_path)?;
+
+    if path.inner_path.is_empty() {
+        return Err(FsError::new(
+            "archive_root_extract_unsupported",
+            "Choose files or folders inside the archive to copy out.",
+            Some(format_archive_uri(&path.archive_path, "")),
+        ));
+    }
+
+    let entry = archive_entry_info(path)?.ok_or_else(|| {
+        FsError::new(
+            "archive_entry_not_found",
+            "The archive entry could not be found.",
+            Some(format_archive_uri(&path.archive_path, &path.inner_path)),
+        )
+    })?;
+
+    ensure_archive_destination_available(destination, entry.kind, overwrite)?;
+
+    match archive_format_for_path(&path.archive_path) {
+        Some(BrowsableArchiveFormat::Zip) => extract_zip_entry_to(path, destination, overwrite),
+        Some(BrowsableArchiveFormat::Tar) => {
+            let file = open_archive_file(&path.archive_path)?;
+            extract_tar_entry_to(path, file, destination, overwrite)
+        }
+        Some(BrowsableArchiveFormat::TarGz) => {
+            let file = open_archive_file(&path.archive_path)?;
+            let decoder = GzDecoder::new(file);
+            extract_tar_entry_to(path, decoder, destination, overwrite)
+        }
+        Some(BrowsableArchiveFormat::TarZst) => {
+            let file = open_archive_file(&path.archive_path)?;
+            let decoder = zstd::stream::read::Decoder::new(file).map_err(|error| {
+                archive_io_error("Unable to read tar.zst archive", &path.archive_path, error)
+            })?;
+            extract_tar_entry_to(path, decoder, destination, overwrite)
+        }
+        None => Err(FsError::new(
+            "unsupported_archive_format",
+            "This archive format is not supported for browsing.",
+            Some(path.archive_path.to_string_lossy().into_owned()),
+        )),
+    }
+}
+
 fn default_archive_format() -> ArchiveFormat {
     DEFAULT_ARCHIVE_FORMAT
 }
@@ -103,6 +356,803 @@ fn default_compression_level() -> ArchiveCompressionLevel {
 
 fn default_include_top_level_directory() -> bool {
     true
+}
+
+fn archive_format_for_path(path: &Path) -> Option<BrowsableArchiveFormat> {
+    let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+
+    if name.ends_with(".zip") {
+        Some(BrowsableArchiveFormat::Zip)
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        Some(BrowsableArchiveFormat::TarGz)
+    } else if name.ends_with(".tar.zst") || name.ends_with(".tzst") {
+        Some(BrowsableArchiveFormat::TarZst)
+    } else if name.ends_with(".tar") {
+        Some(BrowsableArchiveFormat::Tar)
+    } else {
+        None
+    }
+}
+
+fn ensure_archive_file(path: &Path) -> FsResult<()> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| FsError::io("Unable to read archive metadata", path, error))?;
+
+    if !metadata.is_file() {
+        return Err(FsError::new(
+            "archive_source_not_file",
+            "Archive browsing requires a regular archive file.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    if archive_format_for_path(path).is_none() {
+        return Err(FsError::new(
+            "unsupported_archive_format",
+            "This archive format is not supported for browsing.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    Ok(())
+}
+
+fn open_archive_file(path: &Path) -> FsResult<File> {
+    File::open(path).map_err(|error| FsError::io("Unable to open archive", path, error))
+}
+
+fn archive_modified_at(path: &Path) -> Option<u64> {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+}
+
+fn normalize_archive_inner_path(path: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let normalized = path.replace('\\', "/");
+
+    for part in normalized.split('/') {
+        let part = part.trim();
+
+        if part.is_empty() || part == "." {
+            continue;
+        }
+
+        if part == ".." {
+            return None;
+        }
+
+        parts.push(part);
+    }
+
+    Some(parts.join("/"))
+}
+
+fn archive_name_for_inner_path(path: &str) -> String {
+    path.rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut encoded = String::new();
+
+    for byte in value.as_bytes() {
+        let character = *byte as char;
+
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '~' | '/') {
+            encoded.push(character);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+
+    encoded
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            decoded.push((hex_value(high)? << 4) | hex_value(low)?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn archive_entry_info(path: &ArchivePath) -> FsResult<Option<ArchiveEntryInfo>> {
+    match archive_format_for_path(&path.archive_path) {
+        Some(BrowsableArchiveFormat::Zip) => zip_entry_info(path),
+        Some(BrowsableArchiveFormat::Tar) => {
+            let file = open_archive_file(&path.archive_path)?;
+            tar_entry_info(path, file)
+        }
+        Some(BrowsableArchiveFormat::TarGz) => {
+            let file = open_archive_file(&path.archive_path)?;
+            tar_entry_info(path, GzDecoder::new(file))
+        }
+        Some(BrowsableArchiveFormat::TarZst) => {
+            let file = open_archive_file(&path.archive_path)?;
+            let decoder = zstd::stream::read::Decoder::new(file).map_err(|error| {
+                archive_io_error("Unable to read tar.zst archive", &path.archive_path, error)
+            })?;
+            tar_entry_info(path, decoder)
+        }
+        None => Ok(None),
+    }
+}
+
+fn list_zip_directory(path: &ArchivePath) -> FsResult<BTreeMap<String, ArchiveChildInfo>> {
+    let file = open_archive_file(&path.archive_path)?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|error| zip_error("Unable to read zip archive", &path.archive_path, error))?;
+    let mut children = BTreeMap::new();
+
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|error| {
+            zip_error(
+                "Unable to read zip archive entry",
+                &path.archive_path,
+                error,
+            )
+        })?;
+        let Some(info) = zip_entry_to_info(entry)? else {
+            continue;
+        };
+
+        add_direct_child(&path.archive_path, &path.inner_path, info, &mut children);
+    }
+
+    Ok(children)
+}
+
+fn list_tar_directory<R: Read>(
+    path: &ArchivePath,
+    reader: R,
+) -> FsResult<BTreeMap<String, ArchiveChildInfo>> {
+    let mut archive = TarArchive::new(reader);
+    let mut children = BTreeMap::new();
+
+    for entry in archive.entries().map_err(|error| {
+        archive_io_error("Unable to read tar archive", &path.archive_path, error)
+    })? {
+        let entry = entry.map_err(|error| {
+            archive_io_error(
+                "Unable to read tar archive entry",
+                &path.archive_path,
+                error,
+            )
+        })?;
+        let Some(info) = tar_entry_to_info(entry)? else {
+            continue;
+        };
+
+        add_direct_child(&path.archive_path, &path.inner_path, info, &mut children);
+    }
+
+    Ok(children)
+}
+
+fn zip_entry_info(path: &ArchivePath) -> FsResult<Option<ArchiveEntryInfo>> {
+    let file = open_archive_file(&path.archive_path)?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|error| zip_error("Unable to read zip archive", &path.archive_path, error))?;
+    let mut found_directory = None;
+
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|error| {
+            zip_error(
+                "Unable to read zip archive entry",
+                &path.archive_path,
+                error,
+            )
+        })?;
+        let Some(info) = zip_entry_to_info(entry)? else {
+            continue;
+        };
+
+        if info.path == path.inner_path {
+            return Ok(Some(info));
+        }
+
+        if is_archive_child_path(&info.path, &path.inner_path) {
+            found_directory = Some(ArchiveEntryInfo {
+                path: path.inner_path.clone(),
+                kind: FileEntryKind::Directory,
+                size: None,
+                modified_at: found_directory
+                    .as_ref()
+                    .and_then(|entry: &ArchiveEntryInfo| entry.modified_at)
+                    .or(info.modified_at),
+                is_symlink: false,
+            });
+        }
+    }
+
+    Ok(found_directory)
+}
+
+fn tar_entry_info<R: Read>(path: &ArchivePath, reader: R) -> FsResult<Option<ArchiveEntryInfo>> {
+    let mut archive = TarArchive::new(reader);
+    let mut found_directory = None;
+
+    for entry in archive.entries().map_err(|error| {
+        archive_io_error("Unable to read tar archive", &path.archive_path, error)
+    })? {
+        let entry = entry.map_err(|error| {
+            archive_io_error(
+                "Unable to read tar archive entry",
+                &path.archive_path,
+                error,
+            )
+        })?;
+        let Some(info) = tar_entry_to_info(entry)? else {
+            continue;
+        };
+
+        if info.path == path.inner_path {
+            return Ok(Some(info));
+        }
+
+        if is_archive_child_path(&info.path, &path.inner_path) {
+            found_directory = Some(ArchiveEntryInfo {
+                path: path.inner_path.clone(),
+                kind: FileEntryKind::Directory,
+                size: None,
+                modified_at: found_directory
+                    .as_ref()
+                    .and_then(|entry: &ArchiveEntryInfo| entry.modified_at)
+                    .or(info.modified_at),
+                is_symlink: false,
+            });
+        }
+    }
+
+    Ok(found_directory)
+}
+
+fn zip_entry_to_info(entry: ZipFile<'_>) -> FsResult<Option<ArchiveEntryInfo>> {
+    if is_symlink_entry(&entry) {
+        let Some(path) = safe_zip_entry_path(&entry)? else {
+            return Ok(None);
+        };
+
+        return Ok(Some(ArchiveEntryInfo {
+            path,
+            kind: FileEntryKind::Symlink,
+            size: None,
+            modified_at: zip_modified_at(entry.last_modified()),
+            is_symlink: true,
+        }));
+    }
+
+    let Some(path) = safe_zip_entry_path(&entry)? else {
+        return Ok(None);
+    };
+    let is_directory = entry.name().ends_with('/');
+
+    if is_directory {
+        return Ok(Some(ArchiveEntryInfo {
+            path,
+            kind: FileEntryKind::Directory,
+            size: None,
+            modified_at: zip_modified_at(entry.last_modified()),
+            is_symlink: false,
+        }));
+    }
+
+    Ok(Some(ArchiveEntryInfo {
+        path,
+        kind: FileEntryKind::File,
+        size: Some(entry.size()),
+        modified_at: zip_modified_at(entry.last_modified()),
+        is_symlink: false,
+    }))
+}
+
+fn tar_entry_to_info<R: Read>(entry: tar::Entry<'_, R>) -> FsResult<Option<ArchiveEntryInfo>> {
+    let path = entry
+        .path()
+        .map_err(|error| archive_io_error("Unable to read tar entry path", Path::new(""), error))?;
+    let Some(path) = normalize_archive_inner_path(&path.to_string_lossy()) else {
+        return Err(FsError::new(
+            "unsafe_archive_entry",
+            "The archive contains an unsafe path.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    };
+
+    if path.is_empty() {
+        return Ok(None);
+    }
+
+    let entry_type = entry.header().entry_type();
+    let kind = if entry_type.is_dir() {
+        FileEntryKind::Directory
+    } else if entry_type.is_symlink() {
+        FileEntryKind::Symlink
+    } else if entry_type.is_file() {
+        FileEntryKind::File
+    } else {
+        FileEntryKind::Other
+    };
+    let size = if kind == FileEntryKind::File {
+        Some(entry.size())
+    } else {
+        None
+    };
+    let modified_at = entry.header().mtime().ok();
+
+    Ok(Some(ArchiveEntryInfo {
+        path,
+        kind,
+        size,
+        modified_at,
+        is_symlink: kind == FileEntryKind::Symlink,
+    }))
+}
+
+fn safe_zip_entry_path(entry: &ZipFile<'_>) -> FsResult<Option<String>> {
+    let Some(path) = entry.enclosed_name() else {
+        return Err(FsError::new(
+            "unsafe_archive_entry",
+            "The zip archive contains an unsafe path.",
+            Some(entry.name().to_string()),
+        ));
+    };
+    let Some(path) = normalize_archive_inner_path(&path.to_string_lossy()) else {
+        return Err(FsError::new(
+            "unsafe_archive_entry",
+            "The zip archive contains an unsafe path.",
+            Some(entry.name().to_string()),
+        ));
+    };
+
+    if path.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(path))
+}
+
+fn add_direct_child(
+    archive_path: &Path,
+    current_inner_path: &str,
+    info: ArchiveEntryInfo,
+    children: &mut BTreeMap<String, ArchiveChildInfo>,
+) {
+    let Some((name, child_inner_path, is_implicit_directory)) =
+        direct_child_for(current_inner_path, &info.path)
+    else {
+        return;
+    };
+    let kind = if is_implicit_directory {
+        FileEntryKind::Directory
+    } else {
+        info.kind
+    };
+    let child = ArchiveChildInfo {
+        name: name.clone(),
+        inner_path: child_inner_path,
+        kind,
+        size: if kind == FileEntryKind::File {
+            info.size
+        } else {
+            None
+        },
+        modified_at: info
+            .modified_at
+            .or_else(|| archive_modified_at(archive_path)),
+        is_symlink: !is_implicit_directory && info.is_symlink,
+    };
+
+    merge_archive_child(children, child);
+}
+
+fn direct_child_for(current_inner_path: &str, entry_path: &str) -> Option<(String, String, bool)> {
+    let relative = if current_inner_path.is_empty() {
+        entry_path
+    } else if entry_path == current_inner_path {
+        return None;
+    } else {
+        entry_path.strip_prefix(&format!("{current_inner_path}/"))?
+    };
+    let (name, rest) = relative.split_once('/').unwrap_or((relative, ""));
+
+    if name.is_empty() {
+        return None;
+    }
+
+    let child_inner_path = if current_inner_path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{current_inner_path}/{name}")
+    };
+
+    Some((name.to_string(), child_inner_path, !rest.is_empty()))
+}
+
+fn merge_archive_child(children: &mut BTreeMap<String, ArchiveChildInfo>, child: ArchiveChildInfo) {
+    let key = child.name.clone();
+
+    match children.get_mut(&key) {
+        Some(existing) if existing.kind == FileEntryKind::Directory => {
+            if existing.modified_at.is_none() {
+                existing.modified_at = child.modified_at;
+            }
+        }
+        Some(existing) if child.kind == FileEntryKind::Directory => {
+            *existing = child;
+        }
+        Some(_) => {}
+        None => {
+            children.insert(key, child);
+        }
+    }
+}
+
+fn child_to_file_entry(archive_path: &Path, child: ArchiveChildInfo) -> FileEntry {
+    FileEntry {
+        name: child.name,
+        path: format_archive_uri(archive_path, &child.inner_path),
+        kind: child.kind,
+        size: child.size,
+        modified_at: child.modified_at,
+        is_hidden: archive_name_for_inner_path(&child.inner_path).starts_with('.'),
+        is_symlink: child.is_symlink,
+        is_readonly: true,
+        tag_color: None,
+    }
+}
+
+fn is_archive_child_path(path: &str, parent: &str) -> bool {
+    !parent.is_empty() && path.starts_with(&format!("{parent}/"))
+}
+
+fn ensure_archive_destination_available(
+    destination: &Path,
+    source_kind: FileEntryKind,
+    overwrite: bool,
+) -> FsResult<()> {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            if !overwrite {
+                return Err(FsError::new(
+                    "destination_exists",
+                    "An item already exists at the destination.",
+                    Some(destination.to_string_lossy().into_owned()),
+                ));
+            }
+
+            if source_kind == FileEntryKind::Directory || metadata.is_dir() {
+                return Err(FsError::new(
+                    "destination_type_conflict",
+                    "The existing destination has an incompatible type.",
+                    Some(destination.to_string_lossy().into_owned()),
+                ));
+            }
+
+            fs::remove_file(destination).map_err(|error| {
+                FsError::io("Unable to replace existing file", destination, error)
+            })?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(FsError::io(
+                "Unable to read destination metadata",
+                destination,
+                error,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_zip_entry_to(path: &ArchivePath, destination: &Path, overwrite: bool) -> FsResult<()> {
+    let file = open_archive_file(&path.archive_path)?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|error| zip_error("Unable to read zip archive", &path.archive_path, error))?;
+
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|error| {
+            zip_error(
+                "Unable to read zip archive entry",
+                &path.archive_path,
+                error,
+            )
+        })?;
+        let Some(info) = zip_entry_to_info_for_extract(&entry)? else {
+            continue;
+        };
+        let Some(relative_path) = relative_extract_path(&path.inner_path, &info.path) else {
+            continue;
+        };
+
+        write_zip_extract_entry(entry, info, destination, &relative_path, overwrite)?;
+    }
+
+    Ok(())
+}
+
+fn extract_tar_entry_to<R: Read>(
+    path: &ArchivePath,
+    reader: R,
+    destination: &Path,
+    overwrite: bool,
+) -> FsResult<()> {
+    let mut archive = TarArchive::new(reader);
+
+    for entry in archive.entries().map_err(|error| {
+        archive_io_error("Unable to read tar archive", &path.archive_path, error)
+    })? {
+        let mut entry = entry.map_err(|error| {
+            archive_io_error(
+                "Unable to read tar archive entry",
+                &path.archive_path,
+                error,
+            )
+        })?;
+        let Some(info) = tar_entry_to_info_for_extract(&entry)? else {
+            continue;
+        };
+        let Some(relative_path) = relative_extract_path(&path.inner_path, &info.path) else {
+            continue;
+        };
+
+        write_tar_extract_entry(&mut entry, info, destination, &relative_path, overwrite)?;
+    }
+
+    Ok(())
+}
+
+fn zip_entry_to_info_for_extract(entry: &ZipFile<'_>) -> FsResult<Option<ArchiveEntryInfo>> {
+    if is_symlink_entry(entry) {
+        return Err(FsError::new(
+            "unsupported_archive_entry",
+            "Archive entries that create symbolic links are not supported.",
+            Some(entry.name().to_string()),
+        ));
+    }
+
+    let Some(path) = safe_zip_entry_path(entry)? else {
+        return Ok(None);
+    };
+    let kind = if entry.name().ends_with('/') {
+        FileEntryKind::Directory
+    } else {
+        FileEntryKind::File
+    };
+
+    Ok(Some(ArchiveEntryInfo {
+        path,
+        kind,
+        size: if kind == FileEntryKind::File {
+            Some(entry.size())
+        } else {
+            None
+        },
+        modified_at: zip_modified_at(entry.last_modified()),
+        is_symlink: false,
+    }))
+}
+
+fn tar_entry_to_info_for_extract<R: Read>(
+    entry: &tar::Entry<'_, R>,
+) -> FsResult<Option<ArchiveEntryInfo>> {
+    let path = entry
+        .path()
+        .map_err(|error| archive_io_error("Unable to read tar entry path", Path::new(""), error))?;
+    let Some(path) = normalize_archive_inner_path(&path.to_string_lossy()) else {
+        return Err(FsError::new(
+            "unsafe_archive_entry",
+            "The archive contains an unsafe path.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    };
+
+    if path.is_empty() {
+        return Ok(None);
+    }
+
+    let entry_type = entry.header().entry_type();
+
+    if entry_type.is_symlink() {
+        return Err(FsError::new(
+            "unsupported_archive_entry",
+            "Archive entries that create symbolic links are not supported.",
+            Some(path),
+        ));
+    }
+
+    let kind = if entry_type.is_dir() {
+        FileEntryKind::Directory
+    } else if entry_type.is_file() {
+        FileEntryKind::File
+    } else {
+        FileEntryKind::Other
+    };
+
+    Ok(Some(ArchiveEntryInfo {
+        path,
+        kind,
+        size: if kind == FileEntryKind::File {
+            Some(entry.size())
+        } else {
+            None
+        },
+        modified_at: entry.header().mtime().ok(),
+        is_symlink: false,
+    }))
+}
+
+fn relative_extract_path(selected_path: &str, entry_path: &str) -> Option<PathBuf> {
+    if entry_path == selected_path {
+        return Some(PathBuf::new());
+    }
+
+    entry_path
+        .strip_prefix(&format!("{selected_path}/"))
+        .map(PathBuf::from)
+}
+
+fn write_zip_extract_entry(
+    mut entry: ZipFile<'_>,
+    info: ArchiveEntryInfo,
+    destination: &Path,
+    relative_path: &Path,
+    overwrite: bool,
+) -> FsResult<()> {
+    write_archive_entry(
+        &mut entry,
+        info.kind,
+        destination,
+        relative_path,
+        overwrite,
+        info.size.unwrap_or(0),
+    )
+}
+
+fn write_tar_extract_entry<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    info: ArchiveEntryInfo,
+    destination: &Path,
+    relative_path: &Path,
+    overwrite: bool,
+) -> FsResult<()> {
+    write_archive_entry(
+        entry,
+        info.kind,
+        destination,
+        relative_path,
+        overwrite,
+        info.size.unwrap_or(0),
+    )
+}
+
+fn write_archive_entry<R: Read>(
+    reader: &mut R,
+    kind: FileEntryKind,
+    destination: &Path,
+    relative_path: &Path,
+    overwrite: bool,
+    _size: u64,
+) -> FsResult<()> {
+    let output_path = if relative_path.as_os_str().is_empty() {
+        destination.to_path_buf()
+    } else {
+        destination.join(relative_path)
+    };
+
+    if kind == FileEntryKind::Directory {
+        fs::create_dir_all(&output_path).map_err(|error| {
+            FsError::io("Unable to create extracted directory", &output_path, error)
+        })?;
+        return Ok(());
+    }
+
+    if kind != FileEntryKind::File {
+        return Ok(());
+    }
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            FsError::io("Unable to create extracted parent directory", parent, error)
+        })?;
+    }
+
+    if overwrite && output_path.exists() {
+        fs::remove_file(&output_path).map_err(|error| {
+            FsError::io(
+                "Unable to replace existing extracted file",
+                &output_path,
+                error,
+            )
+        })?;
+    }
+
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output_path)
+        .map_err(|error| FsError::io("Unable to create extracted file", &output_path, error))?;
+
+    io::copy(reader, &mut output)
+        .map(|_| ())
+        .map_err(|error| FsError::io("Unable to write extracted file", &output_path, error))
+}
+
+fn zip_modified_at(datetime: zip::DateTime) -> Option<u64> {
+    unix_seconds_from_ymd_hms(
+        i32::from(datetime.year()),
+        u32::from(datetime.month()),
+        u32::from(datetime.day()),
+        u32::from(datetime.hour()),
+        u32::from(datetime.minute()),
+        u32::from(datetime.second()),
+    )
+}
+
+fn unix_seconds_from_ymd_hms(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Option<u64> {
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day)?;
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600)?
+        .checked_add(i64::from(minute) * 60)?
+        .checked_add(i64::from(second))?;
+
+    u64::try_from(seconds).ok()
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    let year = i64::from(year) - if month <= 2 { 1 } else { 0 };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+
+    Some(days)
 }
 
 pub fn archive_items(paths: &[String], destination: &str, overwrite: bool) -> FsResult<()> {
@@ -1835,6 +2885,101 @@ mod tests {
 
         assert!(names.iter().any(|name| name == "nested.txt"));
         assert!(!names.iter().any(|name| name == "folder/nested.txt"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn browses_zip_archive_and_copies_entries_out() {
+        let root = test_root("zip-browse");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("folder")).expect("create test directory");
+        fs::write(root.join("folder").join("nested.txt"), "nested").expect("write nested file");
+        fs::write(root.join("note.txt"), "hello").expect("write source file");
+
+        let archive_path = root.join("browse.zip");
+        archive_items(
+            &[
+                root.join("folder").to_string_lossy().into_owned(),
+                root.join("note.txt").to_string_lossy().into_owned(),
+            ],
+            &archive_path.to_string_lossy(),
+            false,
+        )
+        .expect("create archive");
+
+        let archive_root =
+            parse_archive_uri(&archive_root_uri(&archive_path)).expect("parse archive root uri");
+        let root_entries = list_archive_directory(&archive_root).expect("list archive root");
+        let root_names = root_entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.kind))
+            .collect::<Vec<_>>();
+        assert!(root_names.contains(&("folder", FileEntryKind::Directory)));
+        assert!(root_names.contains(&("note.txt", FileEntryKind::File)));
+
+        let folder_path = parse_archive_uri(
+            &root_entries
+                .iter()
+                .find(|entry| entry.name == "folder")
+                .expect("find folder")
+                .path,
+        )
+        .expect("parse folder archive uri");
+        let folder_entries = list_archive_directory(&folder_path).expect("list folder in archive");
+        assert_eq!(folder_entries.len(), 1);
+        assert_eq!(folder_entries[0].name, "nested.txt");
+        assert_eq!(folder_entries[0].kind, FileEntryKind::File);
+
+        let nested_path = parse_archive_uri(&folder_entries[0].path).expect("parse nested uri");
+        let metadata = stat_archive_entry(&nested_path).expect("stat nested file");
+        assert_eq!(metadata.kind, FileEntryKind::File);
+        assert_eq!(metadata.size, Some(6));
+        assert!(metadata.is_readonly);
+
+        let copied_path = root.join("copied.txt");
+        extract_archive_entry_to(&nested_path, &copied_path, false).expect("copy entry out");
+        assert_eq!(
+            fs::read_to_string(copied_path).expect("read copied file"),
+            "nested"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn browses_tar_gz_archive_directories() {
+        let root = test_root("tar-gz-browse");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("folder")).expect("create test directory");
+        fs::write(root.join("folder").join("nested.txt"), "nested").expect("write nested file");
+
+        let archive_path = root.join("browse.tar.gz");
+        archive_items_with_options(
+            &[root.join("folder").to_string_lossy().into_owned()],
+            &archive_path.to_string_lossy(),
+            false,
+            &ArchiveOptions {
+                format: ArchiveFormat::TarGz,
+                ..ArchiveOptions::default()
+            },
+        )
+        .expect("create tar.gz archive");
+
+        let archive_root =
+            parse_archive_uri(&archive_root_uri(&archive_path)).expect("parse archive root uri");
+        let root_entries = list_archive_directory(&archive_root).expect("list tar.gz root");
+        let folder = root_entries
+            .iter()
+            .find(|entry| entry.name == "folder")
+            .expect("find folder");
+        assert_eq!(folder.kind, FileEntryKind::Directory);
+
+        let folder_path = parse_archive_uri(&folder.path).expect("parse folder uri");
+        let folder_entries = list_archive_directory(&folder_path).expect("list tar.gz folder");
+        assert!(folder_entries
+            .iter()
+            .any(|entry| entry.name == "nested.txt" && entry.kind == FileEntryKind::File));
 
         let _ = fs::remove_dir_all(&root);
     }

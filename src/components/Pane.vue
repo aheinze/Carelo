@@ -23,6 +23,12 @@ import {
   useFileTransferGuards,
 } from '../composables/useFileTransferGuards';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import {
+  archiveBreadcrumbs,
+  archiveRootPath,
+  isArchiveEntry,
+  isArchivePath,
+} from '../utils/archivePaths';
 
 const FILE_DRAG_MIME = 'application/x-carelo-files';
 const TAB_DRAG_MIME = 'application/x-carelo-tab';
@@ -46,6 +52,8 @@ const pane = computed(() => store.panes[props.paneId]);
 const activeTab = computed(() => store.activeTabFor(props.paneId));
 const isActive = computed(() => store.activePaneId === props.paneId);
 const entries = computed(() => store.visibleEntriesFor(props.paneId));
+const rawEntryCount = computed(() => activeTab.value?.entries?.length || 0);
+const activeSearchQuery = computed(() => store.searchQuery.trim());
 const SIZE_UNITS = [
   { unit: 'TB', value: 1024 ** 4 },
   { unit: 'GB', value: 1024 ** 3 },
@@ -90,7 +98,13 @@ function totalKnownSize(targetEntries) {
 }
 
 const breadcrumbs = computed(() => {
-  const currentPath = String(activeTab.value?.currentPath || '~').replace(/\/+$/, '') || '/';
+  const rawPath = String(activeTab.value?.currentPath || '~');
+
+  if (isArchivePath(rawPath)) {
+    return archiveBreadcrumbs(rawPath);
+  }
+
+  const currentPath = rawPath.replace(/\/+$/, '') || '/';
 
   if (currentPath === '/') {
     return [{ label: 'Root', path: '/' }];
@@ -120,6 +134,9 @@ const breadcrumbs = computed(() => {
 const summaryParts = computed(() => {
   const source = activeSummarySource();
   const totalCount = source.entries?.length || 0;
+  const rawCount = source.rawEntryCount ?? totalCount;
+  const hasSearchFilter = Boolean(source.searchQuery || activeSearchQuery.value);
+  const hiddenItemsFiltered = source.showHiddenFiles === false && rawCount > 0 && totalCount === 0;
   const selectedEntries = source.selectedEntries || [];
   const selectedCount = selectedEntries.length;
 
@@ -129,6 +146,14 @@ const summaryParts = computed(() => {
 
   if (source.error) {
     return ['Unable to load folder'];
+  }
+
+  if (totalCount === 0 && hasSearchFilter && rawCount > 0) {
+    return ['No matching items'];
+  }
+
+  if (hiddenItemsFiltered) {
+    return ['Only hidden items'];
   }
 
   if (totalCount === 0) {
@@ -190,9 +215,20 @@ const dragGhost = ref({
 let pointerDrag = null;
 let pointerDragCleanup = null;
 const otherPaneId = computed(() => (props.paneId === 'left' ? 'right' : 'left'));
-const canTransferToOtherPane = computed(() => Boolean(store.effectiveDirectoryFor(otherPaneId.value)));
+const canTransferToOtherPane = computed(() => {
+  const targetDirectory = store.effectiveDirectoryFor(otherPaneId.value);
+
+  return Boolean(targetDirectory && !isArchivePath(targetDirectory));
+});
 const isFileDragActive = computed(() => Boolean(store.dragOperation?.entries?.length));
 const draggedPaths = computed(() => store.dragOperation?.entries?.map((entry) => entry.path) || []);
+const canModifyContext = computed(() =>
+  contextOperationEntries(contextMenu.value).every((item) => !isArchivePath(item.path)),
+);
+const canMoveContext = computed(() =>
+  canTransferToOtherPane.value
+    && contextOperationEntries(contextMenu.value).every((item) => !isArchivePath(item.path)),
+);
 const canArchiveContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
 
@@ -214,6 +250,9 @@ function rootSummarySource() {
     loading: activeTab.value?.loading,
     error: activeTab.value?.error || '',
     entries: entries.value,
+    rawEntryCount: rawEntryCount.value,
+    searchQuery: activeSearchQuery.value,
+    showHiddenFiles: store.showHiddenFiles,
     selectedEntries: entries.value.filter((entry, index) =>
       store.isEntrySelected(props.paneId, index),
     ),
@@ -675,7 +714,9 @@ async function finishPointerFileDrop(event, state) {
   const favoriteDrop = pointerFavoriteDrop(elements, event);
 
   if (favoriteDrop) {
-    const directories = state.entries.filter((entry) => entry.kind === 'directory');
+    const directories = state.entries.filter((entry) =>
+      entry.kind === 'directory' && !isArchivePath(entry.path),
+    );
 
     if (directories.length > 0) {
       await store.addFavoritesFromEntries(directories, favoriteDrop.index);
@@ -1011,11 +1052,11 @@ async function copyPathToClipboard(path) {
 }
 
 function isLocalEntry(entry) {
-  return Boolean(entry?.path) && !isRemotePath(entry.path);
+  return Boolean(entry?.path) && !isRemotePath(entry.path) && !isArchivePath(entry.path);
 }
 
 function isZipEntry(entry) {
-  return entry?.kind === 'file' && /\.zip$/i.test(entry.name || '');
+  return entry?.kind === 'file' && !isArchivePath(entry.path) && /\.zip$/i.test(entry.name || '');
 }
 
 function pathJoin(directory, name) {
@@ -1235,6 +1276,8 @@ async function openEntryPayload(entry, index = null) {
       } else {
         store.setPanePath(props.paneId, entry.path);
       }
+    } else if (isArchiveEntry(entry)) {
+      store.setPanePath(props.paneId, archiveRootPath(entry.path));
     } else {
       await openWithDefaultApp(entry.path);
     }
@@ -1374,6 +1417,8 @@ async function handleContextAction(action) {
         } else {
           store.setPanePath(props.paneId, entry.path);
         }
+      } else if (isArchiveEntry(entry)) {
+        store.setPanePath(props.paneId, archiveRootPath(entry.path));
       } else {
         await openWithDefaultApp(entry.path);
       }
@@ -1381,8 +1426,8 @@ async function handleContextAction(action) {
     }
 
     if (action === 'openInNewTab') {
-      if (entry.kind === 'directory') {
-        store.addPaneTab(props.paneId, entry.path);
+      if (entry.kind === 'directory' || isArchiveEntry(entry)) {
+        store.addPaneTab(props.paneId, entry.kind === 'directory' ? entry.path : archiveRootPath(entry.path));
       }
       return;
     }
@@ -1637,6 +1682,8 @@ async function handleContextAction(action) {
       <div class="pane-list-host">
         <FileList
           :entries="entries"
+          :raw-entry-count="rawEntryCount"
+          :search-query="activeSearchQuery"
           :selected-index="activeTab.selectedIndex"
           :loading="activeTab.loading"
           :view-mode="activeTab.viewMode"
@@ -1677,6 +1724,8 @@ async function handleContextAction(action) {
       :can-unarchive="canUnarchiveContext"
       :can-open-with="canOpenWithContext"
       :can-transfer="canTransferToOtherPane"
+      :can-modify="canModifyContext"
+      :can-move="canMoveContext"
       @action="handleContextAction"
       @close="closeContextMenu"
     />

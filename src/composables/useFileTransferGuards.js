@@ -7,9 +7,14 @@ import {
 } from './useFileOperations';
 import { useDialog } from './useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { archiveParentPath, isArchivePath, joinArchiveAwarePath } from '../utils/archivePaths';
 import { formatFileDateTime } from '../utils/dateFormat';
 
 export function joinPath(directory, name) {
+  if (isArchivePath(directory)) {
+    return joinArchiveAwarePath(directory, name);
+  }
+
   if (!directory || directory === '/') {
     return `/${name}`;
   }
@@ -18,10 +23,20 @@ export function joinPath(directory, name) {
 }
 
 export function cleanPath(path) {
-  return String(path || '').replace(/\/+$/, '') || '/';
+  const value = String(path || '');
+
+  if (isArchivePath(value)) {
+    return value.endsWith('!/') ? value : value.replace(/\/+$/, '');
+  }
+
+  return value.replace(/\/+$/, '') || '/';
 }
 
 export function parentPath(path) {
+  if (isArchivePath(path)) {
+    return archiveParentPath(path);
+  }
+
   const clean = cleanPath(path);
 
   if (!clean || clean === '/' || clean === '~') {
@@ -357,6 +372,26 @@ export function useFileTransferGuards() {
       return null;
     }
 
+    if (isArchivePath(targetDirectory)) {
+      await dialog.alert({
+        title: mode === 'move' ? 'Move Not Possible' : 'Copy Not Possible',
+        message: 'Archives are read-only while browsing.',
+        detail: 'Copy items out of an archive into a normal folder. Adding files to archives is not supported yet.',
+        variant: 'warning',
+      });
+      return null;
+    }
+
+    if (mode === 'move' && sourceEntries.some((entry) => isArchivePath(entry.path))) {
+      await dialog.alert({
+        title: 'Move Not Possible',
+        message: 'Archive contents cannot be moved.',
+        detail: 'Use copy to extract items from the archive.',
+        variant: 'warning',
+      });
+      return null;
+    }
+
     const targetEntries = await entriesByName(targetDirectory);
     const invalid = [];
     const skipped = [];
@@ -516,6 +551,10 @@ export function useFileTransferGuards() {
       return 'copy';
     }
 
+    if (isArchivePath(targetDirectory) || paths.some((path) => isArchivePath(path))) {
+      return 'copy';
+    }
+
     try {
       return await areSameVolume(paths, targetDirectory) ? 'move' : 'copy';
     } catch {
@@ -590,6 +629,15 @@ export function useFileTransferGuards() {
     const targetName = String(nextName || '').trim();
 
     if (!entry || !targetName || targetName === entry.name) {
+      return false;
+    }
+
+    if (isArchivePath(entry.path)) {
+      await dialog.alert({
+        title: 'Rename Not Possible',
+        message: 'Archive contents are read-only while browsing.',
+        variant: 'warning',
+      });
       return false;
     }
 

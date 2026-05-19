@@ -12,6 +12,7 @@ import {
   writeTerminalSession,
 } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
 
 const props = defineProps({
   visible: {
@@ -34,11 +35,14 @@ let colorSchemeListener = null;
 const activeSession = computed(() =>
   sessions.value.find((session) => session.id === activeSessionId.value) || sessions.value[0] || null,
 );
-const activeCwd = computed(() =>
-  store.appSettings.terminalStartsInActiveFolder
-    ? (store.effectiveDirectoryFor(store.activePaneId) || store.activePane?.currentPath || undefined)
-    : undefined,
-);
+const activeCwd = computed(() => {
+  if (!store.appSettings.terminalStartsInActiveFolder) {
+    return undefined;
+  }
+
+  const directory = store.effectiveDirectoryFor(store.activePaneId) || store.activePane?.currentPath || '';
+  return isArchivePath(directory) ? archiveParentPath(directory) : directory || undefined;
+});
 
 function titleForShell(shell) {
   const parts = String(shell || 'shell').split('/');

@@ -12,6 +12,7 @@ import {
 } from './useFileTransferGuards';
 import { useShortcutsModal } from './useShortcutsModal';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { archiveRootPath, isArchiveEntry, isArchivePath } from '../utils/archivePaths';
 
 let fileClipboard = null;
 const FILE_CLIPBOARD_STORAGE_KEY = 'carelo.fileClipboard';
@@ -367,6 +368,16 @@ export function useKeyboardShortcuts() {
 
   async function createDirectory(targetPaneId = activePane(), seedName = 'New Folder') {
     const targetDirectory = currentPath(targetPaneId);
+
+    if (isArchivePath(targetDirectory)) {
+      await dialog.alert({
+        title: 'New Folder Not Available',
+        message: 'Archive contents are read-only while browsing.',
+        variant: 'warning',
+      });
+      return;
+    }
+
     const name = (await dialog.prompt({
       title: 'Create Folder',
       icon: 'folder',
@@ -389,6 +400,15 @@ export function useKeyboardShortcuts() {
     const entries = operationEntries();
 
     if (entries.length === 0) {
+      return;
+    }
+
+    if (entries.some((entry) => isArchivePath(entry.path))) {
+      await dialog.alert({
+        title: 'Delete Not Available',
+        message: 'Archive contents are read-only while browsing.',
+        variant: 'warning',
+      });
       return;
     }
 
@@ -524,6 +544,16 @@ export function useKeyboardShortcuts() {
       return;
     }
 
+    if (mode === 'move' && entries.some((entry) => isArchivePath(entry.path))) {
+      await dialog.alert({
+        title: 'Cut Not Available',
+        message: 'Archive contents are read-only while browsing.',
+        detail: 'Use copy to extract items from the archive.',
+        variant: 'warning',
+      });
+      return;
+    }
+
     fileClipboard = clipboardPayloadForEntries(mode, entries);
     storeClipboard(fileClipboard);
 
@@ -626,6 +656,8 @@ export function useKeyboardShortcuts() {
 
     if (entry?.kind === 'directory') {
       store.addPaneTab(activePane(), entry.path);
+    } else if (isArchiveEntry(entry)) {
+      store.addPaneTab(activePane(), archiveRootPath(entry.path));
     } else {
       store.addPaneTab(activePane());
     }
