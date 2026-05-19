@@ -5,9 +5,14 @@ import FileRow from './FileRow.vue';
 import { listDirectory } from '../composables/useFileOperations';
 import { dropEffectFromEvent } from '../composables/useFileTransferGuards';
 import { archiveParentPath, archiveRootPath, isArchiveEntry, isArchivePath, isBrowsableEntry } from '../utils/archivePaths';
+import { fileTypeIconKind, fileTypeIconName } from '../utils/fileTypeIcons';
 
 const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
+
+function fileTypeClass(entry, prefix) {
+  return `${prefix}--${fileTypeIconKind(entry)}`;
+}
 
 const props = defineProps({
   entries: {
@@ -1162,9 +1167,9 @@ watch(
               @dblclick="handleColumnOpen(entry, index, columnIndex)"
               @contextmenu.prevent="handleColumnContext(entry, index, columnIndex, $event)"
             >
-              <span class="file-column-glyph" :class="`file-column-glyph--${entry.kind}`">
+              <span class="file-column-glyph" :class="[ `file-column-glyph--${entry.kind}`, fileTypeClass(entry, 'file-column-glyph') ]">
                 <AppIcon
-                  :name="entry.kind === 'directory' ? 'folder' : isArchiveEntry(entry) ? 'archive' : 'file'"
+                  :name="fileTypeIconName(entry)"
                   :size="17"
                   :stroke-width="1.8"
                 />
@@ -1759,6 +1764,36 @@ watch(
 
 .file-column-glyph--directory {
   color: var(--folder-icon);
+}
+
+.file-column-glyph--archive,
+.file-column-glyph--audio,
+.file-column-glyph--code,
+.file-column-glyph--config,
+.file-column-glyph--document,
+.file-column-glyph--image,
+.file-column-glyph--spreadsheet,
+.file-column-glyph--presentation,
+.file-column-glyph--video {
+  color: color-mix(in srgb, var(--file-icon) 82%, var(--file-type-tint, var(--accent)) 18%);
+}
+
+.file-column-glyph--archive,
+.file-column-glyph--spreadsheet {
+  --file-type-tint: var(--folder-icon);
+}
+
+.file-column-glyph--audio,
+.file-column-glyph--config,
+.file-column-glyph--presentation,
+.file-column-glyph--video {
+  --file-type-tint: var(--accent-warm);
+}
+
+.file-column-glyph--code,
+.file-column-glyph--document,
+.file-column-glyph--image {
+  --file-type-tint: var(--accent);
 }
 
 .file-column-row--selected .file-column-glyph,

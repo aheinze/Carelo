@@ -10,7 +10,7 @@ import {
   readTextPreview,
 } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
-import { archiveParentPath, isArchiveEntry, isArchivePath } from '../utils/archivePaths';
+import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
 import { formatFileDateTime } from '../utils/dateFormat';
 import {
   audioTypeLabel,
@@ -24,66 +24,9 @@ import {
   documentTypeLabel,
   videoTypeLabel,
 } from '../utils/fileTypes';
+import { fileTypeIconKind, fileTypeIconName } from '../utils/fileTypeIcons';
 
 const store = useFileManagerStore();
-const CODE_EXTENSIONS = new Set([
-  'bash',
-  'c',
-  'cc',
-  'cpp',
-  'cs',
-  'css',
-  'go',
-  'h',
-  'hpp',
-  'htm',
-  'html',
-  'java',
-  'js',
-  'jsx',
-  'lua',
-  'php',
-  'pl',
-  'py',
-  'rb',
-  'rs',
-  'scss',
-  'sh',
-  'sql',
-  'svelte',
-  'swift',
-  'ts',
-  'tsx',
-  'vue',
-  'zsh',
-]);
-const CONFIG_EXTENSIONS = new Set([
-  'cfg',
-  'conf',
-  'env',
-  'gitignore',
-  'ini',
-  'json',
-  'lock',
-  'properties',
-  'toml',
-  'xml',
-  'yaml',
-  'yml',
-]);
-const CONFIG_NAMES = new Set([
-  '.dockerignore',
-  '.editorconfig',
-  '.env',
-  '.gitattributes',
-  '.gitignore',
-  'dockerfile',
-  'makefile',
-]);
-const DOCUMENT_EXTENSIONS = new Set(['doc', 'docx', 'epub', 'md', 'odt', 'pages', 'rtf', 'txt']);
-const SPREADSHEET_EXTENSIONS = new Set(['csv', 'ods', 'numbers', 'xls', 'xlsx']);
-const PRESENTATION_EXTENSIONS = new Set(['key', 'odp', 'ppt', 'pptx']);
-
 const fallbackPaneId = computed(() => (store.activePaneId === 'left' ? 'right' : 'left'));
 const previewSelectionEntries = computed(() => {
   const activeSelection = store.selectedEntriesFor(store.activePaneId);
@@ -566,40 +509,8 @@ function typeLabel(entry) {
   return ext ? ext.toUpperCase() : 'File';
 }
 
-function previewFallbackKind(entry) {
-  if (!entry || entry.kind !== 'file') {
-    return 'file';
-  }
-
-  const name = String(entry.name || '').toLowerCase();
-  const extension = extensionFor(entry.name);
-
-  if (isArchiveEntry(entry)) return 'archive';
-  if (CONFIG_NAMES.has(name) || CONFIG_EXTENSIONS.has(extension)) return 'config';
-  if (CODE_EXTENSIONS.has(extension)) return 'code';
-  if (SPREADSHEET_EXTENSIONS.has(extension)) return 'spreadsheet';
-  if (PRESENTATION_EXTENSIONS.has(extension)) return 'presentation';
-  if (DOCUMENT_EXTENSIONS.has(extension) || isPdfEntry(entry)) return 'document';
-
-  return 'file';
-}
-
-function previewFallbackIcon(entry) {
-  const icons = {
-    archive: 'archive',
-    code: 'file-code',
-    config: 'file-config',
-    document: 'file-text',
-    spreadsheet: 'file-spreadsheet',
-    presentation: 'file-presentation',
-    file: 'file',
-  };
-
-  return icons[previewFallbackKind(entry)] || 'file';
-}
-
 function previewFallbackClass(entry) {
-  return `preview-file--${previewFallbackKind(entry)}`;
+  return `preview-file--${fileTypeIconKind(entry)}`;
 }
 
 function shouldShowImage(entry) {
@@ -1018,7 +929,7 @@ function logDetail(entry) {
           </span>
           <span v-else class="preview-file" :class="previewFallbackClass(inspectedEntry)">
             <span class="preview-file-icon">
-              <AppIcon :name="previewFallbackIcon(inspectedEntry)" :size="76" :stroke-width="1.28" />
+              <AppIcon :name="fileTypeIconName(inspectedEntry)" :size="76" :stroke-width="1.28" />
               <span class="preview-ext">{{ extensionFor(inspectedEntry.name).toUpperCase() || '?' }}</span>
             </span>
           </span>
@@ -1532,28 +1443,34 @@ function logDetail(entry) {
   box-shadow: inset 0 1px 0 color-mix(in srgb, white 18%, transparent);
 }
 
-.preview-file--archive {
-  color: color-mix(in srgb, var(--folder-icon) 72%, var(--text-muted));
+.preview-file--archive,
+.preview-file--audio,
+.preview-file--code,
+.preview-file--config,
+.preview-file--document,
+.preview-file--image,
+.preview-file--spreadsheet,
+.preview-file--presentation,
+.preview-file--video {
+  color: color-mix(in srgb, var(--file-icon) 82%, var(--file-type-tint, var(--accent)) 18%);
 }
 
-.preview-file--code {
-  color: color-mix(in srgb, var(--accent) 70%, var(--text));
-}
-
-.preview-file--config {
-  color: color-mix(in srgb, var(--accent-warm) 64%, var(--text-muted));
-}
-
-.preview-file--document {
-  color: color-mix(in srgb, var(--accent) 62%, var(--icon));
-}
-
+.preview-file--archive,
 .preview-file--spreadsheet {
-  color: color-mix(in srgb, var(--folder-icon) 58%, var(--accent));
+  --file-type-tint: var(--folder-icon);
 }
 
-.preview-file--presentation {
-  color: color-mix(in srgb, var(--accent-warm) 72%, var(--accent));
+.preview-file--audio,
+.preview-file--config,
+.preview-file--presentation,
+.preview-file--video {
+  --file-type-tint: var(--accent-warm);
+}
+
+.preview-file--code,
+.preview-file--document,
+.preview-file--image {
+  --file-type-tint: var(--accent);
 }
 
 .preview-ext {

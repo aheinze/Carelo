@@ -4,6 +4,7 @@ import AppIcon from './AppIcon.vue';
 import { canUseLocalFileAssets, localFileAssetUrl } from '../composables/useFileOperations';
 import { isArchiveEntry } from '../utils/archivePaths';
 import { formatFileDate } from '../utils/dateFormat';
+import { fileTypeIconKind, fileTypeIconName } from '../utils/fileTypeIcons';
 import { isImageEntry } from '../utils/fileTypes';
 
 const props = defineProps({
@@ -69,6 +70,10 @@ function visualThumbClass(entry) {
     .replace(/^-+|-+$/g, '');
 
   return slug ? `visual-thumb--${slug}` : '';
+}
+
+function fileTypeClass(entry, prefix) {
+  return `${prefix}--${fileTypeIconKind(entry)}`;
 }
 
 function stopThumbnailObserver() {
@@ -150,6 +155,7 @@ onBeforeUnmount(stopThumbnailObserver);
         'file-card-frame--archive': isArchiveEntry(entry),
         'file-card-frame--file': entry.kind !== 'directory' && !shouldShowImage(entry),
         'file-card-frame--photo': entry.kind !== 'directory' && shouldShowImage(entry),
+        [fileTypeClass(entry, 'file-card-frame')]: entry.kind !== 'directory' && !shouldShowImage(entry),
       }"
     >
       <AppIcon v-if="entry.kind === 'directory'" name="folder" :size="58" :stroke-width="1.55" />
@@ -176,8 +182,7 @@ onBeforeUnmount(stopThumbnailObserver);
           @error="handleImageError"
         />
       </span>
-      <AppIcon v-else-if="isArchiveEntry(entry)" name="archive" :size="46" :stroke-width="1.55" />
-      <AppIcon v-else name="file" :size="46" :stroke-width="1.55" />
+      <AppIcon v-else :name="fileTypeIconName(entry)" :size="46" :stroke-width="1.55" />
     </span>
     <span class="file-card-name">{{ entry.name }}</span>
   </button>
@@ -194,9 +199,9 @@ onBeforeUnmount(stopThumbnailObserver);
     @dblclick="$emit('open')"
   >
     <span class="file-name">
-      <span class="file-glyph" :class="`file-glyph--${entry.kind}`">
+      <span class="file-glyph" :class="[ `file-glyph--${entry.kind}`, fileTypeClass(entry, 'file-glyph') ]">
         <AppIcon
-          :name="entry.kind === 'directory' ? 'folder' : isArchiveEntry(entry) ? 'archive' : 'file'"
+          :name="fileTypeIconName(entry)"
           :size="18"
           :stroke-width="1.8"
         />
@@ -281,6 +286,40 @@ onBeforeUnmount(stopThumbnailObserver);
   color: var(--folder-icon);
 }
 
+.file-glyph--archive,
+.file-glyph--audio,
+.file-glyph--code,
+.file-glyph--config,
+.file-glyph--document,
+.file-glyph--image,
+.file-glyph--spreadsheet,
+.file-glyph--presentation,
+.file-glyph--video {
+  color: color-mix(in srgb, var(--file-icon) 82%, var(--file-type-tint, var(--accent)) 18%);
+}
+
+.file-glyph--archive,
+.file-glyph--spreadsheet {
+  --file-type-tint: var(--folder-icon);
+}
+
+.file-glyph--audio,
+.file-glyph--config,
+.file-glyph--presentation,
+.file-glyph--video {
+  --file-type-tint: var(--accent-warm);
+}
+
+.file-glyph--code,
+.file-glyph--document,
+.file-glyph--image {
+  --file-type-tint: var(--accent);
+}
+
+.file-row--selected .file-glyph {
+  color: rgb(255 255 255 / 0.88);
+}
+
 /* ── Tag cell ─────────────────────────────────────────────── */
 .tag-cell {
   display: flex;
@@ -346,8 +385,34 @@ onBeforeUnmount(stopThumbnailObserver);
   color: var(--file-icon);
 }
 
-.file-card-frame--archive {
-  color: var(--file-icon);
+.file-card-frame--archive,
+.file-card-frame--audio,
+.file-card-frame--code,
+.file-card-frame--config,
+.file-card-frame--document,
+.file-card-frame--image,
+.file-card-frame--spreadsheet,
+.file-card-frame--presentation,
+.file-card-frame--video {
+  color: color-mix(in srgb, var(--file-icon) 82%, var(--file-type-tint, var(--accent)) 18%);
+}
+
+.file-card-frame--archive,
+.file-card-frame--spreadsheet {
+  --file-type-tint: var(--folder-icon);
+}
+
+.file-card-frame--audio,
+.file-card-frame--config,
+.file-card-frame--presentation,
+.file-card-frame--video {
+  --file-type-tint: var(--accent-warm);
+}
+
+.file-card-frame--code,
+.file-card-frame--document,
+.file-card-frame--image {
+  --file-type-tint: var(--accent);
 }
 
 .file-card-frame--photo {

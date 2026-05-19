@@ -338,6 +338,13 @@ defineProps({
       <path d="m5.7 17 4.4-4.4 3.2 3.2 1.6-1.6 3.4 2.8" />
     </template>
 
+    <template v-else-if="name === 'video'">
+      <rect x="4" y="6" width="11.5" height="12" rx="2" />
+      <path d="m15.5 10 4.2-2.3v8.6L15.5 14" />
+      <path d="M8 9.5h3.6" />
+      <path d="M8 12.5h2.4" />
+    </template>
+
     <template v-else-if="name === 'drive'">
       <path d="M5.2 6.6h13.6l2 6.2v4.6A2.6 2.6 0 0 1 18.2 20H5.8a2.6 2.6 0 0 1-2.6-2.6v-4.6Z" />
       <path d="M3.2 12.8h17.6" />
