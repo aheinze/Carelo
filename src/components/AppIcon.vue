@@ -284,6 +284,54 @@ defineProps({
       <path d="M13 3.8V8h4" />
     </template>
 
+    <template v-else-if="name === 'file-text'">
+      <path d="M7 3.8h6l4 4V19a1.8 1.8 0 0 1-1.8 1.8H7A1.8 1.8 0 0 1 5.2 19V5.6A1.8 1.8 0 0 1 7 3.8Z" />
+      <path d="M13 3.8V8h4" />
+      <path d="M8.3 11h7.4" />
+      <path d="M8.3 14.2h7.4" />
+      <path d="M8.3 17.4h4.8" />
+    </template>
+
+    <template v-else-if="name === 'file-code'">
+      <path d="M7 3.8h6l4 4V19a1.8 1.8 0 0 1-1.8 1.8H7A1.8 1.8 0 0 1 5.2 19V5.6A1.8 1.8 0 0 1 7 3.8Z" />
+      <path d="M13 3.8V8h4" />
+      <path d="m10 12-2.1 2 2.1 2" />
+      <path d="m14 12 2.1 2-2.1 2" />
+      <path d="m12.8 11.2-1.6 5.6" />
+    </template>
+
+    <template v-else-if="name === 'file-config'">
+      <path d="M7 3.8h6l4 4V19a1.8 1.8 0 0 1-1.8 1.8H7A1.8 1.8 0 0 1 5.2 19V5.6A1.8 1.8 0 0 1 7 3.8Z" />
+      <path d="M13 3.8V8h4" />
+      <circle cx="12" cy="14.4" r="2.2" />
+      <path d="M12 10.7v1" />
+      <path d="M12 17.1v1" />
+      <path d="m9.4 11.8.7.7" />
+      <path d="m13.9 16.3.7.7" />
+      <path d="M8.3 14.4h1" />
+      <path d="M14.7 14.4h1" />
+      <path d="m9.4 17 .7-.7" />
+      <path d="m13.9 12.5.7-.7" />
+    </template>
+
+    <template v-else-if="name === 'file-spreadsheet'">
+      <path d="M7 3.8h6l4 4V19a1.8 1.8 0 0 1-1.8 1.8H7A1.8 1.8 0 0 1 5.2 19V5.6A1.8 1.8 0 0 1 7 3.8Z" />
+      <path d="M13 3.8V8h4" />
+      <path d="M8.4 11h7.2" />
+      <path d="M8.4 14.2h7.2" />
+      <path d="M8.4 17.4h7.2" />
+      <path d="M10.8 11v6.4" />
+      <path d="M13.2 11v6.4" />
+    </template>
+
+    <template v-else-if="name === 'file-presentation'">
+      <path d="M7 3.8h6l4 4V19a1.8 1.8 0 0 1-1.8 1.8H7A1.8 1.8 0 0 1 5.2 19V5.6A1.8 1.8 0 0 1 7 3.8Z" />
+      <path d="M13 3.8V8h4" />
+      <rect x="8.2" y="11.2" width="7.6" height="4.9" rx=".8" />
+      <path d="M12 16.1v2" />
+      <path d="M10.1 18.1h3.8" />
+    </template>
+
     <template v-else-if="name === 'image'">
       <rect x="4" y="5" width="16" height="14" rx="2" />
       <circle cx="9" cy="10" r="1.5" />

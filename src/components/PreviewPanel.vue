@@ -10,7 +10,7 @@ import {
   readTextPreview,
 } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
-import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
+import { archiveParentPath, isArchiveEntry, isArchivePath } from '../utils/archivePaths';
 import { formatFileDateTime } from '../utils/dateFormat';
 import {
   audioTypeLabel,
@@ -26,6 +26,64 @@ import {
 } from '../utils/fileTypes';
 
 const store = useFileManagerStore();
+const CODE_EXTENSIONS = new Set([
+  'bash',
+  'c',
+  'cc',
+  'cpp',
+  'cs',
+  'css',
+  'go',
+  'h',
+  'hpp',
+  'htm',
+  'html',
+  'java',
+  'js',
+  'jsx',
+  'lua',
+  'php',
+  'pl',
+  'py',
+  'rb',
+  'rs',
+  'scss',
+  'sh',
+  'sql',
+  'svelte',
+  'swift',
+  'ts',
+  'tsx',
+  'vue',
+  'zsh',
+]);
+const CONFIG_EXTENSIONS = new Set([
+  'cfg',
+  'conf',
+  'env',
+  'gitignore',
+  'ini',
+  'json',
+  'lock',
+  'properties',
+  'toml',
+  'xml',
+  'yaml',
+  'yml',
+]);
+const CONFIG_NAMES = new Set([
+  '.dockerignore',
+  '.editorconfig',
+  '.env',
+  '.gitattributes',
+  '.gitignore',
+  'dockerfile',
+  'makefile',
+]);
+const DOCUMENT_EXTENSIONS = new Set(['doc', 'docx', 'epub', 'md', 'odt', 'pages', 'rtf', 'txt']);
+const SPREADSHEET_EXTENSIONS = new Set(['csv', 'ods', 'numbers', 'xls', 'xlsx']);
+const PRESENTATION_EXTENSIONS = new Set(['key', 'odp', 'ppt', 'pptx']);
+
 const fallbackPaneId = computed(() => (store.activePaneId === 'left' ? 'right' : 'left'));
 const previewSelectionEntries = computed(() => {
   const activeSelection = store.selectedEntriesFor(store.activePaneId);
@@ -508,6 +566,42 @@ function typeLabel(entry) {
   return ext ? ext.toUpperCase() : 'File';
 }
 
+function previewFallbackKind(entry) {
+  if (!entry || entry.kind !== 'file') {
+    return 'file';
+  }
+
+  const name = String(entry.name || '').toLowerCase();
+  const extension = extensionFor(entry.name);
+
+  if (isArchiveEntry(entry)) return 'archive';
+  if (CONFIG_NAMES.has(name) || CONFIG_EXTENSIONS.has(extension)) return 'config';
+  if (CODE_EXTENSIONS.has(extension)) return 'code';
+  if (SPREADSHEET_EXTENSIONS.has(extension)) return 'spreadsheet';
+  if (PRESENTATION_EXTENSIONS.has(extension)) return 'presentation';
+  if (DOCUMENT_EXTENSIONS.has(extension) || isPdfEntry(entry)) return 'document';
+
+  return 'file';
+}
+
+function previewFallbackIcon(entry) {
+  const icons = {
+    archive: 'archive',
+    code: 'file-code',
+    config: 'file-config',
+    document: 'file-text',
+    spreadsheet: 'file-spreadsheet',
+    presentation: 'file-presentation',
+    file: 'file',
+  };
+
+  return icons[previewFallbackKind(entry)] || 'file';
+}
+
+function previewFallbackClass(entry) {
+  return `preview-file--${previewFallbackKind(entry)}`;
+}
+
 function shouldShowImage(entry) {
   return isImageEntry(entry) && !isArchivePath(entry.path) && !imageFailed.value;
 }
@@ -922,9 +1016,11 @@ function logDetail(entry) {
               Preview truncated
             </span>
           </span>
-          <span v-else class="preview-file">
-            <span class="preview-ext">{{ extensionFor(inspectedEntry.name).toUpperCase() || '?' }}</span>
-            <AppIcon name="file" :size="72" :stroke-width="1.3" />
+          <span v-else class="preview-file" :class="previewFallbackClass(inspectedEntry)">
+            <span class="preview-file-icon">
+              <AppIcon :name="previewFallbackIcon(inspectedEntry)" :size="76" :stroke-width="1.28" />
+              <span class="preview-ext">{{ extensionFor(inspectedEntry.name).toUpperCase() || '?' }}</span>
+            </span>
           </span>
         </div>
 
@@ -1419,16 +1515,66 @@ function logDetail(entry) {
   color: var(--icon);
 }
 
+.preview-file-icon {
+  position: relative;
+  display: grid;
+  width: 104px;
+  height: 104px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 16px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, currentColor 12%, transparent),
+      color-mix(in srgb, currentColor 5%, transparent)
+    );
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 18%, transparent);
+}
+
+.preview-file--archive {
+  color: color-mix(in srgb, var(--folder-icon) 72%, var(--text-muted));
+}
+
+.preview-file--code {
+  color: color-mix(in srgb, var(--accent) 70%, var(--text));
+}
+
+.preview-file--config {
+  color: color-mix(in srgb, var(--accent-warm) 64%, var(--text-muted));
+}
+
+.preview-file--document {
+  color: color-mix(in srgb, var(--accent) 62%, var(--icon));
+}
+
+.preview-file--spreadsheet {
+  color: color-mix(in srgb, var(--folder-icon) 58%, var(--accent));
+}
+
+.preview-file--presentation {
+  color: color-mix(in srgb, var(--accent-warm) 72%, var(--accent));
+}
+
 .preview-ext {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -8%);
+  right: 10px;
+  bottom: 10px;
+  min-width: 29px;
+  max-width: 54px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-radius: 7px;
+  padding: 3px 5px;
+  background: color-mix(in srgb, var(--modal-bg) 86%, currentColor 14%);
   font-size: 11px;
   font-weight: 780;
-  letter-spacing: 0.04em;
-  color: var(--sidebar-glass);
+  letter-spacing: 0;
+  line-height: 1;
+  color: var(--text);
   pointer-events: none;
+  text-align: center;
+  text-overflow: ellipsis;
 }
 
 /* ── File identity ────────────────────────────────────────── */
