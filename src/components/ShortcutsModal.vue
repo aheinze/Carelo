@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, onUnmounted } from 'vue';
+import AppIcon from './AppIcon.vue';
 import { useShortcutsModal } from '../composables/useShortcutsModal';
 
 const modal = useShortcutsModal();
@@ -22,6 +23,8 @@ const sections = [
     title: 'Navigation',
     shortcuts: [
       { keys: ['Tab'],         label: 'Switch active pane' },
+      { keys: ['⌘', 'P'],     label: 'Fuzzy search current folder' },
+      { keys: ['⌘', '⇧', 'F'], label: 'Search file contents' },
       { keys: ['⌥', '←'],    label: 'Go back' },
       { keys: ['⌥', '→'],    label: 'Go forward' },
       { keys: ['⌘', '\\'],   label: 'Go to root' },
@@ -84,10 +87,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
               <h2>Commander Shortcuts</h2>
             </div>
             <button type="button" class="shortcuts-close" aria-label="Close" @click="modal.hide()">
-              <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-                <line x1="1" y1="1" x2="10" y2="10" />
-                <line x1="10" y1="1" x2="1" y2="10" />
-              </svg>
+              <AppIcon name="x" :size="14" :stroke-width="2" />
             </button>
           </header>
 
@@ -183,13 +183,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   height: 26px;
   place-items: center;
   border-radius: 7px;
-  background: var(--btn-hover);
+  background: transparent;
   color: var(--icon);
   transition: background 100ms ease, color 100ms ease;
 }
 
 .shortcuts-close:hover {
-  background: var(--btn-active-bg);
+  background: var(--btn-hover);
   color: var(--text);
 }
 

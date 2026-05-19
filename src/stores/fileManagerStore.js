@@ -465,6 +465,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const terminalPanelHeight = ref(savedSettings.terminalPanelHeight ?? 280);
   const showHiddenFiles = ref(appSettings.value.showHiddenFiles);
   const settingsVisible = ref(false);
+  const fileSearchVisible = ref(false);
+  const fileSearchMode = ref('files');
   const searchQuery = ref('');
   const queue = ref([]);
   const operationLog = ref([]);
@@ -1654,7 +1656,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     const nextPath = String(path || '').trim();
 
     if (!tab || !nextPath || nextPath === tab.currentPath) {
-      return;
+      return Promise.resolve();
     }
 
     clearColumnPreviewEntry(paneId);
@@ -1682,7 +1684,32 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     }
 
     tab.currentPath = nextPath;
-    loadPane(paneId, tab.id);
+    return loadPane(paneId, tab.id);
+  }
+
+  async function revealPathInPane(paneId, path, kind = 'file') {
+    const targetPath = String(path || '').trim();
+
+    if (!targetPath) {
+      return;
+    }
+
+    if (kind === 'directory') {
+      await setPanePath(paneId, targetPath);
+      setActivePane(paneId);
+      return;
+    }
+
+    const parentPath = parentPathFor(targetPath);
+
+    await setPanePath(paneId, parentPath);
+    setActivePane(paneId);
+
+    const index = visibleEntriesFor(paneId).findIndex((entry) => entry.path === targetPath);
+
+    if (index >= 0) {
+      selectEntry(paneId, index);
+    }
   }
 
   function goBack(paneId = activePaneId.value) {
@@ -2028,6 +2055,23 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     settingsVisible.value = !settingsVisible.value;
   }
 
+  function openFileSearch(mode = 'files') {
+    fileSearchMode.value = mode === 'content' ? 'content' : 'files';
+    fileSearchVisible.value = true;
+  }
+
+  function openContentSearch() {
+    openFileSearch('content');
+  }
+
+  function closeFileSearch() {
+    fileSearchVisible.value = false;
+  }
+
+  function toggleFileSearch() {
+    fileSearchVisible.value = !fileSearchVisible.value;
+  }
+
   watch(
     () => [
       sidebarVisible.value,
@@ -2088,6 +2132,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     terminalPanelHeight,
     showHiddenFiles,
     settingsVisible,
+    fileSearchVisible,
+    fileSearchMode,
     appSettings,
     searchQuery,
     queue,
@@ -2150,6 +2196,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     openEntry,
     openSelectedEntry,
     goToParent,
+    revealPathInPane,
     goBack,
     goForward,
     openFocusedDirectoryInOtherPane,
@@ -2179,5 +2226,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     openSettings,
     closeSettings,
     toggleSettings,
+    openFileSearch,
+    openContentSearch,
+    closeFileSearch,
+    toggleFileSearch,
   };
 });

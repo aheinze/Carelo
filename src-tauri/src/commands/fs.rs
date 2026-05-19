@@ -10,8 +10,13 @@ use crate::fs::sudo;
 use crate::fs::{archive, operations};
 use crate::open_with::{self, OpenWithContext};
 use crate::store::AppStoreState;
+use ignore::WalkBuilder;
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -30,6 +35,84 @@ pub struct TransferItem {
     pub overwrite: bool,
     #[serde(default)]
     pub symlink_mode: operations::SymlinkMode,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSearchOptions {
+    #[serde(default = "default_file_search_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub include_hidden: bool,
+    #[serde(default = "default_true")]
+    pub respect_ignore: bool,
+    #[serde(default = "default_true")]
+    pub include_files: bool,
+    #[serde(default = "default_true")]
+    pub include_directories: bool,
+    #[serde(default)]
+    pub follow_symlinks: bool,
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSearchResult {
+    pub name: String,
+    pub path: String,
+    pub parent_path: String,
+    pub kind: String,
+    pub score: i64,
+    pub size: Option<u64>,
+    pub modified_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSearchOptions {
+    #[serde(default = "default_content_search_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub include_hidden: bool,
+    #[serde(default = "default_true")]
+    pub respect_ignore: bool,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub regex: bool,
+    #[serde(default = "default_content_search_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSearchResult {
+    pub name: String,
+    pub path: String,
+    pub parent_path: String,
+    pub line_number: usize,
+    pub line_text: String,
+    pub match_start: usize,
+    pub match_end: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_file_search_limit() -> usize {
+    80
+}
+
+fn default_content_search_limit() -> usize {
+    120
+}
+
+fn default_content_search_max_file_bytes() -> u64 {
+    2 * 1024 * 1024
 }
 
 #[derive(Clone, Default)]
@@ -181,6 +264,38 @@ pub async fn list_directory(
         move |provider| provider.list(&path),
         move |password| sudo::list_directory(&password, &sudo_path),
     )
+    .await
+}
+
+#[tauri::command]
+pub async fn search_files(
+    root: String,
+    query: String,
+    options: Option<FileSearchOptions>,
+) -> Result<Vec<FileSearchResult>, FsError> {
+    run_local(move |_| {
+        search_local_files(
+            &root,
+            &query,
+            options.unwrap_or_else(default_search_options),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn search_content(
+    root: String,
+    query: String,
+    options: Option<ContentSearchOptions>,
+) -> Result<Vec<ContentSearchResult>, FsError> {
+    run_local(move |_| {
+        search_local_content(
+            &root,
+            &query,
+            options.unwrap_or_else(default_content_search_options),
+        )
+    })
     .await
 }
 
@@ -1475,6 +1590,359 @@ fn local_volume_identity(path: &Path) -> FsResult<String> {
         .unwrap_or(path)
         .to_string_lossy()
         .into_owned())
+}
+
+fn default_search_options() -> FileSearchOptions {
+    FileSearchOptions {
+        limit: default_file_search_limit(),
+        include_hidden: false,
+        respect_ignore: true,
+        include_files: true,
+        include_directories: true,
+        follow_symlinks: false,
+        max_depth: None,
+    }
+}
+
+fn default_content_search_options() -> ContentSearchOptions {
+    ContentSearchOptions {
+        limit: default_content_search_limit(),
+        include_hidden: false,
+        respect_ignore: true,
+        case_sensitive: false,
+        regex: false,
+        max_file_bytes: default_content_search_max_file_bytes(),
+        max_depth: None,
+    }
+}
+
+fn expand_local_search_root(root: &str) -> FsResult<PathBuf> {
+    let trimmed = root.trim();
+
+    if trimmed.is_empty() || trimmed == "~" {
+        return LocalFileProvider::home_dir();
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return Ok(LocalFileProvider::home_dir()?.join(rest));
+    }
+
+    if archive::is_archive_uri(trimmed) || parse_remote_path(trimmed).is_some() {
+        return Err(FsError::new(
+            "unsupported_search_root",
+            "Fuzzy file search currently supports local folders only.",
+            Some(trimmed.to_string()),
+        ));
+    }
+
+    Ok(PathBuf::from(trimmed))
+}
+
+fn configure_walk_builder(
+    root_path: &Path,
+    include_hidden: bool,
+    respect_ignore: bool,
+    follow_symlinks: bool,
+    max_depth: Option<usize>,
+) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root_path);
+    builder
+        .hidden(!include_hidden)
+        .follow_links(follow_symlinks)
+        .min_depth(Some(1));
+
+    if let Some(max_depth) = max_depth {
+        builder.max_depth(Some(max_depth.max(1)));
+    }
+
+    if !respect_ignore {
+        builder
+            .ignore(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .parents(false);
+    }
+
+    builder
+}
+
+fn search_result_kind(metadata: &fs::Metadata, is_symlink: bool) -> &'static str {
+    if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_file() {
+        "file"
+    } else if is_symlink {
+        "symlink"
+    } else {
+        "other"
+    }
+}
+
+fn search_local_files(
+    root: &str,
+    query: &str,
+    options: FileSearchOptions,
+) -> FsResult<Vec<FileSearchResult>> {
+    let root_path = expand_local_search_root(root)?;
+    let root_metadata = fs::metadata(&root_path)
+        .map_err(|error| FsError::io("Unable to read search root", &root_path, error))?;
+
+    if !root_metadata.is_dir() {
+        return Err(FsError::new(
+            "search_root_not_directory",
+            "Search root must be a local folder.",
+            Some(root_path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    let limit = options.limit.clamp(1, 500);
+    let query = query.trim();
+    let builder = configure_walk_builder(
+        &root_path,
+        options.include_hidden,
+        options.respect_ignore,
+        options.follow_symlinks,
+        options.max_depth,
+    );
+
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut results = Vec::new();
+    let mut haystack_buf = Vec::new();
+
+    for entry in builder.build() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+
+        if path == root_path {
+            continue;
+        }
+
+        let symlink_metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let is_symlink = symlink_metadata.file_type().is_symlink();
+        let metadata = if is_symlink {
+            fs::metadata(path).unwrap_or(symlink_metadata)
+        } else {
+            symlink_metadata
+        };
+        let kind = search_result_kind(&metadata, is_symlink);
+
+        if (kind == "directory" && !options.include_directories)
+            || (kind != "directory" && !options.include_files)
+        {
+            continue;
+        }
+
+        let candidate = path
+            .strip_prefix(&root_path)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let score = if query.is_empty() {
+            0
+        } else if let Some(score) = pattern.score(
+            Utf32Str::new(candidate.as_str(), &mut haystack_buf),
+            &mut matcher,
+        ) {
+            score
+        } else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .unwrap_or_else(|| OsStr::new(""))
+            .to_string_lossy()
+            .into_owned();
+        let parent_path = path
+            .parent()
+            .unwrap_or(&root_path)
+            .to_string_lossy()
+            .into_owned();
+
+        results.push(FileSearchResult {
+            name,
+            path: path.to_string_lossy().into_owned(),
+            parent_path,
+            kind: kind.to_string(),
+            score: i64::from(score),
+            size: metadata.is_file().then_some(metadata.len()),
+            modified_at: metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs()),
+        });
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.kind.cmp(&b.kind))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    results.truncate(limit);
+    Ok(results)
+}
+
+fn is_probably_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8192).any(|byte| *byte == 0)
+}
+
+fn line_text_with_limit(line: &str) -> String {
+    const MAX_CHARS: usize = 500;
+
+    if line.chars().count() <= MAX_CHARS {
+        return line.to_string();
+    }
+
+    line.chars().take(MAX_CHARS).collect::<String>()
+}
+
+fn find_plain_match(line: &str, query: &str, case_sensitive: bool) -> Option<(usize, usize)> {
+    if case_sensitive {
+        return line.find(query).map(|start| (start, start + query.len()));
+    }
+
+    let line_lower = line.to_lowercase();
+    let query_lower = query.to_lowercase();
+    line_lower
+        .find(&query_lower)
+        .map(|start| (start, start + query_lower.len()))
+}
+
+fn search_local_content(
+    root: &str,
+    query: &str,
+    options: ContentSearchOptions,
+) -> FsResult<Vec<ContentSearchResult>> {
+    let root_path = expand_local_search_root(root)?;
+    let root_metadata = fs::metadata(&root_path)
+        .map_err(|error| FsError::io("Unable to read search root", &root_path, error))?;
+
+    if !root_metadata.is_dir() {
+        return Err(FsError::new(
+            "search_root_not_directory",
+            "Search root must be a local folder.",
+            Some(root_path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    let query = query.trim();
+
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let limit = options.limit.clamp(1, 500);
+    let max_file_bytes = options.max_file_bytes.max(1024);
+    let matcher = if options.regex {
+        Some(
+            RegexBuilder::new(query)
+                .case_insensitive(!options.case_sensitive)
+                .build()
+                .map_err(|error| {
+                    FsError::new(
+                        "invalid_regex",
+                        format!("Invalid search regex: {error}"),
+                        None,
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let builder = configure_walk_builder(
+        &root_path,
+        options.include_hidden,
+        options.respect_ignore,
+        false,
+        options.max_depth,
+    );
+    let mut results = Vec::new();
+
+    for entry in builder.build() {
+        if results.len() >= limit {
+            break;
+        }
+
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+
+        if !metadata.is_file() || metadata.len() > max_file_bytes {
+            continue;
+        }
+
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+
+        if is_probably_binary(&bytes) {
+            continue;
+        }
+
+        let content = String::from_utf8_lossy(&bytes);
+
+        for (line_index, line) in content.lines().enumerate() {
+            let found = if let Some(regex) = matcher.as_ref() {
+                regex
+                    .find(line)
+                    .map(|match_| (match_.start(), match_.end()))
+            } else {
+                find_plain_match(line, query, options.case_sensitive)
+            };
+
+            let Some((match_start, match_end)) = found else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .unwrap_or_else(|| OsStr::new(""))
+                .to_string_lossy()
+                .into_owned();
+            let parent_path = path
+                .parent()
+                .unwrap_or(&root_path)
+                .to_string_lossy()
+                .into_owned();
+
+            results.push(ContentSearchResult {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                parent_path,
+                line_number: line_index + 1,
+                line_text: line_text_with_limit(line),
+                match_start,
+                match_end,
+            });
+
+            if results.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 async fn run_local_with_sudo<T, F, S>(

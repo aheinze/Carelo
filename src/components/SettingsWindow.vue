@@ -175,7 +175,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
               </div>
 
               <button type="button" class="settings-close" aria-label="Close settings" @click="close">
-                <AppIcon name="x" :size="16" :stroke-width="2" />
+                <AppIcon name="x" :size="14" :stroke-width="2" />
               </button>
             </header>
 
@@ -571,12 +571,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
 
 .settings-close {
   display: grid;
-  width: 31px;
-  height: 31px;
+  width: 26px;
+  height: 26px;
   place-items: center;
   border-radius: 7px;
   background: transparent;
   color: var(--icon);
+  transition: background 100ms ease, color 100ms ease;
 }
 
 .settings-close:hover {

@@ -140,13 +140,14 @@ function handleKeydown(event) {
           :aria-labelledby="`dialog-title-${activeDialog.id}`"
           tabindex="-1"
         >
-          <div class="dialog-icon" aria-hidden="true">
-            <AppIcon :name="iconName" :size="22" :stroke-width="1.9" />
-          </div>
-
           <div class="dialog-content">
             <header class="dialog-header">
-              <h2 :id="`dialog-title-${activeDialog.id}`">{{ activeDialog.title }}</h2>
+              <div class="dialog-title-row">
+                <span class="dialog-icon" aria-hidden="true">
+                  <AppIcon :name="iconName" :size="20" :stroke-width="1.9" />
+                </span>
+                <h2 :id="`dialog-title-${activeDialog.id}`">{{ activeDialog.title }}</h2>
+              </div>
               <p v-if="activeDialog.message">{{ activeDialog.message }}</p>
               <small v-if="activeDialog.detail">{{ activeDialog.detail }}</small>
             </header>
@@ -239,9 +240,7 @@ function handleKeydown(event) {
 
 /* ── Panel ────────────────────────────────────────────────── */
 .dialog-panel {
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  gap: 14px;
+  display: block;
   width: min(380px, calc(100vw - 48px));
   border: 1px solid var(--control-border);
   border-radius: 11px;
@@ -259,8 +258,9 @@ function handleKeydown(event) {
 /* ── Icon ─────────────────────────────────────────────────── */
 .dialog-icon {
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
   place-items: center;
   border-radius: 0;
   background: transparent;
@@ -287,8 +287,15 @@ function handleKeydown(event) {
   gap: 6px;
 }
 
+.dialog-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
 .dialog-header h2 {
-  margin: 2px 0 0;
+  margin: 0;
   color: var(--text);
   font-size: 14.5px;
   font-weight: 700;
@@ -418,7 +425,7 @@ function handleKeydown(event) {
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 10px;
 }
 
 .dialog-actions--choice {
@@ -426,42 +433,73 @@ function handleKeydown(event) {
 }
 
 .dialog-button {
-  min-width: 80px;
-  height: 32px;
-  border: 1px solid var(--control-border);
-  border-radius: 9px;
-  padding: 0 14px;
-  background: var(--control-bg);
+  min-width: 86px;
+  height: 36px;
+  border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
+  border-radius: 999px;
+  padding: 0 18px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.04)),
+    color-mix(in srgb, var(--control-glass) 72%, transparent);
   color: var(--text);
   font-size: 13px;
-  font-weight: 600;
-  transition: background 100ms ease;
+  font-weight: 650;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.16),
+    inset 0 -1px 0 rgb(0 0 0 / 0.22),
+    0 1px 2px rgb(0 0 0 / 0.24);
+  transition:
+    background 100ms ease,
+    border-color 100ms ease,
+    box-shadow 100ms ease,
+    transform 80ms ease;
 }
 
 .dialog-button:hover {
-  background: var(--btn-hover);
+  border-color: color-mix(in srgb, var(--text) 20%, transparent);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.18), rgb(255 255 255 / 0.06)),
+    color-mix(in srgb, var(--control-glass) 82%, transparent);
+}
+
+.dialog-button:active {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 2px rgb(0 0 0 / 0.22),
+    0 1px 1px rgb(0 0 0 / 0.18);
 }
 
 .dialog-button--primary {
-  border-color: var(--accent-border);
-  background: var(--btn-primary-bg);
+  border-color: rgb(var(--accent-rgb) / 0.58);
+  background:
+    linear-gradient(180deg, rgb(72 176 255), rgb(0 113 242));
   color: rgb(255 255 255 / 0.96);
-  box-shadow: var(--btn-primary-shadow);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.34),
+    inset 0 -1px 0 rgb(0 48 120 / 0.35),
+    0 0 0 1px rgb(var(--accent-rgb) / 0.18),
+    0 4px 14px rgb(var(--accent-rgb) / 0.32);
 }
 
 .dialog-button--primary:hover {
-  background: var(--btn-primary-bg-hover);
+  background:
+    linear-gradient(180deg, rgb(91 188 255), rgb(0 123 255));
 }
 
 .dialog-button--danger {
   border-color: rgb(var(--danger-rgb) / 0.45);
-  background: var(--btn-danger-bg);
+  background:
+    linear-gradient(180deg, rgb(255 93 84), rgb(214 49 39));
   color: rgb(255 255 255 / 0.96);
-  box-shadow: var(--btn-danger-shadow);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.26),
+    inset 0 -1px 0 rgb(95 0 0 / 0.30),
+    0 4px 14px rgb(var(--danger-rgb) / 0.26);
 }
 
 .dialog-button--danger:hover {
-  background: var(--btn-danger-bg-hover);
+  background:
+    linear-gradient(180deg, rgb(255 105 96), rgb(226 58 47));
 }
 
 /* ── Enter/leave animation ────────────────────────────────── */

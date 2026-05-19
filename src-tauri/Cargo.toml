@@ -35,9 +35,12 @@ libc = "0.2"
 base64 = "0.22"
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["form", "json", "query", "rustls"] }
+regex = "1.12"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 url = "2"
+nucleo-matcher = "0.3.1"
+ignore = "0.4.25"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"

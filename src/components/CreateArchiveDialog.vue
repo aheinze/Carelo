@@ -395,13 +395,14 @@ onUnmounted(() => {
     <Transition name="archive-dialog">
       <div v-if="visible" class="archive-overlay" @pointerdown.self="cancel">
         <section class="archive-panel" role="dialog" aria-modal="true" aria-labelledby="archive-title">
-          <div class="archive-icon" aria-hidden="true">
-            <AppIcon name="archive" :size="22" :stroke-width="1.8" />
-          </div>
-
           <div class="archive-content">
             <header class="archive-header">
-              <h2 id="archive-title">Create Archive</h2>
+              <div class="archive-title-row">
+                <span class="archive-icon" aria-hidden="true">
+                  <AppIcon name="archive" :size="20" :stroke-width="1.8" />
+                </span>
+                <h2 id="archive-title">Create Archive</h2>
+              </div>
               <p>{{ selectedLabel }} in {{ directory }}</p>
             </header>
 
@@ -607,9 +608,7 @@ onUnmounted(() => {
 }
 
 .archive-panel {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  gap: 14px;
+  display: block;
   width: min(540px, calc(100vw - 48px));
   max-height: calc(100vh - 56px);
   overflow-x: hidden;
@@ -624,8 +623,9 @@ onUnmounted(() => {
 
 .archive-icon {
   display: grid;
-  width: 28px;
-  height: 34px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
   place-items: center;
   color: var(--icon);
 }
@@ -641,8 +641,15 @@ onUnmounted(() => {
   gap: 5px;
 }
 
+.archive-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
 .archive-header h2 {
-  margin: 2px 0 0;
+  margin: 0;
   color: var(--text);
   font-size: 14.5px;
   font-weight: 700;
@@ -1004,24 +1011,45 @@ onUnmounted(() => {
 .archive-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 10px;
   padding-top: 2px;
 }
 
 .archive-button {
-  min-width: 80px;
-  height: 32px;
-  border: 1px solid var(--control-border);
-  border-radius: 9px;
-  padding: 0 14px;
-  background: var(--control-bg);
+  min-width: 86px;
+  height: 36px;
+  border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
+  border-radius: 999px;
+  padding: 0 18px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.04)),
+    color-mix(in srgb, var(--control-glass) 72%, transparent);
   color: var(--text);
   font-size: 13px;
   font-weight: 650;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.16),
+    inset 0 -1px 0 rgb(0 0 0 / 0.22),
+    0 1px 2px rgb(0 0 0 / 0.24);
+  transition:
+    background 100ms ease,
+    border-color 100ms ease,
+    box-shadow 100ms ease,
+    transform 80ms ease;
 }
 
 .archive-button:hover:not(:disabled) {
-  background: var(--btn-hover);
+  border-color: color-mix(in srgb, var(--text) 20%, transparent);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.18), rgb(255 255 255 / 0.06)),
+    color-mix(in srgb, var(--control-glass) 82%, transparent);
+}
+
+.archive-button:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 2px rgb(0 0 0 / 0.22),
+    0 1px 1px rgb(0 0 0 / 0.18);
 }
 
 .archive-button:disabled {
@@ -1030,14 +1058,20 @@ onUnmounted(() => {
 }
 
 .archive-button--primary {
-  border-color: var(--accent-border);
-  background: var(--btn-primary-bg);
+  border-color: rgb(var(--accent-rgb) / 0.58);
+  background:
+    linear-gradient(180deg, rgb(72 176 255), rgb(0 113 242));
   color: rgb(255 255 255 / 0.96);
-  box-shadow: var(--btn-primary-shadow);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.34),
+    inset 0 -1px 0 rgb(0 48 120 / 0.35),
+    0 0 0 1px rgb(var(--accent-rgb) / 0.18),
+    0 4px 14px rgb(var(--accent-rgb) / 0.32);
 }
 
 .archive-button--primary:hover:not(:disabled) {
-  background: var(--btn-primary-bg-hover);
+  background:
+    linear-gradient(180deg, rgb(91 188 255), rgb(0 123 255));
 }
 
 .archive-dialog-enter-active,
@@ -1063,11 +1097,7 @@ onUnmounted(() => {
 
 @media (max-width: 560px) {
   .archive-panel {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .archive-icon {
-    display: none;
+    padding: 14px;
   }
 
   .archive-select-grid,

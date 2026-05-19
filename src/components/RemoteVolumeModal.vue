@@ -515,7 +515,7 @@ async function submit() {
             </div>
             <h2 id="remote-volume-title">Connect Remote Volume</h2>
             <button type="button" class="remote-close" aria-label="Close" @click.stop="close">
-              <AppIcon name="x" :size="15" :stroke-width="2.2" />
+              <AppIcon name="x" :size="14" :stroke-width="2" />
             </button>
           </header>
 
@@ -752,7 +752,7 @@ async function submit() {
   border-radius: 7px;
   background: transparent;
   color: var(--icon);
-  transition: background 90ms ease, color 90ms ease;
+  transition: background 100ms ease, color 100ms ease;
 }
 
 .remote-close:hover {
@@ -1103,7 +1103,7 @@ async function submit() {
 .remote-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 10px;
 }
 
 .remote-button {
@@ -1111,21 +1111,40 @@ async function submit() {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-width: 88px;
-  height: 32px;
-  border: 1px solid var(--control-border);
-  border-radius: 8px;
-  padding: 0 14px;
-  background: var(--control-bg);
+  min-width: 86px;
+  height: 36px;
+  border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
+  border-radius: 999px;
+  padding: 0 18px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.04)),
+    color-mix(in srgb, var(--control-glass) 72%, transparent);
   color: var(--text);
   font-size: 13px;
-  font-weight: 620;
-  box-shadow: var(--control-inset);
-  transition: background 90ms ease;
+  font-weight: 650;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.16),
+    inset 0 -1px 0 rgb(0 0 0 / 0.22),
+    0 1px 2px rgb(0 0 0 / 0.24);
+  transition:
+    background 100ms ease,
+    border-color 100ms ease,
+    box-shadow 100ms ease,
+    transform 80ms ease;
 }
 
 .remote-button:hover:not(:disabled) {
-  background: var(--btn-hover);
+  border-color: color-mix(in srgb, var(--text) 20%, transparent);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.18), rgb(255 255 255 / 0.06)),
+    color-mix(in srgb, var(--control-glass) 82%, transparent);
+}
+
+.remote-button:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 2px rgb(0 0 0 / 0.22),
+    0 1px 1px rgb(0 0 0 / 0.18);
 }
 
 .remote-button:disabled {
@@ -1134,14 +1153,20 @@ async function submit() {
 }
 
 .remote-button--primary {
-  border-color: rgb(var(--accent-rgb) / 0.34);
-  background: var(--btn-primary-bg);
+  border-color: rgb(var(--accent-rgb) / 0.58);
+  background:
+    linear-gradient(180deg, rgb(72 176 255), rgb(0 113 242));
   color: rgb(255 255 255 / 0.96);
-  box-shadow: var(--btn-primary-shadow);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.34),
+    inset 0 -1px 0 rgb(0 48 120 / 0.35),
+    0 0 0 1px rgb(var(--accent-rgb) / 0.18),
+    0 4px 14px rgb(var(--accent-rgb) / 0.32);
 }
 
 .remote-button--primary:hover:not(:disabled) {
-  background: var(--btn-primary-bg-hover);
+  background:
+    linear-gradient(180deg, rgb(91 188 255), rgb(0 123 255));
 }
 
 /* ── Animation ────────────────────────────────────────────── */

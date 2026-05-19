@@ -223,7 +223,7 @@ function dispatchSelectedContextMenu(store) {
 function shortcutHelpText() {
   return [
     'F3 Preview, F4 Open, F5 Copy, F6 Move, F7 New Folder, F8/Delete Delete',
-    'Ctrl+C Copy, Ctrl+X Cut, Ctrl+V Paste, Shift+F6 Rename, F2/Ctrl+R Refresh',
+    'Ctrl+P Fuzzy Search, Ctrl+Shift+F Content Search, Ctrl+C Copy, Ctrl+X Cut, Ctrl+V Paste',
     'Tab Switch Pane, Alt+Left/Right History, Ctrl+\\ Root, Ctrl+PageUp Parent',
     'Insert/Space Toggle Selection, Ctrl+A/Num+ Select All, Num- Clear, Num* Invert',
     'Ctrl+F1 Grid, Ctrl+F2 List, Ctrl+F3 Name, Ctrl+F4 Extension, Ctrl+F5 Date, Ctrl+F6 Size, Ctrl+F7 Unsorted',
@@ -664,15 +664,28 @@ export function useKeyboardShortcuts() {
   }
 
   async function handleShortcut(event) {
-    if (isEditableTarget(event.target)) {
-      return;
-    }
-
     const key = event.key;
     const code = event.code;
     const lowerKey = key.toLowerCase();
     const command = isCommand(event);
     const onlyCommand = command && !event.altKey && !event.shiftKey;
+
+    if (command && event.shiftKey && lowerKey === 'f' && !event.altKey) {
+      event.preventDefault();
+      store.openContentSearch();
+      return;
+    }
+
+    if (onlyCommand && lowerKey === 'p') {
+      event.preventDefault();
+      store.openFileSearch();
+      return;
+    }
+
+    if (isEditableTarget(event.target)) {
+      return;
+    }
+
     const paneId = activePane();
     const targetPaneId = otherPaneId(paneId);
     const targetPath = currentPath(targetPaneId);

@@ -12,8 +12,8 @@ use commands::fs::{
     delete_items, get_file_metadata, get_home_directory, list_directory, list_open_with_apps,
     list_remote_volumes, list_volumes, measure_items_size, move_items, open_with_app,
     open_with_default_app, pause_file_operation, remove_remote_volume, rename_item,
-    resume_file_operation, reveal_in_file_manager, same_volume, unarchive_items,
-    FileOperationState,
+    resume_file_operation, reveal_in_file_manager, same_volume, search_content, search_files,
+    unarchive_items, FileOperationState,
 };
 use commands::oauth::create_oauth_tokens;
 use commands::store::{
@@ -44,6 +44,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_directory,
+            search_files,
+            search_content,
             get_file_metadata,
             get_home_directory,
             list_volumes,

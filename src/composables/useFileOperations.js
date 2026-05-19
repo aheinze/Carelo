@@ -154,6 +154,14 @@ export async function listDirectory(path) {
   return invokeCommand('list_directory', { path }, { sudo: true });
 }
 
+export async function searchFiles(root, query, options = {}) {
+  return invokeCommand('search_files', { root, query, options });
+}
+
+export async function searchContent(root, query, options = {}) {
+  return invokeCommand('search_content', { root, query, options });
+}
+
 export async function getFileMetadata(path) {
   return invokeCommand('get_file_metadata', { path }, { sudo: true });
 }
@@ -316,6 +324,8 @@ export function useFileOperations() {
     isRemotePath,
     listFavorites,
     listDirectory,
+    searchContent,
+    searchFiles,
     listOpenWithApps,
     listRemoteVolumes,
     listVolumes,

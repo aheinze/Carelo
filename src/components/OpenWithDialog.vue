@@ -118,13 +118,14 @@ function handleKeydown(event) {
           aria-labelledby="open-with-title"
           tabindex="-1"
         >
-          <div class="open-with-icon" aria-hidden="true">
-            <AppIcon name="app" :size="22" :stroke-width="1.9" />
-          </div>
-
           <div class="open-with-content">
             <header class="open-with-header">
-              <h2 id="open-with-title">Open With</h2>
+              <div class="open-with-title-row">
+                <span class="open-with-icon" aria-hidden="true">
+                  <AppIcon name="app" :size="20" :stroke-width="1.9" />
+                </span>
+                <h2 id="open-with-title">Open With</h2>
+              </div>
               <p v-if="entry">{{ entry.name }}</p>
               <small>{{ fileTypeLabel }}</small>
             </header>
@@ -208,9 +209,7 @@ function handleKeydown(event) {
 }
 
 .open-with-panel {
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  gap: 14px;
+  display: block;
   width: min(520px, calc(100vw - 48px));
   max-height: calc(100vh - 56px);
   overflow: hidden;
@@ -225,8 +224,9 @@ function handleKeydown(event) {
 
 .open-with-icon {
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
   place-items: center;
   color: var(--icon);
 }
@@ -244,8 +244,15 @@ function handleKeydown(event) {
   min-width: 0;
 }
 
+.open-with-title-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
 .open-with-header h2 {
-  margin: 2px 0 0;
+  margin: 0;
   color: var(--text);
   font-size: 14.5px;
   font-weight: 700;
@@ -475,7 +482,7 @@ function handleKeydown(event) {
 .open-with-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .open-with-action-spacer {
@@ -483,19 +490,40 @@ function handleKeydown(event) {
 }
 
 .open-with-button {
-  min-width: 80px;
-  height: 32px;
-  border: 1px solid var(--control-border);
-  border-radius: 9px;
-  padding: 0 14px;
-  background: var(--control-bg);
+  min-width: 86px;
+  height: 36px;
+  border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
+  border-radius: 999px;
+  padding: 0 18px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.04)),
+    color-mix(in srgb, var(--control-glass) 72%, transparent);
   color: var(--text);
   font-size: 13px;
   font-weight: 650;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.16),
+    inset 0 -1px 0 rgb(0 0 0 / 0.22),
+    0 1px 2px rgb(0 0 0 / 0.24);
+  transition:
+    background 100ms ease,
+    border-color 100ms ease,
+    box-shadow 100ms ease,
+    transform 80ms ease;
 }
 
 .open-with-button:hover:not(:disabled) {
-  background: var(--btn-hover);
+  border-color: color-mix(in srgb, var(--text) 20%, transparent);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.18), rgb(255 255 255 / 0.06)),
+    color-mix(in srgb, var(--control-glass) 82%, transparent);
+}
+
+.open-with-button:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 2px rgb(0 0 0 / 0.22),
+    0 1px 1px rgb(0 0 0 / 0.18);
 }
 
 .open-with-button:disabled {
@@ -504,19 +532,25 @@ function handleKeydown(event) {
 }
 
 .open-with-button--subtle {
-  min-width: 70px;
+  min-width: 78px;
   color: var(--text-muted);
 }
 
 .open-with-button--primary {
-  border-color: var(--accent-border);
-  background: var(--btn-primary-bg);
+  border-color: rgb(var(--accent-rgb) / 0.58);
+  background:
+    linear-gradient(180deg, rgb(72 176 255), rgb(0 113 242));
   color: rgb(255 255 255 / 0.96);
-  box-shadow: var(--btn-primary-shadow);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.34),
+    inset 0 -1px 0 rgb(0 48 120 / 0.35),
+    0 0 0 1px rgb(var(--accent-rgb) / 0.18),
+    0 4px 14px rgb(var(--accent-rgb) / 0.32);
 }
 
 .open-with-button--primary:hover:not(:disabled) {
-  background: var(--btn-primary-bg-hover);
+  background:
+    linear-gradient(180deg, rgb(91 188 255), rgb(0 123 255));
 }
 
 .open-with-dialog-enter-active,
@@ -542,11 +576,7 @@ function handleKeydown(event) {
 
 @media (max-width: 560px) {
   .open-with-panel {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .open-with-icon {
-    display: none;
+    padding: 14px;
   }
 
   .open-with-actions {
