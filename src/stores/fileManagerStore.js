@@ -1159,6 +1159,36 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     loadPane(paneId, tab.id);
   }
 
+  function duplicatePaneTab(paneId, tabId) {
+    const pane = panes.value[paneId];
+    const sourceTab = tabById(pane, tabId);
+
+    if (!pane || !sourceTab) {
+      return null;
+    }
+
+    const sourceIndex = pane.tabs.findIndex((tab) => tab.id === tabId);
+    const tab = createTab(
+      sourceTab.currentPath,
+      sourceTab.viewMode,
+      sourceTab.sortKey,
+      sourceTab.sortDirection,
+      [...sourceTab.history],
+      sourceTab.historyIndex,
+    );
+    const insertionIndex = sourceIndex >= 0 ? sourceIndex + 1 : pane.tabs.length;
+
+    pane.tabs.splice(insertionIndex, 0, tab);
+    pane.activeTabId = tab.id;
+    clearColumnPreviewEntry(paneId);
+    clearColumnSelectionState(paneId);
+    clearColumnTargetDirectory(paneId);
+    setActivePane(paneId);
+    loadPane(paneId, tab.id);
+
+    return tab.id;
+  }
+
   function closePaneTab(paneId, tabId) {
     const pane = panes.value[paneId];
 
@@ -1184,6 +1214,28 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         loadPane(paneId, nextTab.id);
       }
     }
+  }
+
+  function closeOtherPaneTabs(paneId, tabId) {
+    const pane = panes.value[paneId];
+    const tab = tabById(pane, tabId);
+
+    if (!pane || !tab || pane.tabs.length <= 1) {
+      return false;
+    }
+
+    pane.tabs = [tab];
+    pane.activeTabId = tab.id;
+    clearColumnPreviewEntry(paneId);
+    clearColumnSelectionState(paneId);
+    clearColumnTargetDirectory(paneId);
+    setActivePane(paneId);
+
+    if (!tab.loaded && !tab.loading) {
+      loadPane(paneId, tab.id);
+    }
+
+    return true;
   }
 
   function closeActivePaneTab() {
@@ -1989,7 +2041,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     switchActivePane,
     setActiveTab,
     addPaneTab,
+    duplicatePaneTab,
     closePaneTab,
+    closeOtherPaneTabs,
     closeActivePaneTab,
     activateAdjacentTab,
     movePaneTab,

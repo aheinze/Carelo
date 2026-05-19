@@ -5,6 +5,7 @@ import CreateArchiveDialog from './CreateArchiveDialog.vue';
 import FileContextMenu from './FileContextMenu.vue';
 import FileList from './FileList.vue';
 import OpenWithDialog from './OpenWithDialog.vue';
+import TabContextMenu from './TabContextMenu.vue';
 import {
   archiveItems,
   deleteItems,
@@ -186,6 +187,7 @@ const sortDirectionLabel = computed(() =>
   activeTab.value?.sortDirection === 'asc' ? 'Ascending' : 'Descending',
 );
 const contextMenu = ref(null);
+const tabContextMenu = ref(null);
 const archiveDialog = ref({
   visible: false,
   entries: [],
@@ -300,6 +302,77 @@ function closeTab(tabId) {
   store.closePaneTab(props.paneId, tabId);
 }
 
+function tabForId(tabId) {
+  return pane.value?.tabs.find((tab) => tab.id === tabId) || null;
+}
+
+function showTabContextMenu(tab, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  store.setActivePane(props.paneId);
+  closeContextMenu();
+  tabContextMenu.value = {
+    tabId: tab.id,
+    position: {
+      x: event.clientX,
+      y: event.clientY,
+    },
+  };
+}
+
+function closeTabContextMenu() {
+  tabContextMenu.value = null;
+}
+
+async function handleTabContextAction(action) {
+  const menu = tabContextMenu.value;
+  const tab = tabForId(menu?.tabId);
+
+  closeTabContextMenu();
+
+  if (!tab) {
+    return;
+  }
+
+  try {
+    if (action === 'copyPath') {
+      await copyPathToClipboard(tab.currentPath);
+      return;
+    }
+
+    if (action === 'duplicate') {
+      store.duplicatePaneTab(props.paneId, tab.id);
+      return;
+    }
+
+    if (action === 'openInOtherPane') {
+      store.addPaneTab(otherPaneId.value, tab.currentPath);
+      return;
+    }
+
+    if (action === 'moveToOtherPane') {
+      store.movePaneTab(props.paneId, tab.id, otherPaneId.value);
+      return;
+    }
+
+    if (action === 'close') {
+      store.closePaneTab(props.paneId, tab.id);
+      return;
+    }
+
+    if (action === 'closeOthers') {
+      store.closeOtherPaneTabs(props.paneId, tab.id);
+    }
+  } catch (error) {
+    console.error(error);
+    await dialog.alert({
+      title: 'Tab Action Failed',
+      message: error?.message || 'The tab action could not be completed.',
+      variant: 'warning',
+    });
+  }
+}
+
 function dataTransferTypes(event) {
   return Array.from(event?.dataTransfer?.types || []);
 }
@@ -382,6 +455,7 @@ function isDragPointInsideElement(event, element) {
 function handleTabDragStart(tab, event) {
   const payload = tabDragPayload(tab);
 
+  closeTabContextMenu();
   store.clearFileDrag();
   draggedTabId.value = tab.id;
 
@@ -521,6 +595,8 @@ function handleBackgroundClick(payload) {
 
 function showContextMenu(payload) {
   store.setActivePane(props.paneId);
+  closeTabContextMenu();
+
   if (Number.isInteger(payload.index)) {
     if (!store.isEntrySelected(props.paneId, payload.index)) {
       store.selectEntry(props.paneId, payload.index);
@@ -1575,6 +1651,7 @@ async function handleContextAction(action) {
         @dragend.stop="handleTabDragEnd"
         @dragover="handleTabDragOver(tab, $event)"
         @drop="handleTabDrop(tab, $event)"
+        @contextmenu="showTabContextMenu(tab, $event)"
       >
         <button
           type="button"
@@ -1728,6 +1805,17 @@ async function handleContextAction(action) {
       :can-move="canMoveContext"
       @action="handleContextAction"
       @close="closeContextMenu"
+    />
+
+    <TabContextMenu
+      v-if="tabContextMenu && tabForId(tabContextMenu.tabId)"
+      :tab="tabForId(tabContextMenu.tabId)"
+      :title="store.tabTitle(tabForId(tabContextMenu.tabId))"
+      :position="tabContextMenu.position"
+      :can-close="pane.tabs.length > 1"
+      :can-close-others="pane.tabs.length > 1"
+      @action="handleTabContextAction"
+      @close="closeTabContextMenu"
     />
 
     <CreateArchiveDialog
