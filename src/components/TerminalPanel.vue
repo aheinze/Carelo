@@ -22,6 +22,7 @@ const props = defineProps({
 });
 
 const store = useFileManagerStore();
+const TERMINAL_SCROLLBACK = 5000;
 const sessions = ref([]);
 const activeSessionId = ref(null);
 const terminalHost = ref(null);
@@ -106,7 +107,7 @@ function createTerminal() {
     lineHeight: 1.22,
     macOptionIsMeta: true,
     rightClickSelectsWord: true,
-    scrollback: 12000,
+    scrollback: TERMINAL_SCROLLBACK,
     tabStopWidth: 2,
     theme: readTerminalTheme(),
   });

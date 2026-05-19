@@ -27,6 +27,7 @@ import {
 import { normalizeDateFormat } from '../utils/dateFormat';
 
 let nextTabId = 1;
+let nextTabActivityId = 1;
 let nextQueueJobId = 1;
 let nextOperationLogId = 1;
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
@@ -34,6 +35,8 @@ const SORT_DIRECTIONS = ['asc', 'desc'];
 const VIEW_MODES = ['list', 'grid', 'columns'];
 const APPEARANCE_MODES = ['system', 'light', 'dark'];
 const NAV_HISTORY_LIMIT = 80;
+const INACTIVE_TAB_ENTRY_CACHE_LIMIT = 2;
+const LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT = 1500;
 const OPERATION_LOG_LIMIT = 120;
 const DEFAULT_APP_SETTINGS = Object.freeze({
   appearanceMode: 'system',
@@ -101,6 +104,41 @@ function defaultDirectionForSort(sortKey) {
   return ['name', 'extension', 'none'].includes(sortKey) ? 'asc' : 'desc';
 }
 
+function touchTabActivity(tab) {
+  if (tab) {
+    tab.lastActiveAt = nextTabActivityId++;
+  }
+}
+
+function clearTabEntryCache(tab) {
+  if (!tab || tab.loading || tab.entries.length === 0) {
+    return;
+  }
+
+  tab.entries = [];
+  tab.loaded = false;
+  tab.selectedIndex = 0;
+  tab.selectionAnchorIndex = 0;
+  tab.selectedPaths = [];
+  tab.error = '';
+}
+
+function trimPaneTabEntryCaches(pane) {
+  if (!pane) {
+    return;
+  }
+
+  const inactiveTabs = pane.tabs
+    .filter((tab) => tab.id !== pane.activeTabId && tab.entries.length > 0 && !tab.loading)
+    .sort((a, b) => (b.lastActiveAt || 0) - (a.lastActiveAt || 0));
+
+  inactiveTabs.forEach((tab, index) => {
+    if (index >= INACTIVE_TAB_ENTRY_CACHE_LIMIT || tab.entries.length > LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT) {
+      clearTabEntryCache(tab);
+    }
+  });
+}
+
 function createTab(
   currentPath,
   viewMode = 'list',
@@ -125,6 +163,7 @@ function createTab(
     sortDirection: normalizeSortDirection(sortDirection),
     history: normalizedHistory,
     historyIndex: normalizedHistoryIndex,
+    lastActiveAt: nextTabActivityId++,
     loadVersion: 0,
     entries: [],
     selectedIndex: 0,
@@ -154,10 +193,12 @@ function createPane(id, initialTabs, fallbackPath, fallbackViewMode) {
     Math.max(Number(initialTabs.activeIndex || 0), 0),
     Math.max(tabs.length - 1, 0),
   );
+  const activeTab = tabs[activeIndex] || tabs[0];
+  touchTabActivity(activeTab);
 
   return {
     id,
-    activeTabId: tabs[activeIndex]?.id || tabs[0].id,
+    activeTabId: activeTab.id,
     tabs,
   };
 }
@@ -759,6 +800,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     } finally {
       if (tab.loadVersion === loadVersion) {
         tab.loading = false;
+        trimPaneTabEntryCaches(pane);
       }
     }
   }
@@ -1139,9 +1181,13 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     const tab = activeTabFromPane(pane);
 
+    touchTabActivity(tab);
+
     if (tab && !tab.loaded && !tab.loading) {
       loadPane(paneId, tab.id);
     }
+
+    trimPaneTabEntryCaches(pane);
   }
 
   function addPaneTab(paneId, path = null) {
@@ -1155,8 +1201,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     const tab = createTab(path || sourceTab.currentPath, appSettings.value.defaultViewMode);
     pane.tabs.push(tab);
     pane.activeTabId = tab.id;
+    touchTabActivity(tab);
     setActivePane(paneId);
     loadPane(paneId, tab.id);
+    trimPaneTabEntryCaches(pane);
   }
 
   function duplicatePaneTab(paneId, tabId) {
@@ -1183,8 +1231,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     clearColumnPreviewEntry(paneId);
     clearColumnSelectionState(paneId);
     clearColumnTargetDirectory(paneId);
+    touchTabActivity(tab);
     setActivePane(paneId);
     loadPane(paneId, tab.id);
+    trimPaneTabEntryCaches(pane);
 
     return tab.id;
   }
@@ -1208,12 +1258,15 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     if (wasActive) {
       const nextTab = pane.tabs[Math.max(0, index - 1)] || pane.tabs[0];
       pane.activeTabId = nextTab.id;
+      touchTabActivity(nextTab);
       setActivePane(paneId);
 
       if (!nextTab.loaded && !nextTab.loading) {
         loadPane(paneId, nextTab.id);
       }
     }
+
+    trimPaneTabEntryCaches(pane);
   }
 
   function closeOtherPaneTabs(paneId, tabId) {
@@ -1226,6 +1279,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     pane.tabs = [tab];
     pane.activeTabId = tab.id;
+    touchTabActivity(tab);
     clearColumnPreviewEntry(paneId);
     clearColumnSelectionState(paneId);
     clearColumnTargetDirectory(paneId);
@@ -1294,6 +1348,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       clearColumnPreviewEntry(sourcePaneId);
       clearColumnSelectionState(sourcePaneId);
       setActivePane(sourcePaneId);
+      trimPaneTabEntryCaches(sourcePane);
       return true;
     }
 
@@ -1309,10 +1364,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
       sourcePane.tabs.push(replacementTab);
       sourcePane.activeTabId = replacementTab.id;
+      touchTabActivity(replacementTab);
       loadPane(sourcePaneId, replacementTab.id);
     } else if (sourcePane.activeTabId === tab.id) {
       const nextTab = sourcePane.tabs[Math.min(sourceIndex, sourcePane.tabs.length - 1)];
       sourcePane.activeTabId = nextTab.id;
+      touchTabActivity(nextTab);
 
       if (!nextTab.loaded && !nextTab.loading) {
         loadPane(sourcePaneId, nextTab.id);
@@ -1332,12 +1389,15 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     clearColumnSelectionState(targetPaneId);
     clearColumnTargetDirectory(sourcePaneId);
     clearColumnTargetDirectory(targetPaneId);
+    touchTabActivity(tab);
     setActivePane(targetPaneId);
 
     if (!tab.loaded && !tab.loading) {
       loadPane(targetPaneId, tab.id);
     }
 
+    trimPaneTabEntryCaches(sourcePane);
+    trimPaneTabEntryCaches(targetPane);
     return true;
   }
 

@@ -1,10 +1,8 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
-import CreateArchiveDialog from './CreateArchiveDialog.vue';
 import FileContextMenu from './FileContextMenu.vue';
 import FileList from './FileList.vue';
-import OpenWithDialog from './OpenWithDialog.vue';
 import TabContextMenu from './TabContextMenu.vue';
 import {
   archiveItems,
@@ -30,6 +28,9 @@ import {
   isArchiveEntry,
   isArchivePath,
 } from '../utils/archivePaths';
+
+const CreateArchiveDialog = defineAsyncComponent(() => import('./CreateArchiveDialog.vue'));
+const OpenWithDialog = defineAsyncComponent(() => import('./OpenWithDialog.vue'));
 
 const FILE_DRAG_MIME = 'application/x-carelo-files';
 const TAB_DRAG_MIME = 'application/x-carelo-tab';
@@ -1819,6 +1820,7 @@ async function handleContextAction(action) {
     />
 
     <CreateArchiveDialog
+      v-if="archiveDialog.visible"
       :visible="archiveDialog.visible"
       :entries="archiveDialog.entries"
       :directory="archiveDialog.directory"
@@ -1828,6 +1830,7 @@ async function handleContextAction(action) {
     />
 
     <OpenWithDialog
+      v-if="openWithDialog.visible"
       :visible="openWithDialog.visible"
       :entry="openWithDialog.entry"
       :context="openWithDialog.context"

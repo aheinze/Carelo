@@ -12,20 +12,16 @@ import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
 import { formatFileDateTime } from '../utils/dateFormat';
 import {
-  audioMimeType,
   audioTypeLabel,
   extensionForName,
   imageTypeLabel,
   isAudioEntry,
   isImageEntry,
   isVideoEntry,
-  videoMimeType,
   videoTypeLabel,
 } from '../utils/fileTypes';
 
 const store = useFileManagerStore();
-const VIDEO_BLOB_PREVIEW_LIMIT = 256 * 1024 * 1024;
-const AUDIO_BLOB_PREVIEW_LIMIT = 128 * 1024 * 1024;
 const fallbackPaneId = computed(() => (store.activePaneId === 'left' ? 'right' : 'left'));
 const previewSelectionEntries = computed(() => {
   const activeSelection = store.selectedEntriesFor(store.activePaneId);
@@ -180,8 +176,6 @@ const metadataLoading = ref(false);
 const metadataError = ref('');
 const activeInspectorSection = ref('info');
 let metadataLoadVersion = 0;
-let audioLoadVersion = 0;
-let videoLoadVersion = 0;
 
 const inspectorSections = [
   { id: 'info', label: 'Info', icon: 'info', size: 17, strokeWidth: 2 },
@@ -275,13 +269,11 @@ watch(
 
 watch(
   () => [inspectedEntry.value?.path, inspectedEntry.value?.size, inspectedEntry.value?.name],
-  async () => {
+  () => {
     revokeAudioPreviewUrl();
     audioFailed.value = false;
     audioReady.value = false;
     audioLoading.value = false;
-    audioLoadVersion += 1;
-    const loadVersion = audioLoadVersion;
     const entry = inspectedEntry.value;
 
     if (!entry || !isAudioEntry(entry)) {
@@ -297,52 +289,18 @@ watch(
     }
 
     audioLoading.value = true;
-
-    if ((entry.size || 0) > AUDIO_BLOB_PREVIEW_LIMIT) {
-      audioPreviewUrl.value = assetUrl;
-      return;
-    }
-
-    try {
-      const response = await fetch(assetUrl);
-
-      if (!response.ok) {
-        throw new Error(`Audio preview request failed with ${response.status}.`);
-      }
-
-      const blob = await response.blob();
-      const mimeType = audioMimeType(entry.name);
-      const typedBlob = blob.type || !mimeType ? blob : new Blob([blob], { type: mimeType });
-
-      if (audioLoadVersion !== loadVersion) {
-        return;
-      }
-
-      audioPreviewUrl.value = URL.createObjectURL(typedBlob);
-    } catch {
-      if (audioLoadVersion === loadVersion) {
-        audioPreviewUrl.value = assetUrl;
-      }
-    } finally {
-      if (audioLoadVersion === loadVersion) {
-        if (!audioPreviewUrl.value) {
-          audioLoading.value = false;
-        }
-      }
-    }
+    audioPreviewUrl.value = assetUrl;
   },
   { immediate: true },
 );
 
 watch(
   () => [inspectedEntry.value?.path, inspectedEntry.value?.size, inspectedEntry.value?.name],
-  async () => {
+  () => {
     revokeVideoPreviewUrl();
     videoFailed.value = false;
     videoReady.value = false;
     videoLoading.value = false;
-    videoLoadVersion += 1;
-    const loadVersion = videoLoadVersion;
     const entry = inspectedEntry.value;
 
     if (!entry || !isVideoEntry(entry)) {
@@ -358,38 +316,7 @@ watch(
     }
 
     videoLoading.value = true;
-
-    if ((entry.size || 0) > VIDEO_BLOB_PREVIEW_LIMIT) {
-      videoPreviewUrl.value = assetUrl;
-      return;
-    }
-
-    try {
-      const response = await fetch(assetUrl);
-
-      if (!response.ok) {
-        throw new Error(`Video preview request failed with ${response.status}.`);
-      }
-
-      const blob = await response.blob();
-      const typedBlob = blob.type ? blob : new Blob([blob], { type: videoMimeType(entry.name) });
-
-      if (videoLoadVersion !== loadVersion) {
-        return;
-      }
-
-      videoPreviewUrl.value = URL.createObjectURL(typedBlob);
-    } catch {
-      if (videoLoadVersion === loadVersion) {
-        videoPreviewUrl.value = assetUrl;
-      }
-    } finally {
-      if (videoLoadVersion === loadVersion) {
-        if (!videoPreviewUrl.value) {
-          videoLoading.value = false;
-        }
-      }
-    }
+    videoPreviewUrl.value = assetUrl;
   },
   { immediate: true },
 );
@@ -550,18 +477,10 @@ function shouldShowImage(entry) {
 }
 
 function revokeVideoPreviewUrl() {
-  if (videoPreviewUrl.value?.startsWith('blob:')) {
-    URL.revokeObjectURL(videoPreviewUrl.value);
-  }
-
   videoPreviewUrl.value = '';
 }
 
 function revokeAudioPreviewUrl() {
-  if (audioPreviewUrl.value?.startsWith('blob:')) {
-    URL.revokeObjectURL(audioPreviewUrl.value);
-  }
-
   audioPreviewUrl.value = '';
 }
 

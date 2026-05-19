@@ -1,24 +1,30 @@
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue';
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue';
 import WindowResizeHandles from './components/WindowResizeHandles.vue';
 import Toolbar from './components/Toolbar.vue';
 import Sidebar from './components/Sidebar.vue';
 import Pane from './components/Pane.vue';
 import PreviewPanel from './components/PreviewPanel.vue';
-import TerminalPanel from './components/TerminalPanel.vue';
 import TransferQueue from './components/TransferQueue.vue';
-import CommandPalette from './components/CommandPalette.vue';
-import SettingsWindow from './components/SettingsWindow.vue';
-import DialogHost from './components/DialogHost.vue';
-import ShortcutsModal from './components/ShortcutsModal.vue';
 import TooltipHost from './components/TooltipHost.vue';
+import { useDialog } from './composables/useDialog';
 import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts';
+import { useShortcutsModal } from './composables/useShortcutsModal';
 import { useFileManagerStore } from './stores/fileManagerStore';
 
+const CommandPalette = defineAsyncComponent(() => import('./components/CommandPalette.vue'));
+const DialogHost = defineAsyncComponent(() => import('./components/DialogHost.vue'));
+const SettingsWindow = defineAsyncComponent(() => import('./components/SettingsWindow.vue'));
+const ShortcutsModal = defineAsyncComponent(() => import('./components/ShortcutsModal.vue'));
+const TerminalPanel = defineAsyncComponent(() => import('./components/TerminalPanel.vue'));
+
 const store = useFileManagerStore();
+const dialog = useDialog();
+const shortcutsModal = useShortcutsModal();
 const appWindow = ref(null);
 const workspace = ref(null);
 const paneGrid = ref(null);
+const terminalPanelMounted = ref(store.terminalPanelVisible);
 let stopResize = null;
 
 useKeyboardShortcuts();
@@ -29,6 +35,18 @@ const layoutStyle = computed(() => ({
   '--left-pane-width': `${store.paneSplitPercent}%`,
   '--terminal-panel-height': `${store.terminalPanelHeight}px`,
 }));
+const dialogVisible = computed(() => Boolean(dialog.activeDialog.value));
+const shortcutsVisible = computed(() => shortcutsModal.visible.value);
+
+watch(
+  () => store.terminalPanelVisible,
+  (visible) => {
+    if (visible) {
+      terminalPanelMounted.value = true;
+    }
+  },
+  { immediate: true },
+);
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -150,15 +168,18 @@ onBeforeUnmount(() => {
         <PreviewPanel />
       </main>
 
-      <TerminalPanel :visible="store.terminalPanelVisible" />
+      <TerminalPanel
+        v-if="terminalPanelMounted"
+        :visible="store.terminalPanelVisible"
+      />
 
       <TransferQueue v-if="store.queue.length > 0" />
     </div>
 
     <CommandPalette />
-    <SettingsWindow />
-    <DialogHost />
-    <ShortcutsModal />
+    <SettingsWindow v-if="store.settingsVisible" />
+    <DialogHost v-if="dialogVisible" />
+    <ShortcutsModal v-if="shortcutsVisible" />
     <TooltipHost />
     <WindowResizeHandles />
   </div>

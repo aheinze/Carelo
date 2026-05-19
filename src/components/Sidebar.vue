@@ -1,7 +1,6 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue';
 import AppIcon from './AppIcon.vue';
-import RemoteVolumeModal from './RemoteVolumeModal.vue';
 import { getFileMetadata, removeRemoteVolume } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
@@ -14,6 +13,7 @@ import {
 
 const FILE_DRAG_MIME = 'application/x-carelo-files';
 const FAVORITE_DRAG_MIME = 'application/x-carelo-favorite';
+const RemoteVolumeModal = defineAsyncComponent(() => import('./RemoteVolumeModal.vue'));
 
 const store = useFileManagerStore();
 const dialog = useDialog();
@@ -614,7 +614,11 @@ onUnmounted(() => {
         <AppIcon name="plus" :size="16" :stroke-width="2.1" />
       </button>
     </footer>
-    <RemoteVolumeModal :visible="remoteModalVisible" @close="closeRemoteModal" />
+    <RemoteVolumeModal
+      v-if="remoteModalVisible"
+      :visible="remoteModalVisible"
+      @close="closeRemoteModal"
+    />
   </aside>
 </template>
 
