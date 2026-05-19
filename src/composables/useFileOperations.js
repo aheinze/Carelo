@@ -166,6 +166,10 @@ export async function getFileMetadata(path) {
   return invokeCommand('get_file_metadata', { path }, { sudo: true });
 }
 
+export async function readTextPreview(path, maxBytes = 96 * 1024) {
+  return invokeCommand('read_text_preview', { path, maxBytes });
+}
+
 export async function getHomeDirectory() {
   return invokeCommand('get_home_directory');
 }
@@ -339,6 +343,7 @@ export function useFileOperations() {
     removeFavorite,
     removeRemoteVolume,
     renameItem,
+    readTextPreview,
     resumeFileOperation,
     revealInFileManager,
     unarchiveItems,

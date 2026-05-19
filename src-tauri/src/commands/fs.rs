@@ -99,6 +99,14 @@ pub struct ContentSearchResult {
     pub match_end: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextPreview {
+    pub text: String,
+    pub truncated: bool,
+    pub bytes_read: usize,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -302,6 +310,14 @@ pub async fn search_content(
 #[tauri::command]
 pub async fn get_home_directory() -> Result<String, FsError> {
     LocalFileProvider::home_dir().map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn read_text_preview(
+    path: String,
+    max_bytes: Option<usize>,
+) -> Result<TextPreview, FsError> {
+    run_local(move |_| read_local_text_preview(&path, max_bytes.unwrap_or(96 * 1024))).await
 }
 
 #[tauri::command]
@@ -1799,6 +1815,40 @@ fn search_local_files(
 
 fn is_probably_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|byte| *byte == 0)
+}
+
+fn read_local_text_preview(path: &str, max_bytes: usize) -> FsResult<TextPreview> {
+    let path = expand_local_search_root(path)?;
+    let metadata = fs::metadata(&path)
+        .map_err(|error| FsError::io("Unable to read text preview metadata", &path, error))?;
+
+    if !metadata.is_file() {
+        return Err(FsError::new(
+            "preview_not_file",
+            "Text preview is available for files only.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    let byte_limit = max_bytes.clamp(4 * 1024, 512 * 1024);
+    let bytes = fs::read(&path)
+        .map_err(|error| FsError::io("Unable to read text preview", &path, error))?;
+    let truncated = bytes.len() > byte_limit;
+    let bytes = &bytes[..bytes.len().min(byte_limit)];
+
+    if is_probably_binary(bytes) {
+        return Err(FsError::new(
+            "preview_binary_file",
+            "This file appears to be binary.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    Ok(TextPreview {
+        text: String::from_utf8_lossy(bytes).into_owned(),
+        truncated,
+        bytes_read: bytes.len(),
+    })
 }
 
 fn line_text_with_limit(line: &str) -> String {

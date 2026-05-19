@@ -184,22 +184,25 @@ function conflictFacts({
   targetPath,
   keepBothName,
   incomingLabel = 'Incoming',
+  mode = 'copy',
   dateFormat = 'system',
 }) {
+  const actionLabel = mode === 'move' ? 'Move' : 'Copy';
+
   return [
     { label: 'Destination', value: targetPath, mono: true },
-    { label: incomingLabel, value: itemName(entry) },
-    { label: `${incomingLabel} Info`, value: entrySummary(entry, dateFormat) },
-    { label: `${incomingLabel} Path`, value: itemPath(entry), mono: true },
-    { label: 'Existing', value: itemName(existingEntry) },
+    { label: `${actionLabel} Item`, value: itemName(entry) },
+    { label: `${actionLabel} Info`, value: entrySummary(entry, dateFormat) },
+    { label: 'Existing Item', value: itemName(existingEntry) },
     { label: 'Existing Info', value: entrySummary(existingEntry, dateFormat) },
-    { label: 'Existing Path', value: itemPath(existingEntry), mono: true },
-    { label: 'Keep Both As', value: keepBothLabel(entry, keepBothName), mono: true },
+    { label: 'Keep Both Name', value: keepBothLabel(entry, keepBothName), mono: true },
+    { label: `${actionLabel} From`, value: itemPath(entry), mono: true },
   ];
 }
 
-function conflictApplyLabel(conflictKind) {
-  return `Use the selected action for all ${conflictKind} conflicts in this operation`;
+function conflictApplyLabel(conflictKind, mode) {
+  const itemLabel = conflictKind === 'folder' ? 'folder' : 'file';
+  return `Use this choice for all ${itemLabel} conflicts while ${mode === 'move' ? 'moving' : 'copying'}`;
 }
 
 function splitCopyName(name, entry) {
@@ -288,16 +291,17 @@ export function useFileTransferGuards() {
     targetPath,
     keepBothName,
     conflictKind,
+    mode,
     allowApplyToAll,
   }) {
     const folderConflict = conflictKind === 'folder';
     const dateFormat = store.appSettings.dateFormat;
     const result = await dialog.choice({
-      title: folderConflict ? 'Folder Name Conflict' : 'File Already Exists',
-      message: `"${targetName}" already exists in the destination.`,
+      title: folderConflict ? 'Folder Already Exists' : 'File Already Exists',
+      message: `A ${folderConflict ? 'folder' : 'file'} named "${targetName}" already exists here.`,
       detail: folderConflict
-        ? 'Carelo will not replace folders. Keep Both creates a unique folder name; Skip leaves the existing folder untouched.'
-        : 'Keep Both is the safe default. Replace permanently overwrites the existing destination file.',
+        ? 'Keep Both creates a new folder name. Skip leaves the existing folder untouched.'
+        : 'Keep Both creates a new name. Replace overwrites the existing file.',
       size: 'wide',
       variant: 'warning',
       icon: folderConflict ? 'folder' : 'file',
@@ -306,9 +310,10 @@ export function useFileTransferGuards() {
         existingEntry,
         targetPath,
         keepBothName,
+        mode,
         dateFormat,
       }),
-      checkboxLabel: allowApplyToAll ? conflictApplyLabel(conflictKind) : '',
+      checkboxLabel: allowApplyToAll ? conflictApplyLabel(conflictKind, mode) : '',
       actions: folderConflict
         ? [
             { value: 'cancel', label: 'Cancel', cancel: true },
@@ -442,6 +447,7 @@ export function useFileTransferGuards() {
               targetPath,
               keepBothName,
               conflictKind,
+              mode,
               allowApplyToAll: sourceEntries.length > 1,
             });
 

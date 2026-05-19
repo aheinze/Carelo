@@ -10,38 +10,93 @@ const sections = [
     title: 'File Operations',
     shortcuts: [
       { keys: ['F4'],          label: 'Open' },
+      { keys: ['Enter'],       label: 'Open externally' },
       { keys: ['F3'],          label: 'Preview' },
       { keys: ['F5'],          label: 'Copy to other pane' },
       { keys: ['⇧', 'F5'],    label: 'Copy here (rename prompt)' },
       { keys: ['F6'],          label: 'Move to other pane' },
       { keys: ['⇧', 'F6'],    label: 'Rename' },
+      { keys: ['⌘', 'M'],    label: 'Rename' },
       { keys: ['F7'],          label: 'New folder' },
+      { keys: ['⇧', 'F7'],    label: 'New folder in other pane' },
       { keys: ['F8'],          label: 'Delete' },
+      { keys: ['Del'],         label: 'Delete' },
+      { keys: ['⇧', 'F10'],   label: 'Context menu' },
     ],
   },
   {
     title: 'Navigation',
     shortcuts: [
       { keys: ['Tab'],         label: 'Switch active pane' },
+      { keys: ['⌥', 'F1'],    label: 'Focus left pane' },
+      { keys: ['⌥', 'F2'],    label: 'Focus right pane' },
       { keys: ['⌘', 'P'],     label: 'Fuzzy search current folder' },
       { keys: ['⌘', '⇧', 'F'], label: 'Search file contents' },
       { keys: ['⌥', '←'],    label: 'Go back' },
       { keys: ['⌥', '→'],    label: 'Go forward' },
+      { keys: ['⌘', '['],     label: 'Go back' },
+      { keys: ['⌘', ']'],     label: 'Go forward' },
       { keys: ['⌘', '\\'],   label: 'Go to root' },
-      { keys: ['⌘', '↑'],    label: 'Go to parent' },
+      { keys: ['⌘', 'PgUp'], label: 'Go to parent' },
+      { keys: ['⌘', 'PgDn'], label: 'Open selected folder' },
+      { keys: ['⌘', '←'],    label: 'Open focused folder in other pane' },
+      { keys: ['⌘', '→'],    label: 'Open focused folder in other pane' },
+      { keys: ['⌘', '↑'],    label: 'New tab from focused folder' },
       { keys: ['⌫'],          label: 'Go to parent' },
       { keys: ['F2'],          label: 'Refresh' },
+      { keys: ['⌘', 'R'],     label: 'Refresh' },
+      { keys: ['⌘', 'F'],     label: 'Focus pane filter' },
+      { keys: ['⌘', 'S'],     label: 'Focus pane filter' },
+      { keys: ['⌥', 'F7'],    label: 'Focus pane filter' },
     ],
   },
   {
     title: 'Selection',
     shortcuts: [
+      { keys: ['↑'],           label: 'Move selection up' },
+      { keys: ['↓'],           label: 'Move selection down' },
+      { keys: ['Home'],        label: 'First item' },
+      { keys: ['End'],         label: 'Last item' },
+      { keys: ['PgUp'],        label: 'Page up' },
+      { keys: ['PgDn'],        label: 'Page down' },
       { keys: ['Insert'],      label: 'Toggle item selection' },
       { keys: ['Space'],       label: 'Toggle item selection' },
       { keys: ['⌘', 'A'],    label: 'Select all' },
       { keys: ['Num +'],       label: 'Select all' },
+      { keys: ['⌥', 'Num +'], label: 'Select same extension' },
       { keys: ['Num −'],       label: 'Clear selection' },
+      { keys: ['⌥', 'Num −'], label: 'Clear same extension' },
+      { keys: ['Num /'],       label: 'Clear selection' },
       { keys: ['Num ×'],       label: 'Invert selection' },
+    ],
+  },
+  {
+    title: 'Clipboard & Paths',
+    shortcuts: [
+      { keys: ['⌘', 'C'],     label: 'Copy files' },
+      { keys: ['⌘', 'X'],     label: 'Cut files' },
+      { keys: ['⌘', 'V'],     label: 'Paste files' },
+      { keys: ['⌘', 'Insert'], label: 'Copy files' },
+      { keys: ['⇧', 'Insert'], label: 'Paste files' },
+      { keys: ['⌘', 'Enter'], label: 'Copy focused name' },
+      { keys: ['⌘', '⇧', 'Enter'], label: 'Copy focused path' },
+    ],
+  },
+  {
+    title: 'Tabs & Layout',
+    shortcuts: [
+      { keys: ['⌘', 'Tab'],   label: 'Next tab' },
+      { keys: ['⌘', '⇧', 'Tab'], label: 'Previous tab' },
+      { keys: ['⌘', 'T'],     label: 'New tab' },
+      { keys: ['⌘', 'W'],     label: 'Close tab' },
+      { keys: ['⌘', 'U'],     label: 'Swap panes' },
+      { keys: ['⌘', 'B'],     label: 'Toggle sidebar' },
+      { keys: ['⌘', 'I'],     label: 'Toggle preview panel' },
+      { keys: ['⌘', 'Q'],     label: 'Toggle preview panel' },
+      { keys: ['⌘', '`'],     label: 'Toggle terminal' },
+      { keys: ['⌘', ','],     label: 'Settings' },
+      { keys: ['⌥', 'Enter'], label: 'Show preview panel' },
+      { keys: ['⌘', '.'],     label: 'Toggle hidden files' },
     ],
   },
   {
@@ -130,7 +185,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   display: flex;
   flex-direction: column;
   gap: 20px;
-  width: min(720px, calc(100vw - 48px));
+  width: min(980px, calc(100vw - 48px));
   max-height: calc(100vh - 80px);
   overflow: hidden;
   border: 1px solid var(--control-border);
@@ -196,9 +251,21 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
 /* ── Grid ─────────────────────────────────────────────────── */
 .shortcuts-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px 20px;
   overflow-y: auto;
+}
+
+@media (max-width: 860px) {
+  .shortcuts-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .shortcuts-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── Section ──────────────────────────────────────────────── */

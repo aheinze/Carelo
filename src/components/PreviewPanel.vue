@@ -7,6 +7,7 @@ import {
   isRemotePath,
   localFileAssetUrl,
   measureItemsSize,
+  readTextPreview,
 } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
@@ -17,7 +18,10 @@ import {
   imageTypeLabel,
   isAudioEntry,
   isImageEntry,
+  isPdfEntry,
+  isTextEntry,
   isVideoEntry,
+  documentTypeLabel,
   videoTypeLabel,
 } from '../utils/fileTypes';
 
@@ -171,6 +175,10 @@ const videoFailed = ref(false);
 const videoLoading = ref(false);
 const videoReady = ref(false);
 const videoPreviewUrl = ref('');
+const textPreview = ref('');
+const textPreviewLoading = ref(false);
+const textPreviewError = ref('');
+const textPreviewTruncated = ref(false);
 const fileMetadata = ref(null);
 const metadataLoading = ref(false);
 const metadataError = ref('');
@@ -290,6 +298,34 @@ watch(
 
     audioLoading.value = true;
     audioPreviewUrl.value = assetUrl;
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [inspectedEntry.value?.path, inspectedEntry.value?.size, inspectedEntry.value?.name],
+  async () => {
+    textPreview.value = '';
+    textPreviewError.value = '';
+    textPreviewTruncated.value = false;
+    textPreviewLoading.value = false;
+    const entry = inspectedEntry.value;
+
+    if (!entry || !shouldShowTextPreview(entry)) {
+      return;
+    }
+
+    textPreviewLoading.value = true;
+
+    try {
+      const preview = await readTextPreview(entry.path, 96 * 1024);
+      textPreview.value = preview?.text || '';
+      textPreviewTruncated.value = Boolean(preview?.truncated);
+    } catch (error) {
+      textPreviewError.value = error?.message || 'Text preview unavailable.';
+    } finally {
+      textPreviewLoading.value = false;
+    }
   },
   { immediate: true },
 );
@@ -463,7 +499,7 @@ function extensionFor(name) {
 }
 
 function displayTypeFor(name) {
-  return imageTypeLabel(name) || videoTypeLabel(name) || audioTypeLabel(name) || extensionFor(name).toUpperCase();
+  return imageTypeLabel(name) || videoTypeLabel(name) || audioTypeLabel(name) || documentTypeLabel(name) || extensionFor(name).toUpperCase();
 }
 
 function typeLabel(entry) {
@@ -474,6 +510,14 @@ function typeLabel(entry) {
 
 function shouldShowImage(entry) {
   return isImageEntry(entry) && !isArchivePath(entry.path) && !imageFailed.value;
+}
+
+function shouldShowPdfPreview(entry) {
+  return isPdfEntry(entry) && !isArchivePath(entry.path) && !isRemotePath(entry.path);
+}
+
+function shouldShowTextPreview(entry) {
+  return isTextEntry(entry) && !isArchivePath(entry.path) && !isRemotePath(entry.path);
 }
 
 function revokeVideoPreviewUrl() {
@@ -857,6 +901,27 @@ function logDetail(entry) {
               Audio preview unavailable
             </span>
           </span>
+          <iframe
+            v-else-if="shouldShowPdfPreview(inspectedEntry)"
+            class="preview-pdf"
+            :src="localFileAssetUrl(inspectedEntry.path)"
+            :title="`Preview of ${inspectedEntry.name}`"
+          ></iframe>
+          <span
+            v-else-if="shouldShowTextPreview(inspectedEntry)"
+            class="preview-text-shell"
+          >
+            <span v-if="textPreviewLoading" class="preview-media-status">
+              Loading text...
+            </span>
+            <span v-else-if="textPreviewError" class="preview-media-status">
+              {{ textPreviewError }}
+            </span>
+            <pre v-else class="preview-text"><code>{{ textPreview }}</code></pre>
+            <span v-if="textPreviewTruncated" class="preview-text-truncated">
+              Preview truncated
+            </span>
+          </span>
           <span v-else class="preview-file">
             <span class="preview-ext">{{ extensionFor(inspectedEntry.name).toUpperCase() || '?' }}</span>
             <AppIcon name="file" :size="72" :stroke-width="1.3" />
@@ -1227,7 +1292,8 @@ function logDetail(entry) {
 }
 
 .preview-image,
-.preview-video {
+.preview-video,
+.preview-pdf {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -1236,8 +1302,14 @@ function logDetail(entry) {
   background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
+.preview-pdf {
+  height: min(420px, 52vh);
+  border: 0;
+}
+
 .preview-video-shell,
-.preview-audio-shell {
+.preview-audio-shell,
+.preview-text-shell {
   position: relative;
   display: grid;
   width: 100%;
@@ -1245,6 +1317,47 @@ function logDetail(entry) {
   place-items: center;
   border-radius: 7px;
   background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.preview-text-shell {
+  display: block;
+  aspect-ratio: auto;
+  max-height: min(420px, 52vh);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.preview-text {
+  min-height: 220px;
+  max-height: min(420px, 52vh);
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  color: var(--text);
+  font-family:
+    "SF Mono",
+    "Cascadia Code",
+    "Roboto Mono",
+    ui-monospace,
+    monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  tab-size: 2;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.preview-text-truncated {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: var(--popover-bg);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  box-shadow: var(--shadow-overlay);
 }
 
 .preview-audio-shell {

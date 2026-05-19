@@ -49,6 +49,54 @@ const AUDIO_EXTENSIONS = new Set([
   'wma',
 ]);
 
+const PDF_EXTENSIONS = new Set(['pdf']);
+
+const TEXT_EXTENSIONS = new Set([
+  'bash',
+  'c',
+  'cc',
+  'cfg',
+  'conf',
+  'cpp',
+  'cs',
+  'css',
+  'csv',
+  'env',
+  'go',
+  'h',
+  'hpp',
+  'htm',
+  'html',
+  'ini',
+  'java',
+  'js',
+  'json',
+  'jsx',
+  'log',
+  'lua',
+  'md',
+  'php',
+  'pl',
+  'properties',
+  'py',
+  'rb',
+  'rs',
+  'scss',
+  'sh',
+  'sql',
+  'svelte',
+  'swift',
+  'toml',
+  'ts',
+  'tsx',
+  'txt',
+  'vue',
+  'xml',
+  'yaml',
+  'yml',
+  'zsh',
+]);
+
 export function extensionForName(name) {
   const parts = String(name || '').split('.');
   return parts.length > 1 ? parts.at(-1).toLowerCase() : '';
@@ -64,6 +112,14 @@ export function isVideoEntry(entry) {
 
 export function isAudioEntry(entry) {
   return entry?.kind === 'file' && AUDIO_EXTENSIONS.has(extensionForName(entry.name));
+}
+
+export function isPdfEntry(entry) {
+  return entry?.kind === 'file' && PDF_EXTENSIONS.has(extensionForName(entry.name));
+}
+
+export function isTextEntry(entry) {
+  return entry?.kind === 'file' && TEXT_EXTENSIONS.has(extensionForName(entry.name));
 }
 
 export function imageTypeLabel(name) {
@@ -130,6 +186,17 @@ export function audioTypeLabel(name) {
   if (extension === 'aif' || extension === 'aiff') return 'AIFF audio';
 
   return extension ? `${extension.toUpperCase()} audio` : '';
+}
+
+export function documentTypeLabel(name) {
+  const extension = extensionForName(name);
+
+  if (extension === 'pdf') return 'PDF document';
+  if (extension === 'md') return 'Markdown document';
+  if (extension === 'txt') return 'Plain text';
+  if (TEXT_EXTENSIONS.has(extension)) return `${extension.toUpperCase()} text`;
+
+  return '';
 }
 
 export function videoMimeType(name) {

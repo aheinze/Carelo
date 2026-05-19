@@ -682,6 +682,12 @@ export function useKeyboardShortcuts() {
       return;
     }
 
+    if (key === 'F1' && !command && !event.altKey && !event.shiftKey) {
+      event.preventDefault();
+      shortcutsModal.show();
+      return;
+    }
+
     if (isEditableTarget(event.target)) {
       return;
     }
@@ -799,7 +805,7 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      if (key === 'F1') {
+      if (key === 'F1' && !command && !event.altKey && !event.shiftKey) {
         event.preventDefault();
         shortcutsModal.show();
         return;

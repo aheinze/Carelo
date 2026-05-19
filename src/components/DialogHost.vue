@@ -359,17 +359,19 @@ function handleKeydown(event) {
   overflow: hidden;
   margin: 0;
   border: 1px solid var(--input-border);
-  border-radius: 8px;
-  background: var(--input-bg);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--text) 5%, transparent), transparent),
+    var(--input-bg);
 }
 
 .dialog-facts div {
   display: grid;
-  grid-template-columns: minmax(108px, 0.44fr) minmax(0, 1fr);
+  grid-template-columns: minmax(112px, 0.36fr) minmax(0, 1fr);
   gap: 10px;
   align-items: center;
   min-width: 0;
-  padding: 7px 9px;
+  padding: 8px 10px;
 }
 
 .dialog-facts div + div {
@@ -393,7 +395,7 @@ function handleKeydown(event) {
 }
 
 .dialog-facts dd {
-  color: var(--text-muted);
+  color: var(--text);
   font-weight: 600;
   text-align: right;
 }
