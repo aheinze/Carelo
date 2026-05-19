@@ -7,6 +7,7 @@ import {
   isRemotePath,
   localFileAssetUrl,
   measureItemsSize,
+  readMediaPreview,
   readTextPreview,
 } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
@@ -14,6 +15,7 @@ import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
 import { formatFileDateTime } from '../utils/dateFormat';
 import {
   audioTypeLabel,
+  audioMimeType,
   extensionForName,
   imageTypeLabel,
   isAudioEntry,
@@ -22,6 +24,7 @@ import {
   isTextEntry,
   isVideoEntry,
   documentTypeLabel,
+  videoMimeType,
   videoTypeLabel,
 } from '../utils/fileTypes';
 import { fileTypeIconKind, fileTypeIconName } from '../utils/fileTypeIcons';
@@ -172,10 +175,12 @@ const audioFailed = ref(false);
 const audioLoading = ref(false);
 const audioReady = ref(false);
 const audioPreviewUrl = ref('');
+const audioPreviewMimeType = ref('');
 const videoFailed = ref(false);
 const videoLoading = ref(false);
 const videoReady = ref(false);
 const videoPreviewUrl = ref('');
+const videoPreviewMimeType = ref('');
 const textPreview = ref('');
 const textPreviewLoading = ref(false);
 const textPreviewError = ref('');
@@ -184,7 +189,13 @@ const fileMetadata = ref(null);
 const metadataLoading = ref(false);
 const metadataError = ref('');
 const activeInspectorSection = ref('info');
+const mediaPreviewFallbackMaxBytes = 128 * 1024 * 1024;
+const mediaPreviewFallbackDelayMs = 1800;
 let metadataLoadVersion = 0;
+let audioPreviewLoadVersion = 0;
+let videoPreviewLoadVersion = 0;
+let audioPreviewFallbackTimer = null;
+let videoPreviewFallbackTimer = null;
 
 const inspectorSections = [
   { id: 'info', label: 'Info', icon: 'info', size: 17, strokeWidth: 2 },
@@ -279,6 +290,8 @@ watch(
 watch(
   () => [inspectedEntry.value?.path, inspectedEntry.value?.size, inspectedEntry.value?.name],
   () => {
+    audioPreviewLoadVersion += 1;
+    const loadVersion = audioPreviewLoadVersion;
     revokeAudioPreviewUrl();
     audioFailed.value = false;
     audioReady.value = false;
@@ -286,6 +299,12 @@ watch(
     const entry = inspectedEntry.value;
 
     if (!entry || !isAudioEntry(entry)) {
+      return;
+    }
+
+    if (!canPreviewLocalMedia(entry)) {
+      audioFailed.value = true;
+      audioLoading.value = false;
       return;
     }
 
@@ -298,7 +317,9 @@ watch(
     }
 
     audioLoading.value = true;
+    audioPreviewMimeType.value = audioMimeType(entry.name) || 'application/octet-stream';
     audioPreviewUrl.value = assetUrl;
+    scheduleAudioBlobFallback(loadVersion);
   },
   { immediate: true },
 );
@@ -334,6 +355,8 @@ watch(
 watch(
   () => [inspectedEntry.value?.path, inspectedEntry.value?.size, inspectedEntry.value?.name],
   () => {
+    videoPreviewLoadVersion += 1;
+    const loadVersion = videoPreviewLoadVersion;
     revokeVideoPreviewUrl();
     videoFailed.value = false;
     videoReady.value = false;
@@ -341,6 +364,12 @@ watch(
     const entry = inspectedEntry.value;
 
     if (!entry || !isVideoEntry(entry)) {
+      return;
+    }
+
+    if (!canPreviewLocalMedia(entry)) {
+      videoFailed.value = true;
+      videoLoading.value = false;
       return;
     }
 
@@ -353,7 +382,9 @@ watch(
     }
 
     videoLoading.value = true;
+    videoPreviewMimeType.value = videoMimeType(entry.name) || 'application/octet-stream';
     videoPreviewUrl.value = assetUrl;
+    scheduleVideoBlobFallback(loadVersion);
   },
   { immediate: true },
 );
@@ -525,25 +556,204 @@ function shouldShowTextPreview(entry) {
   return isTextEntry(entry) && !isArchivePath(entry.path) && !isRemotePath(entry.path);
 }
 
+function canPreviewLocalMedia(entry) {
+  return entry?.path && !isArchivePath(entry.path) && !isRemotePath(entry.path);
+}
+
+function canUseMediaBlobFallback(entry) {
+  return (
+    canPreviewLocalMedia(entry) &&
+    (!hasKnownSize(entry) || Number(entry.size) <= mediaPreviewFallbackMaxBytes)
+  );
+}
+
+async function createMediaPreviewObjectUrl(entry, mimeType) {
+  if (!canUseMediaBlobFallback(entry)) {
+    throw new Error('Media preview size limit exceeded.');
+  }
+
+  const payload = await readMediaPreview(entry.path, mediaPreviewFallbackMaxBytes);
+  const bytes = mediaPreviewPayloadToBytes(payload);
+  const blob = new Blob([bytes], { type: mimeType || 'application/octet-stream' });
+
+  return URL.createObjectURL(blob);
+}
+
+function mediaPreviewPayloadToBytes(payload) {
+  if (payload instanceof ArrayBuffer || ArrayBuffer.isView(payload)) {
+    return payload;
+  }
+
+  if (Array.isArray(payload)) {
+    return new Uint8Array(payload);
+  }
+
+  throw new Error('Unexpected media preview payload.');
+}
+
+function revokeObjectUrl(url) {
+  if (typeof url === 'string' && url.startsWith('blob:')) {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function clearAudioPreviewFallbackTimer() {
+  if (audioPreviewFallbackTimer) {
+    clearTimeout(audioPreviewFallbackTimer);
+    audioPreviewFallbackTimer = null;
+  }
+}
+
+function clearVideoPreviewFallbackTimer() {
+  if (videoPreviewFallbackTimer) {
+    clearTimeout(videoPreviewFallbackTimer);
+    videoPreviewFallbackTimer = null;
+  }
+}
+
+function scheduleAudioBlobFallback(loadVersion) {
+  clearAudioPreviewFallbackTimer();
+  audioPreviewFallbackTimer = window.setTimeout(() => {
+    audioPreviewFallbackTimer = null;
+
+    if (
+      audioPreviewLoadVersion === loadVersion &&
+      audioLoading.value &&
+      !audioReady.value &&
+      !audioFailed.value &&
+      audioPreviewUrl.value &&
+      !audioPreviewUrl.value.startsWith('blob:')
+    ) {
+      loadAudioBlobFallback();
+    }
+  }, mediaPreviewFallbackDelayMs);
+}
+
+function scheduleVideoBlobFallback(loadVersion) {
+  clearVideoPreviewFallbackTimer();
+  videoPreviewFallbackTimer = window.setTimeout(() => {
+    videoPreviewFallbackTimer = null;
+
+    if (
+      videoPreviewLoadVersion === loadVersion &&
+      videoLoading.value &&
+      !videoReady.value &&
+      !videoFailed.value &&
+      videoPreviewUrl.value &&
+      !videoPreviewUrl.value.startsWith('blob:')
+    ) {
+      loadVideoBlobFallback();
+    }
+  }, mediaPreviewFallbackDelayMs);
+}
+
 function revokeVideoPreviewUrl() {
+  clearVideoPreviewFallbackTimer();
+  revokeObjectUrl(videoPreviewUrl.value);
   videoPreviewUrl.value = '';
+  videoPreviewMimeType.value = '';
 }
 
 function revokeAudioPreviewUrl() {
+  clearAudioPreviewFallbackTimer();
+  revokeObjectUrl(audioPreviewUrl.value);
   audioPreviewUrl.value = '';
+  audioPreviewMimeType.value = '';
+}
+
+async function loadAudioBlobFallback() {
+  clearAudioPreviewFallbackTimer();
+  const entry = inspectedEntry.value;
+
+  if (!entry || !isAudioEntry(entry) || !canUseMediaBlobFallback(entry)) {
+    audioFailed.value = true;
+    audioLoading.value = false;
+    return;
+  }
+
+  audioPreviewLoadVersion += 1;
+  const loadVersion = audioPreviewLoadVersion;
+  const mimeType = audioMimeType(entry.name) || 'application/octet-stream';
+  audioLoading.value = true;
+  audioFailed.value = false;
+  audioReady.value = false;
+
+  try {
+    const url = await createMediaPreviewObjectUrl(entry, mimeType);
+
+    if (audioPreviewLoadVersion !== loadVersion) {
+      revokeObjectUrl(url);
+      return;
+    }
+
+    revokeAudioPreviewUrl();
+    audioPreviewMimeType.value = mimeType;
+    audioPreviewUrl.value = url;
+  } catch (error) {
+    if (audioPreviewLoadVersion !== loadVersion) {
+      return;
+    }
+
+    audioFailed.value = true;
+    audioLoading.value = false;
+  }
+}
+
+async function loadVideoBlobFallback() {
+  clearVideoPreviewFallbackTimer();
+  const entry = inspectedEntry.value;
+
+  if (!entry || !isVideoEntry(entry) || !canUseMediaBlobFallback(entry)) {
+    videoFailed.value = true;
+    videoLoading.value = false;
+    return;
+  }
+
+  videoPreviewLoadVersion += 1;
+  const loadVersion = videoPreviewLoadVersion;
+  const mimeType = videoMimeType(entry.name) || 'application/octet-stream';
+  videoLoading.value = true;
+  videoFailed.value = false;
+  videoReady.value = false;
+
+  try {
+    const url = await createMediaPreviewObjectUrl(entry, mimeType);
+
+    if (videoPreviewLoadVersion !== loadVersion) {
+      revokeObjectUrl(url);
+      return;
+    }
+
+    revokeVideoPreviewUrl();
+    videoPreviewMimeType.value = mimeType;
+    videoPreviewUrl.value = url;
+  } catch (error) {
+    if (videoPreviewLoadVersion !== loadVersion) {
+      return;
+    }
+
+    videoFailed.value = true;
+    videoLoading.value = false;
+  }
 }
 
 function handleAudioReady() {
+  clearAudioPreviewFallbackTimer();
   audioReady.value = true;
   audioFailed.value = false;
   audioLoading.value = false;
 }
 
-function handleAudioError(event) {
+async function handleAudioError(event) {
   const audio = event.currentTarget;
 
   if (audio?.readyState > 0) {
     handleAudioReady();
+    return;
+  }
+
+  if (!audioPreviewUrl.value.startsWith('blob:')) {
+    await loadAudioBlobFallback();
     return;
   }
 
@@ -552,16 +762,22 @@ function handleAudioError(event) {
 }
 
 function handleVideoReady() {
+  clearVideoPreviewFallbackTimer();
   videoReady.value = true;
   videoFailed.value = false;
   videoLoading.value = false;
 }
 
-function handleVideoError(event) {
+async function handleVideoError(event) {
   const video = event.currentTarget;
 
   if (video?.readyState > 0) {
     handleVideoReady();
+    return;
+  }
+
+  if (!videoPreviewUrl.value.startsWith('blob:')) {
+    await loadVideoBlobFallback();
     return;
   }
 
@@ -862,8 +1078,8 @@ function logDetail(entry) {
           >
             <video
               v-if="videoPreviewUrl"
+              :key="videoPreviewUrl"
               class="preview-video"
-              :src="videoPreviewUrl"
               controls
               playsinline
               preload="metadata"
@@ -871,6 +1087,7 @@ function logDetail(entry) {
               @canplay="handleVideoReady"
               @error="handleVideoError"
             >
+              <source :src="videoPreviewUrl" :type="videoPreviewMimeType" />
               Your system webview cannot play this video.
             </video>
             <span v-if="videoLoading && !videoReady && !videoFailed" class="preview-media-status">
@@ -889,14 +1106,15 @@ function logDetail(entry) {
             </span>
             <audio
               v-if="audioPreviewUrl"
+              :key="audioPreviewUrl"
               class="preview-audio"
-              :src="audioPreviewUrl"
               controls
               preload="metadata"
               @loadedmetadata="handleAudioReady"
               @canplay="handleAudioReady"
               @error="handleAudioError"
             >
+              <source :src="audioPreviewUrl" :type="audioPreviewMimeType" />
               Your system webview cannot play this audio file.
             </audio>
             <span v-if="audioLoading && !audioReady && !audioFailed" class="preview-media-status">

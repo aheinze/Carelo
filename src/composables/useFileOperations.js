@@ -170,6 +170,10 @@ export async function readTextPreview(path, maxBytes = 96 * 1024) {
   return invokeCommand('read_text_preview', { path, maxBytes });
 }
 
+export async function readMediaPreview(path, maxBytes = 128 * 1024 * 1024) {
+  return invokeCommand('read_media_preview', { path, maxBytes });
+}
+
 export async function getHomeDirectory() {
   return invokeCommand('get_home_directory');
 }

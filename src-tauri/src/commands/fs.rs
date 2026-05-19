@@ -26,6 +26,8 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
+const MEDIA_PREVIEW_MAX_BYTES: u64 = 128 * 1024 * 1024;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferItem {
@@ -318,6 +320,19 @@ pub async fn read_text_preview(
     max_bytes: Option<usize>,
 ) -> Result<TextPreview, FsError> {
     run_local(move |_| read_local_text_preview(&path, max_bytes.unwrap_or(96 * 1024))).await
+}
+
+#[tauri::command]
+pub async fn read_media_preview(
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<tauri::ipc::Response, FsError> {
+    let bytes = run_local(move |_| {
+        read_local_media_preview(&path, max_bytes.unwrap_or(MEDIA_PREVIEW_MAX_BYTES))
+    })
+    .await?;
+
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -1849,6 +1864,32 @@ fn read_local_text_preview(path: &str, max_bytes: usize) -> FsResult<TextPreview
         truncated,
         bytes_read: bytes.len(),
     })
+}
+
+fn read_local_media_preview(path: &str, max_bytes: u64) -> FsResult<Vec<u8>> {
+    let path = expand_local_path(path)?;
+    let metadata = fs::metadata(&path)
+        .map_err(|error| FsError::io("Unable to read media preview metadata", &path, error))?;
+
+    if !metadata.is_file() {
+        return Err(FsError::new(
+            "preview_not_file",
+            "Media preview is available for files only.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    let byte_limit = max_bytes.clamp(1024 * 1024, MEDIA_PREVIEW_MAX_BYTES);
+
+    if metadata.len() > byte_limit {
+        return Err(FsError::new(
+            "preview_file_too_large",
+            "This media file is too large for inline preview.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    fs::read(&path).map_err(|error| FsError::io("Unable to read media preview", &path, error))
 }
 
 fn line_text_with_limit(line: &str) -> String {
