@@ -1,7 +1,7 @@
 <script setup>
 import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue';
 import AppIcon from './AppIcon.vue';
-import { getFileMetadata, removeRemoteVolume } from '../composables/useFileOperations';
+import { getFileMetadata, mountVolume, removeRemoteVolume } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import {
@@ -20,11 +20,44 @@ const dialog = useDialog();
 const remoteModalVisible = ref(false);
 const draggedFavoriteId = ref(null);
 const favoriteDropIndex = ref(null);
+const mountingDevicePath = ref('');
 let volumeRefreshTimer = null;
 
-function openSidebarItem(item) {
-  if (!item.disabled && item.path) {
+async function openSidebarItem(item) {
+  if (item.disabled || (item.devicePath && mountingDevicePath.value === item.devicePath)) {
+    return;
+  }
+
+  if (item.isMountable && item.devicePath) {
+    await mountSidebarVolume(item);
+    return;
+  }
+
+  if (item.path) {
     store.setPanePath(store.activePaneId, item.path);
+  }
+}
+
+async function mountSidebarVolume(item) {
+  mountingDevicePath.value = item.devicePath;
+
+  try {
+    const volume = await mountVolume(item.devicePath);
+    await store.refreshVolumes();
+
+    if (volume?.path) {
+      store.setPanePath(store.activePaneId, volume.path);
+    }
+  } catch (error) {
+    await store.refreshVolumes();
+    await dialog.alert({
+      title: 'Mount Failed',
+      message: error?.message || `Unable to mount ${item.name}.`,
+      detail: item.devicePath || '',
+      variant: 'warning',
+    });
+  } finally {
+    mountingDevicePath.value = '';
   }
 }
 
@@ -578,17 +611,20 @@ onUnmounted(() => {
             class="sidebar-item"
             :class="{
               'sidebar-item--disabled': item.disabled,
+              'sidebar-item--mounting': mountingDevicePath === item.devicePath,
               'sidebar-item--remote': item.isRemote,
               'sidebar-item--actionable': item.isRemote || item.isFavorite,
             }"
-            :disabled="item.disabled"
+            :disabled="item.disabled || mountingDevicePath === item.devicePath"
             @click="openSidebarItem(item)"
           >
             <span class="sidebar-symbol" :style="{ '--item-color': item.color }" aria-hidden="true">
               <AppIcon :name="item.icon || 'folder'" :size="18" :stroke-width="1.9" />
             </span>
             <span class="sidebar-label">{{ item.name }}</span>
-            <small v-if="item.detail">{{ item.detail }}</small>
+            <small v-if="item.detail || mountingDevicePath === item.devicePath">
+              {{ mountingDevicePath === item.devicePath ? 'Mounting…' : item.detail }}
+            </small>
           </button>
           <button
             v-if="item.isRemote || item.isFavorite"
@@ -811,6 +847,11 @@ h2 {
 
 .sidebar-item--disabled:hover {
   background: transparent;
+}
+
+.sidebar-item--mounting {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .sidebar-item--remote {

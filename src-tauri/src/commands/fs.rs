@@ -356,6 +356,21 @@ pub async fn list_volumes(
 }
 
 #[tauri::command]
+pub async fn mount_volume(device_path: String) -> Result<VolumeEntry, FsError> {
+    let error_path = device_path.clone();
+
+    tauri::async_runtime::spawn_blocking(move || mount_system_volume(&device_path))
+        .await
+        .map_err(|error| {
+            FsError::new(
+                "task_join_error",
+                format!("Volume mount failed: {error}"),
+                Some(error_path),
+            )
+        })?
+}
+
+#[tauri::command]
 pub async fn same_volume(paths: Vec<String>, target_directory: String) -> Result<bool, FsError> {
     let Some(first_path) = paths.first() else {
         return Ok(true);
@@ -2334,6 +2349,89 @@ fn list_system_volumes() -> FsResult<Vec<VolumeEntry>> {
     {
         Ok(Vec::new())
     }
+}
+
+fn mount_system_volume(device_path: &str) -> FsResult<VolumeEntry> {
+    #[cfg(target_os = "linux")]
+    {
+        return mount_linux_volume(device_path);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(FsError::new(
+            "mount_volume_unsupported",
+            "Mounting volumes from Carelo is not supported on this platform yet.",
+            Some(device_path.to_string()),
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mounted_linux_volume_for_device(device_path: &str) -> FsResult<Option<VolumeEntry>> {
+    Ok(list_linux_volumes()?.into_iter().find(|volume| {
+        volume.device_path.as_deref() == Some(device_path)
+            && volume.is_mounted
+            && !volume.path.is_empty()
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn mount_linux_volume(device_path: &str) -> FsResult<VolumeEntry> {
+    let device_path = device_path.trim();
+
+    if !device_path.starts_with("/dev/") {
+        return Err(FsError::new(
+            "invalid_volume_device",
+            "Volume device path must start with /dev/.",
+            Some(device_path.to_string()),
+        ));
+    }
+
+    if let Some(volume) = mounted_linux_volume_for_device(device_path)? {
+        return Ok(volume);
+    }
+
+    let output = Command::new("udisksctl")
+        .args(["mount", "-b", device_path])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            FsError::new(
+                "mount_volume_spawn_failed",
+                format!("Unable to start udisksctl to mount the volume: {error}"),
+                Some(device_path.to_string()),
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(FsError::new(
+            "mount_volume_failed",
+            if detail.is_empty() {
+                "Unable to mount the volume.".to_string()
+            } else {
+                format!("Unable to mount the volume: {detail}")
+            },
+            Some(device_path.to_string()),
+        ));
+    }
+
+    for _ in 0..20 {
+        if let Some(volume) = mounted_linux_volume_for_device(device_path)? {
+            return Ok(volume);
+        }
+
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    Err(FsError::new(
+        "mount_volume_path_not_found",
+        "The volume mounted, but Carelo could not find its mount path yet.",
+        Some(device_path.to_string()),
+    ))
 }
 
 #[cfg(target_os = "macos")]

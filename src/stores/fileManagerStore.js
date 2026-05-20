@@ -565,6 +565,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       title: 'Devices',
       items: volumes.value.map((volume) => {
         const isRemote = volume.path?.startsWith('remote://');
+        const isMountable = !volume.isMounted && Boolean(volume.devicePath);
 
         return {
           name: volume.name,
@@ -573,7 +574,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
           detail: volume.detail || (isRemote ? 'Remote' : 'Mounted'),
           icon: isRemote ? 'network' : 'drive',
           color: isRemote ? '#5e5ce6' : volume.isRemovable ? '#5ca8ff' : '#8E8E93',
-          disabled: !volume.isMounted,
+          disabled: !volume.isMounted && !isMountable,
+          isMountable,
           isRemote,
           matchPrefix: true,
         };

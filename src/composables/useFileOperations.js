@@ -182,6 +182,10 @@ export async function listVolumes() {
   return invokeCommand('list_volumes');
 }
 
+export async function mountVolume(devicePath) {
+  return invokeCommand('mount_volume', { devicePath });
+}
+
 export async function areSameVolume(paths, targetDirectory) {
   return invokeCommand('same_volume', { paths, targetDirectory });
 }
@@ -343,6 +347,7 @@ export function useFileOperations() {
     listVolumes,
     localFileAssetUrl,
     measureItemsSize,
+    mountVolume,
     moveFavorite,
     moveItems,
     openWithApp,
