@@ -294,6 +294,10 @@ export async function openWithApp(path, appId, remember = false) {
   return invokeCommand('open_with_app', { path, appId, remember });
 }
 
+export async function runCustomTool(command, paths, cwd = '') {
+  return invokeCommand('run_custom_tool', { command, paths, cwd: cwd || null });
+}
+
 export async function revealInFileManager(path) {
   return invokeCommand('reveal_in_file_manager', { path });
 }
@@ -344,6 +348,7 @@ export function useFileOperations() {
     openWithApp,
     openWithDefaultApp,
     pauseFileOperation,
+    runCustomTool,
     removeFavorite,
     removeRemoteVolume,
     renameItem,

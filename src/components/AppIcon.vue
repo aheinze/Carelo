@@ -200,6 +200,11 @@ defineProps({
       <path d="M12.2 14h4.3" />
     </template>
 
+    <template v-else-if="name === 'tool'">
+      <path d="M14.4 6.4a4.3 4.3 0 0 0 5.2-.8 6 6 0 0 1-6.9 7.7l-6.3 6.3a2.1 2.1 0 0 1-3-3l6.3-6.3A6 6 0 0 1 17.4 3.4Z" />
+      <path d="m6.7 17.3.01.01" />
+    </template>
+
     <template v-else-if="name === 'eye'">
       <path d="M3.6 12s3.1-5.4 8.4-5.4 8.4 5.4 8.4 5.4-3.1 5.4-8.4 5.4S3.6 12 3.6 12Z" />
       <circle cx="12" cy="12" r="2.7" />

@@ -35,6 +35,7 @@ const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
 const SORT_DIRECTIONS = ['asc', 'desc'];
 const VIEW_MODES = ['list', 'grid', 'columns'];
 const APPEARANCE_MODES = ['system', 'light', 'dark'];
+const CUSTOM_TOOL_TARGETS = ['both', 'files', 'folders'];
 const NAV_HISTORY_LIMIT = 80;
 const INACTIVE_TAB_ENTRY_CACHE_LIMIT = 2;
 const LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT = 1500;
@@ -49,6 +50,7 @@ const DEFAULT_APP_SETTINGS = Object.freeze({
   restoreTerminalPanel: false,
   confirmDelete: true,
   terminalStartsInActiveFolder: true,
+  customTools: [],
 });
 const NAME_COLLATOR = new Intl.Collator(undefined, {
   numeric: true,
@@ -71,6 +73,57 @@ function normalizeAppearanceMode(mode) {
   return APPEARANCE_MODES.includes(mode) ? mode : DEFAULT_APP_SETTINGS.appearanceMode;
 }
 
+function normalizeCustomToolTarget(target) {
+  return CUSTOM_TOOL_TARGETS.includes(target) ? target : 'both';
+}
+
+function normalizeCustomToolExtensions(extensions) {
+  if (Array.isArray(extensions)) {
+    return extensions
+      .map((extension) => String(extension || '').trim().replace(/^\.+/, '').toLowerCase())
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  return String(extensions || '')
+    .split(/[,\s]+/)
+    .map((extension) => extension.trim().replace(/^\.+/, '').toLowerCase())
+    .filter(Boolean)
+    .join(', ');
+}
+
+function normalizeCustomTools(tools = []) {
+  if (!Array.isArray(tools)) {
+    return [];
+  }
+
+  const seenIds = new Set();
+
+  return tools
+    .filter((tool) => tool && typeof tool === 'object')
+    .slice(0, 24)
+    .map((tool, index) => {
+      const fallbackId = `tool-${index + 1}`;
+      const rawId = String(tool.id || fallbackId).trim() || fallbackId;
+      let id = rawId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 80) || fallbackId;
+
+      if (seenIds.has(id)) {
+        id = `${id}-${index + 1}`;
+      }
+
+      seenIds.add(id);
+
+      return {
+        id,
+        name: String(tool.name || '').trim().slice(0, 80),
+        command: String(tool.command || '').trim().slice(0, 600),
+        enabled: tool.enabled !== false,
+        appliesTo: normalizeCustomToolTarget(tool.appliesTo),
+        extensions: normalizeCustomToolExtensions(tool.extensions),
+      };
+    });
+}
+
 function normalizeAppSettings(settings = {}) {
   const value = settings && typeof settings === 'object' ? settings : {};
 
@@ -86,6 +139,7 @@ function normalizeAppSettings(settings = {}) {
     restoreTerminalPanel: value.restoreTerminalPanel === true,
     confirmDelete: value.confirmDelete !== false,
     terminalStartsInActiveFolder: value.terminalStartsInActiveFolder !== false,
+    customTools: normalizeCustomTools(value.customTools),
   };
 }
 

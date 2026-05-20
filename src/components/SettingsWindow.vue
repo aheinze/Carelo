@@ -35,6 +35,12 @@ const sections = [
     keywords: 'safety confirm delete remove destructive',
   },
   {
+    id: 'tools',
+    label: 'Tools',
+    icon: 'terminal',
+    keywords: 'tools context menu right click command code editor path external',
+  },
+  {
     id: 'terminal',
     label: 'Terminal',
     icon: 'terminal',
@@ -53,6 +59,11 @@ const viewModes = [
   { value: 'list', label: 'List', icon: 'list' },
   { value: 'grid', label: 'Grid', icon: 'grid' },
   { value: 'columns', label: 'Columns', icon: 'columns' },
+];
+const toolTargets = [
+  { value: 'both', label: 'Both' },
+  { value: 'files', label: 'Files' },
+  { value: 'folders', label: 'Folders' },
 ];
 
 const activeSection = computed(() =>
@@ -101,6 +112,40 @@ function setDateFormat(event) {
 
 function setBooleanSetting(key, event) {
   store.setAppSetting(key, event.target.checked);
+}
+
+function createToolId() {
+  return `tool-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function addCustomTool() {
+  store.setAppSetting('customTools', [
+    ...(store.appSettings.customTools || []),
+    {
+      id: createToolId(),
+      name: '',
+      command: '',
+      enabled: true,
+      appliesTo: 'both',
+      extensions: '',
+    },
+  ]);
+}
+
+function updateCustomTool(id, patch) {
+  store.setAppSetting(
+    'customTools',
+    (store.appSettings.customTools || []).map((tool) =>
+      tool.id === id ? { ...tool, ...patch } : tool,
+    ),
+  );
+}
+
+function removeCustomTool(id) {
+  store.setAppSetting(
+    'customTools',
+    (store.appSettings.customTools || []).filter((tool) => tool.id !== id),
+  );
 }
 
 function close() {
@@ -384,6 +429,110 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
                     />
                     <span class="settings-switch" aria-hidden="true"></span>
                   </label>
+                </div>
+              </section>
+
+              <section v-else-if="activeSectionId === 'tools'" class="settings-page">
+                <div class="settings-section-heading">
+                  <h3>Tools</h3>
+                  <p>Add commands to the file context menu for local files and folders.</p>
+                </div>
+
+                <div class="settings-group">
+                  <div class="setting-row setting-row--stacked">
+                    <div class="setting-copy">
+                      <strong>Context menu tools</strong>
+                      <span>Use placeholders such as %path%, %paths%, %name%, and %parent%.</span>
+                    </div>
+
+                    <div v-if="store.appSettings.customTools.length > 0" class="custom-tool-list">
+                      <article
+                        v-for="tool in store.appSettings.customTools"
+                        :key="tool.id"
+                        class="custom-tool-card"
+                        :class="{ 'custom-tool-card--disabled': !tool.enabled }"
+                      >
+                        <div class="custom-tool-header">
+                          <label class="custom-tool-field custom-tool-field--name">
+                            <span>Name</span>
+                            <input
+                              type="text"
+                              :value="tool.name"
+                              placeholder="Open in Code"
+                              @input="updateCustomTool(tool.id, { name: $event.target.value })"
+                            />
+                          </label>
+
+                          <label class="custom-tool-toggle">
+                            <input
+                              class="switch-input"
+                              type="checkbox"
+                              :checked="tool.enabled"
+                              @change="updateCustomTool(tool.id, { enabled: $event.target.checked })"
+                            />
+                            <span class="settings-switch" aria-hidden="true"></span>
+                          </label>
+
+                          <button
+                            type="button"
+                            class="custom-tool-remove"
+                            aria-label="Remove tool"
+                            @click="removeCustomTool(tool.id)"
+                          >
+                            <AppIcon name="x" :size="13" :stroke-width="2" />
+                          </button>
+                        </div>
+
+                        <label class="custom-tool-field">
+                          <span>Command</span>
+                          <input
+                            type="text"
+                            :value="tool.command"
+                            placeholder="code %path%"
+                            spellcheck="false"
+                            @input="updateCustomTool(tool.id, { command: $event.target.value })"
+                          />
+                        </label>
+
+                        <div class="custom-tool-scope">
+                          <span>Available for</span>
+                          <div class="custom-tool-targets" role="group" aria-label="Tool availability">
+                            <button
+                              v-for="target in toolTargets"
+                              :key="`${tool.id}-${target.value}`"
+                              type="button"
+                              :class="{ active: (tool.appliesTo || 'both') === target.value }"
+                              :aria-pressed="(tool.appliesTo || 'both') === target.value"
+                              @click="updateCustomTool(tool.id, { appliesTo: target.value })"
+                            >
+                              {{ target.label }}
+                            </button>
+                          </div>
+                        </div>
+
+                        <label v-if="tool.appliesTo === 'files'" class="custom-tool-field">
+                          <span>File extensions</span>
+                          <input
+                            type="text"
+                            :value="tool.extensions"
+                            placeholder="js, ts, vue"
+                            spellcheck="false"
+                            @input="updateCustomTool(tool.id, { extensions: $event.target.value })"
+                          />
+                        </label>
+                      </article>
+                    </div>
+
+                    <div v-else class="custom-tool-empty">
+                      <AppIcon name="terminal" :size="18" :stroke-width="1.8" />
+                      <span>No tools configured</span>
+                    </div>
+
+                    <button type="button" class="custom-tool-add" @click="addCustomTool">
+                      <AppIcon name="plus" :size="15" :stroke-width="2" />
+                      <span>Add tool</span>
+                    </button>
+                  </div>
                 </div>
               </section>
 
@@ -976,6 +1125,180 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
     var(--input-shadow);
 }
 
+.custom-tool-list {
+  display: grid;
+  gap: 10px;
+}
+
+.custom-tool-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 2.5%, transparent);
+}
+
+.custom-tool-card--disabled {
+  opacity: 0.62;
+}
+
+.custom-tool-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.custom-tool-field {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.custom-tool-field span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.custom-tool-field input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--input-bg);
+  box-shadow: var(--input-shadow);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 590;
+  outline: 0;
+}
+
+.custom-tool-field input::placeholder {
+  color: var(--text-faint);
+}
+
+.custom-tool-field input:focus-visible {
+  border-color: var(--accent-border);
+  box-shadow:
+    var(--accent-focus-ring),
+    var(--input-shadow);
+}
+
+.custom-tool-scope {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.custom-tool-scope > span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.custom-tool-targets {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  box-shadow: var(--input-shadow);
+}
+
+.custom-tool-targets button {
+  min-width: 74px;
+  height: 30px;
+  padding: 0 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 680;
+}
+
+.custom-tool-targets button + button {
+  border-left: 1px solid var(--hairline);
+}
+
+.custom-tool-targets button:hover {
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+.custom-tool-targets button.active {
+  background: var(--btn-active-bg);
+  color: var(--text);
+}
+
+.custom-tool-toggle {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+}
+
+.custom-tool-remove,
+.custom-tool-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  box-shadow: var(--input-shadow);
+  color: var(--text-muted);
+}
+
+.custom-tool-remove {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+}
+
+.custom-tool-remove:hover {
+  border-color: rgb(var(--danger-rgb) / 0.32);
+  background: rgb(var(--danger-rgb) / 0.10);
+  color: var(--danger);
+}
+
+.custom-tool-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  border: 1px dashed var(--control-border);
+  border-radius: 10px;
+  padding: 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.custom-tool-add {
+  width: fit-content;
+  min-height: 34px;
+  gap: 7px;
+  border-radius: 8px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.custom-tool-add:hover {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text);
+}
+
 .switch-input {
   position: absolute;
   width: 1px;
@@ -1081,6 +1404,23 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   }
 
   .view-segment button {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .custom-tool-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .custom-tool-remove {
+    grid-column: 2;
+  }
+
+  .custom-tool-targets {
+    width: 100%;
+  }
+
+  .custom-tool-targets button {
     min-width: 0;
     flex: 1;
   }

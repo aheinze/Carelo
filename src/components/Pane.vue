@@ -13,6 +13,7 @@ import {
   openWithApp,
   openWithDefaultApp,
   revealInFileManager,
+  runCustomTool,
   unarchiveItems,
 } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
@@ -28,6 +29,7 @@ import {
   isArchiveEntry,
   isArchivePath,
 } from '../utils/archivePaths';
+import { extensionForName } from '../utils/fileTypes';
 
 const CreateArchiveDialog = defineAsyncComponent(() => import('./CreateArchiveDialog.vue'));
 const OpenWithDialog = defineAsyncComponent(() => import('./OpenWithDialog.vue'));
@@ -246,6 +248,23 @@ const canOpenWithContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
 
   return operationEntries.length === 1 && operationEntries[0]?.kind === 'file' && isLocalEntry(operationEntries[0]);
+});
+const configuredCustomTools = computed(() =>
+  (store.appSettings.customTools || []).filter((tool) => tool?.enabled !== false && tool?.name && tool?.command),
+);
+const availableCustomTools = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  if (operationEntries.length === 0 || operationEntries.some((item) => !isLocalEntry(item))) {
+    return [];
+  }
+
+  return configuredCustomTools.value.filter((tool) =>
+    operationEntries.every((entry) => customToolAppliesToEntry(tool, entry)),
+  );
+});
+const canRunCustomToolContext = computed(() => {
+  return availableCustomTools.value.length > 0;
 });
 
 function rootSummarySource() {
@@ -1136,6 +1155,37 @@ function isZipEntry(entry) {
   return entry?.kind === 'file' && !isArchivePath(entry.path) && /\.zip$/i.test(entry.name || '');
 }
 
+function extensionListForTool(tool) {
+  return String(tool?.extensions || '')
+    .split(/[,\s]+/)
+    .map((extension) => extension.trim().replace(/^\.+/, '').toLowerCase())
+    .filter(Boolean);
+}
+
+function customToolAppliesToEntry(tool, entry) {
+  const appliesTo = tool?.appliesTo || 'both';
+
+  if (entry?.kind === 'directory') {
+    return appliesTo === 'both' || appliesTo === 'folders';
+  }
+
+  if (entry?.kind !== 'file' || appliesTo === 'folders') {
+    return false;
+  }
+
+  if (appliesTo !== 'files') {
+    return true;
+  }
+
+  const extensions = extensionListForTool(tool);
+
+  if (extensions.length === 0) {
+    return true;
+  }
+
+  return extensions.includes(extensionForName(entry.name));
+}
+
 function pathJoin(directory, name) {
   const base = String(directory || '').replace(/\/+$/, '');
 
@@ -1331,6 +1381,31 @@ async function extractZipArchive(menu) {
   });
 }
 
+async function runContextCustomTool(menu, toolId) {
+  const tool = configuredCustomTools.value.find((candidate) => candidate.id === toolId);
+  const operationEntries = contextOperationEntries(menu);
+
+  if (
+    !tool ||
+    operationEntries.length === 0 ||
+    operationEntries.some((item) => !isLocalEntry(item)) ||
+    !operationEntries.every((item) => customToolAppliesToEntry(tool, item))
+  ) {
+    await dialog.alert({
+      title: 'Tool Not Available',
+      message: 'This tool is not available for the selected items.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  await runCustomTool(
+    tool.command,
+    operationEntries.map((item) => item.path),
+    commonParentDirectoryFor(operationEntries),
+  );
+}
+
 async function openEntryAt(index) {
   const entry = entries.value[index];
 
@@ -1521,6 +1596,11 @@ async function handleContextAction(action) {
 
     if (action === 'copyPath') {
       await copyPathToClipboard(contextOperationEntries(menu).map((item) => item.path).join('\n'));
+      return;
+    }
+
+    if (typeof action === 'string' && action.startsWith('customTool:')) {
+      await runContextCustomTool(menu, action.slice('customTool:'.length));
       return;
     }
 
@@ -1802,6 +1882,8 @@ async function handleContextAction(action) {
       :can-archive="canArchiveContext"
       :can-unarchive="canUnarchiveContext"
       :can-open-with="canOpenWithContext"
+      :can-custom-tools="canRunCustomToolContext"
+      :custom-tools="availableCustomTools"
       :can-transfer="canTransferToOtherPane"
       :can-modify="canModifyContext"
       :can-move="canMoveContext"
