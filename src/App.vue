@@ -162,7 +162,7 @@ onBeforeUnmount(() => {
         <div
           class="panel-resize-handle panel-resize-handle--preview"
           aria-hidden="true"
-          @dblclick="store.setPreviewPanelWidth(400)"
+          @dblclick="store.setPreviewPanelWidth(340)"
           @pointerdown="startPreviewResize"
         ></div>
         <PreviewPanel />

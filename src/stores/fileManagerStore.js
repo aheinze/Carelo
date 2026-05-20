@@ -511,7 +511,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const sidebarVisible = ref(savedSettings.sidebarVisible ?? true);
   const sidebarWidth = ref(savedSettings.sidebarWidth ?? 310);
   const previewPanelVisible = ref(savedSettings.previewPanelVisible ?? true);
-  const previewPanelWidth = ref(savedSettings.previewPanelWidth ?? 400);
+  const previewPanelWidth = ref(savedSettings.previewPanelWidth ?? 340);
   const paneSplitPercent = ref(savedSettings.paneSplitPercent ?? 48);
   const terminalPanelVisible = ref(
     appSettings.value.restoreTerminalPanel ? (savedSettings.terminalPanelVisible ?? false) : false,
@@ -2062,7 +2062,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   }
 
   function setPreviewPanelWidth(width) {
-    previewPanelWidth.value = Math.max(340, Math.min(560, Number(width) || 400));
+    previewPanelWidth.value = Math.max(340, Math.min(560, Number(width) || 340));
   }
 
   function setPaneSplitPercent(percent) {

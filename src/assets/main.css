@@ -194,7 +194,7 @@ input:focus-visible {
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 1px clamp(340px, var(--preview-panel-width, 400px), 520px);
+  grid-template-columns: minmax(0, 1fr) 1px clamp(340px, var(--preview-panel-width, 340px), 520px);
   min-height: 0;
   padding-top: 0;
   overflow: hidden;
