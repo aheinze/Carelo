@@ -11,12 +11,15 @@ const props = defineProps({
 const emit = defineEmits(['close']);
 const store = useFileManagerStore();
 const nameInput = ref(null);
+const primaryFieldInput = ref(null);
 const saving = ref(false);
 const creatingTokens = ref(false);
 const errorMessage = ref('');
 const oauthMessage = ref('');
 const OAUTH_CALLBACK_URL = 'http://127.0.0.1:53682/oauth/callback';
+const NETWORK_LOCATION_SCHEME = 'network';
 const oauthClientSecretRequired = new Set(['gdrive', 'dropbox']);
+const hiddenProviderSchemes = new Set(['b2', 'gdrive', 'onedrive', 'dropbox', 'swift']);
 
 // ── Protocol custom select ─────────────────────────────────
 const protocolDropdownOpen = ref(false);
@@ -66,6 +69,21 @@ onUnmounted(closeProtocolDropdown);
 // Field types: 'text' | 'password' | 'select'
 // Special: { divider: 'Label' } renders a section heading inside the creds grid.
 const providers = [
+  {
+    label: 'Network Location',
+    scheme: NETWORK_LOCATION_SCHEME,
+    icon: 'network',
+    description: 'Connect by server address',
+    rootPlaceholder: '',
+    fields: [
+      { key: 'address', label: 'Server Address', type: 'text', placeholder: 'sftp://server.example.com/home/user' },
+      { key: 'username', label: 'Username', type: 'text', placeholder: '', optional: true, half: true },
+      { key: 'password', label: 'Password', type: 'password', placeholder: 'FTP / WebDAV', optional: true, half: true },
+      { key: 'key', label: 'SSH Private Key / Path', type: 'text', placeholder: '~/.ssh/id_rsa', optional: true },
+      { key: 'known_hosts_strategy', label: 'SSH Known Hosts', type: 'select', optional: true, half: true,
+        options: [{ value: '', label: '— default (strict) —' }, { value: 'strict', label: 'Strict' }, { value: 'accept', label: 'Accept all' }, { value: 'add', label: 'Add & trust' }] },
+    ],
+  },
   {
     label: 'SFTP',
     scheme: 'sftp',
@@ -262,6 +280,9 @@ const providers = [
   },
 ];
 
+const visibleProviders = providers.filter((provider) => !hiddenProviderSchemes.has(provider.scheme));
+const initialProvider = visibleProviders[0] ?? providers[0];
+
 function makeFields(provider) {
   const obj = {};
   for (const f of provider.fields) {
@@ -272,24 +293,34 @@ function makeFields(provider) {
 
 const form = reactive({
   name: '',
-  scheme: providers[0].scheme,
+  scheme: initialProvider.scheme,
   root: '',
-  fields: makeFields(providers[0]),
+  fields: makeFields(initialProvider),
 });
 
 const selectedProvider = computed(
-  () => providers.find((p) => p.scheme === form.scheme) ?? providers[0],
+  () => providers.find((p) => p.scheme === form.scheme) ?? initialProvider,
 );
+const isNetworkLocation = computed(() => selectedProvider.value.scheme === NETWORK_LOCATION_SCHEME);
+const primaryFieldKey = computed(() => (isNetworkLocation.value ? 'address' : ''));
 const selectedProviderSupportsOAuth = computed(() => Boolean(selectedProvider.value.oauth));
+
+function setPrimaryFieldInput(el) {
+  primaryFieldInput.value = el;
+}
 
 watch(
   () => form.scheme,
   (scheme) => {
-    const provider = providers.find((p) => p.scheme === scheme) ?? providers[0];
+    const provider = providers.find((p) => p.scheme === scheme) ?? initialProvider;
     form.fields = makeFields(provider);
     if (!form.name.trim()) form.name = provider.label;
     oauthMessage.value = '';
     errorMessage.value = '';
+    primaryFieldInput.value = null;
+    if (provider.scheme === NETWORK_LOCATION_SCHEME) {
+      nextTick(() => primaryFieldInput.value?.focus());
+    }
   },
 );
 
@@ -301,13 +332,18 @@ watch(
       return;
     }
     form.name = '';
-    form.scheme = providers[0].scheme;
+    form.scheme = initialProvider.scheme;
     form.root = '';
-    form.fields = makeFields(providers[0]);
+    form.fields = makeFields(initialProvider);
     errorMessage.value = '';
     oauthMessage.value = '';
+    primaryFieldInput.value = null;
     await nextTick();
-    nameInput.value?.focus();
+    if (isNetworkLocation.value) {
+      primaryFieldInput.value?.focus();
+    } else {
+      nameInput.value?.focus();
+    }
   },
 );
 
@@ -325,6 +361,123 @@ function normalizeOptions(options) {
       .filter(([k, v]) => k.trim() && v !== null && v !== undefined && String(v).trim() !== '')
       .map(([k, v]) => [k.trim(), String(v)]),
   );
+}
+
+function decodeUrlValue(value) {
+  if (!value) {
+    return '';
+  }
+
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeNetworkRoot(pathname) {
+  return decodeUrlValue(pathname || '')
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '');
+}
+
+function networkEndpoint(url, protocol, targetScheme) {
+  if (targetScheme === 'sftp') {
+    return url.host;
+  }
+
+  if (targetScheme === 'ftp') {
+    const ftpProtocol = protocol === 'ftps' ? 'ftps' : 'ftp';
+    return `${ftpProtocol}://${url.host}`;
+  }
+
+  const webdavProtocol = ['dav', 'http'].includes(protocol) ? 'http' : 'https';
+  return `${webdavProtocol}://${url.host}`;
+}
+
+function networkVolumeName(url, targetScheme) {
+  const rootName = normalizeNetworkRoot(url.pathname)
+    .split('/')
+    .filter(Boolean)
+    .pop();
+
+  return rootName || url.hostname || targetScheme.toUpperCase();
+}
+
+function parseNetworkLocation() {
+  const address = (form.fields.address || '').trim();
+
+  if (!address) {
+    return { error: 'Enter a server address.' };
+  }
+
+  let url;
+  try {
+    url = new URL(address);
+  } catch {
+    return { error: 'Use a full server address, for example sftp://server/path or davs://server/path.' };
+  }
+
+  const protocol = url.protocol.replace(/:$/, '').toLowerCase();
+  const protocolMap = {
+    ssh: 'sftp',
+    sftp: 'sftp',
+    ftp: 'ftp',
+    ftps: 'ftp',
+    dav: 'webdav',
+    davs: 'webdav',
+    webdav: 'webdav',
+    webdavs: 'webdav',
+    http: 'webdav',
+    https: 'webdav',
+  };
+  const targetScheme = protocolMap[protocol];
+
+  if (['smb', 'cifs'].includes(protocol)) {
+    return { error: 'SMB shares are not supported by the embedded remote backend yet. Use SFTP, FTP/FTPS, or WebDAV.' };
+  }
+
+  if (!targetScheme) {
+    return { error: 'Supported network addresses are sftp://, ssh://, ftp://, ftps://, dav://, davs://, webdav://, http://, and https://.' };
+  }
+
+  if (!url.hostname) {
+    return { error: 'Server address must include a host.' };
+  }
+
+  const username = (form.fields.username || '').trim() || decodeUrlValue(url.username);
+  const password = (form.fields.password || '').trim() || decodeUrlValue(url.password);
+  const root = normalizeNetworkRoot(url.pathname);
+  const options = {
+    endpoint: networkEndpoint(url, protocol, targetScheme),
+  };
+
+  if (targetScheme === 'sftp' && password) {
+    return { error: 'SFTP password authentication is not supported here. Use an SSH key or SSH agent.' };
+  }
+
+  if (targetScheme === 'webdav') {
+    if (username) options.username = username;
+    if (password) options.password = password;
+  } else {
+    if (username) options.user = username;
+    if (targetScheme === 'ftp' && password) options.password = password;
+  }
+
+  if (targetScheme === 'sftp') {
+    const key = (form.fields.key || '').trim();
+    const knownHostsStrategy = (form.fields.known_hosts_strategy || '').trim();
+
+    if (key) options.key = key;
+    if (knownHostsStrategy) options.known_hosts_strategy = knownHostsStrategy;
+  }
+
+  return {
+    scheme: targetScheme,
+    root: root || null,
+    options: normalizeOptions(options),
+    suggestedName: networkVolumeName(url, targetScheme),
+  };
 }
 
 function buildOptions() {
@@ -452,16 +605,36 @@ function handleKeydown(event) {
 }
 
 async function submit() {
-  const name = form.name.trim();
+  let name = form.name.trim();
 
-  if (!name) {
+  if (!name && !isNetworkLocation.value) {
     errorMessage.value = 'Please enter a name for this connection.';
     nameInput.value?.focus();
     return;
   }
 
   errorMessage.value = '';
-  const options = buildOptions();
+  let scheme = form.scheme;
+  let root = form.root.trim() || null;
+  let options = {};
+
+  if (isNetworkLocation.value) {
+    const network = parseNetworkLocation();
+
+    if (network.error) {
+      errorMessage.value = network.error;
+      primaryFieldInput.value?.focus();
+      return;
+    }
+
+    name ||= network.suggestedName;
+    scheme = network.scheme;
+    root = network.root;
+    options = network.options;
+  } else {
+    options = buildOptions();
+  }
+
   const optionsError = validateOAuthOptions(options);
 
   if (optionsError) {
@@ -473,10 +646,10 @@ async function submit() {
 
   try {
     const remote = await addRemoteVolume({
-      id: createRemoteId(name, form.scheme),
+      id: createRemoteId(name, scheme),
       name,
-      scheme: form.scheme,
-      root: form.root.trim() || null,
+      scheme,
+      root,
       options,
     });
 
@@ -558,7 +731,7 @@ async function submit() {
                   }"
                 >
                   <button
-                    v-for="provider in providers"
+                    v-for="provider in visibleProviders"
                     :key="provider.scheme"
                     type="button"
                     class="protocol-option"
@@ -583,19 +756,19 @@ async function submit() {
             </div>
 
             <!-- Name + Root -->
-            <div class="remote-section remote-row">
+            <div class="remote-section remote-row" :class="{ 'remote-row--single': isNetworkLocation }">
               <label class="remote-field">
-                <span>Name</span>
+                <span>Name <em v-if="isNetworkLocation">(optional)</em></span>
                 <input
                   ref="nameInput"
                   v-model="form.name"
                   type="text"
                   autocomplete="off"
                   spellcheck="false"
-                  placeholder="Production server"
+                  :placeholder="isNetworkLocation ? 'Derived from address' : 'Production server'"
                 />
               </label>
-              <label class="remote-field">
+              <label v-if="!isNetworkLocation" class="remote-field">
                 <span>Root path <em>(optional)</em></span>
                 <input
                   v-model="form.root"
@@ -609,7 +782,7 @@ async function submit() {
 
             <!-- Provider-specific credentials -->
             <div class="remote-section">
-              <p class="remote-section-label">Credentials</p>
+              <p class="remote-section-label">{{ isNetworkLocation ? 'Server Address' : 'Credentials' }}</p>
               <div v-if="selectedProviderSupportsOAuth" class="oauth-helper">
                 <div class="oauth-helper-copy">
                   <strong>OAuth</strong>
@@ -655,6 +828,7 @@ async function submit() {
                   >
                     <span>{{ field.label }} <em v-if="field.optional">(optional)</em></span>
                     <input
+                      :ref="field.key === primaryFieldKey ? setPrimaryFieldInput : null"
                       v-model="form.fields[field.key]"
                       :type="field.type"
                       autocomplete="off"
@@ -1007,6 +1181,10 @@ async function submit() {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+}
+
+.remote-row--single {
+  grid-template-columns: 1fr;
 }
 
 /* ── Credential fields ────────────────────────────────────── */
