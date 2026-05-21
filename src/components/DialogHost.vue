@@ -242,6 +242,8 @@ function handleKeydown(event) {
 .dialog-panel {
   display: block;
   width: min(380px, calc(100vw - 48px));
+  max-height: calc(100vh - 56px);
+  overflow: auto;
   border: 1px solid var(--control-border);
   border-radius: 11px;
   padding: 16px;
@@ -432,6 +434,11 @@ function handleKeydown(event) {
 
 .dialog-actions--choice {
   flex-wrap: wrap;
+}
+
+.dialog-actions--choice .dialog-button {
+  min-width: 0;
+  padding-inline: 14px;
 }
 
 .dialog-button {

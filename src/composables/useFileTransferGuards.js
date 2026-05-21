@@ -1,6 +1,8 @@
 import {
   areSameVolume,
+  compareFileChecksums,
   copyItems,
+  isRemotePath,
   listDirectory,
   moveItems,
   renameItem,
@@ -165,6 +167,67 @@ function entrySummary(entry, dateFormat = 'system') {
   return details.join(', ');
 }
 
+function compareSize(entry, existingEntry) {
+  const incomingSize = Number(entry?.size);
+  const existingSize = Number(existingEntry?.size);
+
+  if (!Number.isFinite(incomingSize) || !Number.isFinite(existingSize)) {
+    return 'Unavailable';
+  }
+
+  if (incomingSize === existingSize) {
+    return `Same size (${formatSize(incomingSize)})`;
+  }
+
+  const difference = formatSize(Math.abs(incomingSize - existingSize));
+  return incomingSize > existingSize
+    ? `Incoming larger by ${difference}`
+    : `Existing larger by ${difference}`;
+}
+
+function modifiedComparison(entry, existingEntry) {
+  const incomingModified = Number(entry?.modifiedAt);
+  const existingModified = Number(existingEntry?.modifiedAt);
+
+  if (!Number.isFinite(incomingModified) || !Number.isFinite(existingModified)) {
+    return null;
+  }
+
+  if (incomingModified === existingModified) {
+    return 0;
+  }
+
+  return incomingModified > existingModified ? 1 : -1;
+}
+
+function compareModified(entry, existingEntry, dateFormat = 'system') {
+  const comparison = modifiedComparison(entry, existingEntry);
+
+  if (comparison === null) {
+    return 'Unavailable';
+  }
+
+  const incoming = formatModified(entry?.modifiedAt, dateFormat) || 'unknown';
+  const existing = formatModified(existingEntry?.modifiedAt, dateFormat) || 'unknown';
+
+  if (comparison === 0) {
+    return `Same modified time (${incoming})`;
+  }
+
+  return comparison > 0
+    ? `Incoming newer (${incoming} vs ${existing})`
+    : `Existing newer (${existing} vs ${incoming})`;
+}
+
+function compareKind(entry, existingEntry) {
+  const incomingKind = entryKindLabel(entry);
+  const existingKind = entryKindLabel(existingEntry);
+
+  return incomingKind === existingKind
+    ? `Same type (${incomingKind})`
+    : `Incoming ${incomingKind}, existing ${existingKind}`;
+}
+
 function itemName(entry) {
   return entry?.name || entry?.path || 'Untitled';
 }
@@ -186,23 +249,84 @@ function conflictFacts({
   incomingLabel = 'Incoming',
   mode = 'copy',
   dateFormat = 'system',
+  extraFacts = [],
 }) {
-  const actionLabel = mode === 'move' ? 'Move' : 'Copy';
+  const actionLabel = mode === 'move' ? 'Move' : mode === 'rename' ? 'Rename' : 'Copy';
 
   return [
     { label: 'Destination', value: targetPath, mono: true },
-    { label: `${actionLabel} Item`, value: itemName(entry) },
-    { label: `${actionLabel} Info`, value: entrySummary(entry, dateFormat) },
+    { label: `${incomingLabel || actionLabel} Item`, value: itemName(entry) },
+    { label: `${incomingLabel || actionLabel} Info`, value: entrySummary(entry, dateFormat) },
     { label: 'Existing Item', value: itemName(existingEntry) },
     { label: 'Existing Info', value: entrySummary(existingEntry, dateFormat) },
+    { label: 'Type Comparison', value: compareKind(entry, existingEntry) },
+    { label: 'Size Comparison', value: compareSize(entry, existingEntry) },
+    { label: 'Date Comparison', value: compareModified(entry, existingEntry, dateFormat) },
     { label: 'Keep Both Name', value: keepBothLabel(entry, keepBothName), mono: true },
+    { label: 'Existing At', value: itemPath(existingEntry), mono: true },
     { label: `${actionLabel} From`, value: itemPath(entry), mono: true },
+    ...extraFacts,
   ];
 }
 
 function conflictApplyLabel(conflictKind, mode) {
   const itemLabel = conflictKind === 'folder' ? 'folder' : 'file';
-  return `Use this choice for all ${itemLabel} conflicts while ${mode === 'move' ? 'moving' : 'copying'}`;
+  const modeLabel = mode === 'move' ? 'moving' : mode === 'rename' ? 'renaming' : 'copying';
+  return `Use this choice for all ${itemLabel} conflicts while ${modeLabel}`;
+}
+
+function canCompareChecksums(entry, existingEntry) {
+  return (
+    entry?.kind === 'file' &&
+    existingEntry?.kind === 'file' &&
+    !isArchivePath(entry.path) &&
+    !isArchivePath(existingEntry.path) &&
+    !isRemotePath(entry.path) &&
+    !isRemotePath(existingEntry.path)
+  );
+}
+
+function checksumPreview(value) {
+  const hash = String(value || '');
+
+  return hash.length > 24 ? `${hash.slice(0, 16)}...${hash.slice(-8)}` : hash;
+}
+
+function checksumFacts(comparison) {
+  if (!comparison) {
+    return [];
+  }
+
+  return [
+    {
+      label: 'Checksum Result',
+      value: comparison.equal ? 'Files are identical' : 'Files differ',
+    },
+    {
+      label: 'Incoming SHA-256',
+      value: checksumPreview(comparison.leftHash),
+      mono: true,
+    },
+    {
+      label: 'Existing SHA-256',
+      value: checksumPreview(comparison.rightHash),
+      mono: true,
+    },
+  ];
+}
+
+function conditionalConflictAction(action, entry, existingEntry) {
+  const comparison = modifiedComparison(entry, existingEntry);
+
+  if (action === 'replaceNewer') {
+    return comparison > 0 ? 'replace' : 'skip';
+  }
+
+  if (action === 'replaceOlder') {
+    return comparison < 0 ? 'replace' : 'skip';
+  }
+
+  return action;
 }
 
 function splitCopyName(name, entry) {
@@ -296,25 +420,10 @@ export function useFileTransferGuards() {
   }) {
     const folderConflict = conflictKind === 'folder';
     const dateFormat = store.appSettings.dateFormat;
-    const result = await dialog.choice({
-      title: folderConflict ? 'Folder Already Exists' : 'File Already Exists',
-      message: `A ${folderConflict ? 'folder' : 'file'} named "${targetName}" already exists here.`,
-      detail: folderConflict
-        ? 'Keep Both creates a new folder name. Skip leaves the existing folder untouched.'
-        : 'Keep Both creates a new name. Replace overwrites the existing file.',
-      size: 'wide',
-      variant: 'warning',
-      icon: folderConflict ? 'folder' : 'file',
-      facts: conflictFacts({
-        entry,
-        existingEntry,
-        targetPath,
-        keepBothName,
-        mode,
-        dateFormat,
-      }),
-      checkboxLabel: allowApplyToAll ? conflictApplyLabel(conflictKind, mode) : '',
-      actions: folderConflict
+    let extraFacts = [];
+
+    while (true) {
+      const actions = folderConflict
         ? [
             { value: 'cancel', label: 'Cancel', cancel: true },
             { value: 'skip', label: 'Skip' },
@@ -324,18 +433,60 @@ export function useFileTransferGuards() {
             { value: 'cancel', label: 'Cancel', cancel: true },
             { value: 'skip', label: 'Skip' },
             { value: 'keepBoth', label: 'Keep Both', primary: true, default: true },
+            { value: 'replaceNewer', label: 'If Incoming Newer' },
+            { value: 'replaceOlder', label: 'If Incoming Older' },
+            ...(canCompareChecksums(entry, existingEntry)
+              ? [{ value: 'checksum', label: 'Compare Checksum' }]
+              : []),
             { value: 'replace', label: 'Replace', variant: 'danger', destructive: true },
-          ],
-    });
+          ];
 
-    if (!result) {
-      return null;
+      const result = await dialog.choice({
+        title: folderConflict ? 'Folder Already Exists' : 'File Already Exists',
+        message: `A ${folderConflict ? 'folder' : 'file'} named "${targetName}" already exists here.`,
+        detail: folderConflict
+          ? 'Keep Both creates a new folder name. Skip leaves the existing folder untouched.'
+          : 'Compare metadata, keep both, skip, replace, or replace only when the incoming file is newer or older.',
+        size: 'wide',
+        variant: 'warning',
+        icon: folderConflict ? 'folder' : 'file',
+        facts: conflictFacts({
+          entry,
+          existingEntry,
+          targetPath,
+          keepBothName,
+          mode,
+          dateFormat,
+          extraFacts,
+        }),
+        checkboxLabel: allowApplyToAll ? conflictApplyLabel(conflictKind, mode) : '',
+        actions,
+      });
+
+      if (!result) {
+        return null;
+      }
+
+      if (result.value === 'checksum') {
+        try {
+          const comparison = await compareFileChecksums(entry.path, existingEntry.path);
+          extraFacts = checksumFacts(comparison);
+        } catch (error) {
+          await dialog.alert({
+            title: 'Checksum Comparison Failed',
+            message: error?.message || 'The files could not be compared by checksum.',
+            variant: 'warning',
+          });
+        }
+
+        continue;
+      }
+
+      return {
+        action: result.value,
+        applyToAll: Boolean(result.applyToAll),
+      };
     }
-
-    return {
-      action: result.value,
-      applyToAll: Boolean(result.applyToAll),
-    };
   }
 
   async function chooseSymlinkMode(entries, mode, requestedMode = null) {
@@ -460,15 +611,17 @@ export function useFileTransferGuards() {
             }
           }
 
-          if (resolution.action === 'skip') {
+          const resolvedAction = conditionalConflictAction(resolution.action, entry, existingEntry);
+
+          if (resolvedAction === 'skip') {
             skipped.push({ entry, reason: 'conflict' });
             continue;
           }
 
-          if (resolution.action === 'keepBoth') {
+          if (resolvedAction === 'keepBoth') {
             targetName = keepBothName;
             targetPath = joinPath(targetDirectory, targetName);
-          } else if (resolution.action === 'replace') {
+          } else if (resolvedAction === 'replace') {
             overwrite = true;
           }
         }
@@ -494,6 +647,15 @@ export function useFileTransferGuards() {
     }
 
     if (items.length === 0) {
+      if (skipped.length > 0) {
+        await dialog.alert({
+          title: 'Items Skipped',
+          message: `${itemLabel(skipped.length)} were skipped because of name conflicts.`,
+          detail: namesPreview(skipped.map((item) => item.entry)),
+          variant: 'warning',
+        });
+      }
+
       return null;
     }
 
@@ -659,43 +821,30 @@ export function useFileTransferGuards() {
     let resolvedTargetPath = targetPath;
 
     if (existingEntry && cleanPath(existingEntry.path) !== cleanPath(entry.path)) {
-      const folderConflict = shouldUseFolderConflictActions(entry, existingEntry);
-      const dateFormat = store.appSettings.dateFormat;
+      const conflictKind = shouldUseFolderConflictActions(entry, existingEntry) ? 'folder' : 'file';
       const keepBothName = uniqueTargetName(targetName, targetEntries, entry);
-      const result = await dialog.choice({
-        title: folderConflict ? 'Rename Conflict' : 'Replace Existing File?',
-        message: `"${targetName}" already exists in this folder.`,
-        detail: folderConflict
-          ? 'Carelo will not replace folders during rename. Keep Both creates a unique name instead.'
-          : 'Keep Both is the safe default. Replace permanently overwrites the existing file.',
-        size: 'wide',
-        variant: 'warning',
-        icon: folderConflict ? 'folder' : 'file',
-        facts: conflictFacts({
-          entry,
-          existingEntry,
-          targetPath,
-          keepBothName,
-          incomingLabel: 'Renaming',
-          dateFormat,
-        }),
-        actions: folderConflict
-          ? [
-              { value: 'cancel', label: 'Cancel', cancel: true },
-              { value: 'keepBoth', label: 'Keep Both', primary: true, default: true },
-            ]
-          : [
-              { value: 'cancel', label: 'Cancel', cancel: true },
-              { value: 'keepBoth', label: 'Keep Both', primary: true, default: true },
-              { value: 'replace', label: 'Replace', variant: 'danger', destructive: true },
-            ],
+      const result = await chooseConflictResolution({
+        entry,
+        existingEntry,
+        targetName,
+        targetPath,
+        keepBothName,
+        conflictKind,
+        mode: 'rename',
+        allowApplyToAll: false,
       });
 
       if (!result) {
         return false;
       }
 
-      if (result.value === 'keepBoth') {
+      const resolvedAction = conditionalConflictAction(result.action, entry, existingEntry);
+
+      if (resolvedAction === 'skip') {
+        return false;
+      }
+
+      if (resolvedAction === 'keepBoth') {
         resolvedTargetPath = joinPath(targetDirectory, keepBothName);
       }
     }

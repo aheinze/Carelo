@@ -166,6 +166,10 @@ export async function getFileMetadata(path) {
   return invokeCommand('get_file_metadata', { path }, { sudo: true });
 }
 
+export async function compareFileChecksums(leftPath, rightPath) {
+  return invokeCommand('compare_file_checksums', { leftPath, rightPath });
+}
+
 export async function readTextPreview(path, maxBytes = 96 * 1024) {
   return invokeCommand('read_text_preview', { path, maxBytes });
 }
@@ -338,6 +342,7 @@ export function useFileOperations() {
     cancelFileOperation,
     createOAuthTokens,
     createMediaStreamUrl,
+    compareFileChecksums,
     copyItems,
     createFolder,
     deleteItems,

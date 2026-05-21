@@ -275,6 +275,10 @@ defineProps({
       <path d="M5 12h14" />
     </template>
 
+    <template v-else-if="name === 'minus'">
+      <path d="M5 12h14" />
+    </template>
+
     <template v-else-if="name === 'x'">
       <path d="M7 7l10 10" />
       <path d="M17 7 7 17" />

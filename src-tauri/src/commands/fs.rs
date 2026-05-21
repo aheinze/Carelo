@@ -16,6 +16,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use rand::distr::{Alphanumeric, SampleString};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
@@ -112,6 +113,19 @@ pub struct TextPreview {
     pub text: String,
     pub truncated: bool,
     pub bytes_read: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChecksumComparison {
+    pub algorithm: String,
+    pub left_path: String,
+    pub right_path: String,
+    pub left_hash: String,
+    pub right_hash: String,
+    pub left_bytes: u64,
+    pub right_bytes: u64,
+    pub equal: bool,
 }
 
 fn default_true() -> bool {
@@ -573,6 +587,26 @@ pub async fn get_file_metadata(
         move |password| sudo::get_file_metadata(&password, &sudo_path),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn compare_file_checksums(
+    left_path: String,
+    right_path: String,
+) -> Result<FileChecksumComparison, FsError> {
+    if archive::is_archive_uri(&left_path)
+        || archive::is_archive_uri(&right_path)
+        || parse_remote_path(&left_path).is_some()
+        || parse_remote_path(&right_path).is_some()
+    {
+        return Err(FsError::new(
+            "checksum_unsupported",
+            "Checksum comparison is available for local files only.",
+            None,
+        ));
+    }
+
+    run_local(move |_| compare_local_file_checksums(&left_path, &right_path)).await
 }
 
 #[tauri::command]
@@ -2021,6 +2055,73 @@ fn read_local_text_preview(path: &str, max_bytes: usize) -> FsResult<TextPreview
         truncated,
         bytes_read: bytes.len(),
     })
+}
+
+fn compare_local_file_checksums(
+    left_path: &str,
+    right_path: &str,
+) -> FsResult<FileChecksumComparison> {
+    let left = expand_local_path(left_path)?;
+    let right = expand_local_path(right_path)?;
+    let (left_hash, left_bytes) = file_sha256(&left)?;
+    let (right_hash, right_bytes) = file_sha256(&right)?;
+
+    Ok(FileChecksumComparison {
+        algorithm: "SHA-256".to_string(),
+        left_path: left.to_string_lossy().into_owned(),
+        right_path: right.to_string_lossy().into_owned(),
+        equal: left_hash == right_hash,
+        left_hash,
+        right_hash,
+        left_bytes,
+        right_bytes,
+    })
+}
+
+fn file_sha256(path: &Path) -> FsResult<(String, u64)> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| FsError::io("Unable to read checksum metadata", path, error))?;
+
+    if !metadata.is_file() {
+        return Err(FsError::new(
+            "checksum_not_file",
+            "Checksum comparison is available for files only.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    let mut file = fs::File::open(path)
+        .map_err(|error| FsError::io("Unable to read file checksum", path, error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut bytes_read = 0_u64;
+
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| FsError::io("Unable to read file checksum", path, error))?;
+
+        if count == 0 {
+            break;
+        }
+
+        hasher.update(&buffer[..count]);
+        bytes_read = bytes_read.saturating_add(count as u64);
+    }
+
+    Ok((hex_string(&hasher.finalize()), bytes_read))
+}
+
+fn hex_string(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+
+    output
 }
 
 fn read_local_media_preview(path: &str, max_bytes: u64) -> FsResult<Vec<u8>> {

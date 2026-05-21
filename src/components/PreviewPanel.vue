@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import {
   cancelFileOperation,
@@ -31,6 +31,7 @@ import {
 import { fileTypeIconKind, fileTypeIconName } from '../utils/fileTypeIcons';
 
 const store = useFileManagerStore();
+const PdfPreview = defineAsyncComponent(() => import('./PdfPreview.vue'));
 const fallbackPaneId = computed(() => (store.activePaneId === 'left' ? 'right' : 'left'));
 const previewSelectionEntries = computed(() => {
   const activeSelection = store.selectedEntriesFor(store.activePaneId);
@@ -570,18 +571,6 @@ function shouldShowImage(entry) {
 
 function shouldShowPdfPreview(entry) {
   return isPdfEntry(entry) && !isArchivePath(entry.path) && !isRemotePath(entry.path);
-}
-
-function pdfPreviewUrl(entry) {
-  return appendUrlFragment(localFileAssetUrl(entry?.path), 'toolbar=0');
-}
-
-function appendUrlFragment(url, fragment) {
-  if (!url) {
-    return '';
-  }
-
-  return `${url}${url.includes('#') ? '&' : '#'}${fragment}`;
 }
 
 function shouldShowTextPreview(entry) {
@@ -1229,11 +1218,7 @@ function logDetail(entry) {
             v-else-if="shouldShowPdfPreview(inspectedEntry)"
             class="preview-pdf-shell"
           >
-            <iframe
-              class="preview-pdf"
-              :src="pdfPreviewUrl(inspectedEntry)"
-              :title="`Preview of ${inspectedEntry.name}`"
-            ></iframe>
+            <PdfPreview :entry="inspectedEntry" />
           </span>
           <span
             v-else-if="shouldShowTextPreview(inspectedEntry)"
@@ -1633,18 +1618,8 @@ function logDetail(entry) {
 }
 
 .preview-pdf-shell {
-  --preview-pdf-toolbar-height: 44px;
   height: min(420px, 52vh);
   overflow: hidden;
-}
-
-.preview-pdf {
-  display: block;
-  width: 100%;
-  height: calc(100% + var(--preview-pdf-toolbar-height));
-  border: 0;
-  border-radius: 0;
-  transform: translateY(calc(var(--preview-pdf-toolbar-height) * -1));
 }
 
 .preview-video-shell,
