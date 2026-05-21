@@ -110,6 +110,7 @@ pub struct ContentSearchResult {
     pub line_text: String,
     pub match_start: usize,
     pub match_end: usize,
+    pub match_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3077,7 +3078,7 @@ fn search_local_content(
             continue;
         };
 
-        push_content_matches(
+        push_content_file_match(
             &mut results,
             limit,
             &root_path,
@@ -3092,7 +3093,22 @@ fn search_local_content(
     Ok(results)
 }
 
-fn push_content_matches(
+fn find_content_line_match(
+    line: &str,
+    query: &str,
+    options: &ContentSearchOptions,
+    matcher: Option<&regex::Regex>,
+) -> Option<(usize, usize)> {
+    if let Some(regex) = matcher {
+        regex
+            .find(line)
+            .map(|match_| (match_.start(), match_.end()))
+    } else {
+        find_plain_match(line, query, options.case_sensitive)
+    }
+}
+
+fn push_content_file_match(
     results: &mut Vec<ContentSearchResult>,
     limit: usize,
     root_path: &Path,
@@ -3102,6 +3118,10 @@ fn push_content_matches(
     options: &ContentSearchOptions,
     matcher: Option<&regex::Regex>,
 ) {
+    if results.len() >= limit {
+        return;
+    }
+
     let name = path
         .file_name()
         .unwrap_or_else(|| OsStr::new(""))
@@ -3113,33 +3133,34 @@ fn push_content_matches(
         .unwrap_or(root_path)
         .to_string_lossy()
         .into_owned();
+    let mut first_result = None;
+    let mut match_count = 0;
 
     for (line_index, line) in content.lines().enumerate() {
-        let found = if let Some(regex) = matcher {
-            regex
-                .find(line)
-                .map(|match_| (match_.start(), match_.end()))
-        } else {
-            find_plain_match(line, query, options.case_sensitive)
-        };
-
-        let Some((match_start, match_end)) = found else {
+        let Some((match_start, match_end)) = find_content_line_match(line, query, options, matcher)
+        else {
             continue;
         };
 
-        results.push(ContentSearchResult {
-            name: name.clone(),
-            path: path_string.clone(),
-            parent_path: parent_path.clone(),
-            line_number: line_index + 1,
-            line_text: line_text_with_limit(line),
-            match_start,
-            match_end,
-        });
+        match_count += 1;
 
-        if results.len() >= limit {
-            break;
+        if first_result.is_none() {
+            first_result = Some(ContentSearchResult {
+                name: name.clone(),
+                path: path_string.clone(),
+                parent_path: parent_path.clone(),
+                line_number: line_index + 1,
+                line_text: line_text_with_limit(line),
+                match_start,
+                match_end,
+                match_count: 1,
+            });
         }
+    }
+
+    if let Some(mut result) = first_result {
+        result.match_count = match_count;
+        results.push(result);
     }
 }
 
@@ -3940,6 +3961,43 @@ mod tests {
         assert!(results[0]
             .line_text
             .contains("Needle in an office document"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_search_returns_one_result_per_file() {
+        let root = std::env::temp_dir().join(format!("carelo-dedupe-search-{}", random_token(10)));
+        let repeated_path = root.join("repeated.txt");
+        let single_path = root.join("single.txt");
+
+        fs::create_dir_all(&root).expect("create search root");
+        fs::write(
+            &repeated_path,
+            "Needle on the first line\nquiet line\nNeedle on another line",
+        )
+        .expect("write repeated file");
+        fs::write(&single_path, "Needle once").expect("write single file");
+
+        let mut options = default_content_search_options();
+        options.limit = 10;
+
+        let results = search_local_content(root.to_str().unwrap(), "needle", options)
+            .expect("search repeated matches");
+
+        let repeated = results
+            .iter()
+            .find(|result| result.name == "repeated.txt")
+            .expect("repeated file result");
+        let single = results
+            .iter()
+            .find(|result| result.name == "single.txt")
+            .expect("single file result");
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(repeated.match_count, 2);
+        assert_eq!(repeated.line_number, 1);
+        assert_eq!(single.match_count, 1);
 
         let _ = fs::remove_dir_all(root);
     }

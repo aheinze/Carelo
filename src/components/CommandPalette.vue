@@ -19,6 +19,13 @@ const error = ref('');
 let searchTimer = null;
 let searchVersion = 0;
 
+function pluralize(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+const contentMatchedLineCount = computed(() => (
+  results.value.reduce((total, result) => total + Math.max(Number(result.matchCount) || 1, 1), 0)
+));
 const currentMode = computed(() => store.fileSearchMode || 'files');
 const activeRoot = computed(() => (
   store.effectiveDirectoryFor(store.activePaneId) || store.activeTabFor(store.activePaneId)?.currentPath || '~'
@@ -47,7 +54,11 @@ const statusText = computed(() => {
     return 'Search unavailable';
   }
 
-  return `${results.value.length} ${currentMode.value === 'content' ? 'matches' : 'results'}`;
+  if (currentMode.value === 'content') {
+    return `${pluralize(results.value.length, 'file')}, ${pluralize(contentMatchedLineCount.value, 'line')}`;
+  }
+
+  return pluralize(results.value.length, 'result');
 });
 const inputPlaceholder = computed(() => (
   currentMode.value === 'content'
@@ -214,15 +225,19 @@ function resultIcon(result) {
 }
 
 function resultKey(result) {
-  return currentMode.value === 'content'
-    ? `${result.path}:${result.lineNumber}`
-    : result.path;
+  return result.path;
 }
 
 function resultTitle(result) {
-  return currentMode.value === 'content'
-    ? `${result.name}:${result.lineNumber}`
-    : result.name;
+  return result.name;
+}
+
+function contentResultMeta(result) {
+  const lineNumber = Math.max(Number(result?.lineNumber) || 1, 1);
+  const matchCount = Math.max(Number(result?.matchCount) || 1, 1);
+  const lineCountText = matchCount === 1 ? '1 line' : `${matchCount} lines`;
+
+  return `Line ${lineNumber} / ${lineCountText}`;
 }
 
 function resultDetail(result) {
@@ -363,7 +378,13 @@ watch(selectedIndex, () => {
                 <AppIcon :name="resultIcon(result)" :size="16" :stroke-width="1.8" />
               </span>
               <span class="command-palette__result-main">
-                <span class="command-palette__name">{{ resultTitle(result) }}</span>
+                <span class="command-palette__title-row">
+                  <span class="command-palette__name">{{ resultTitle(result) }}</span>
+                  <span
+                    v-if="currentMode === 'content'"
+                    class="command-palette__match-meta"
+                  >{{ contentResultMeta(result) }}</span>
+                </span>
                 <span
                   v-if="currentMode === 'content' && result.lineText"
                   class="command-palette__snippet"
@@ -704,18 +725,35 @@ watch(selectedIndex, () => {
   gap: 3px;
 }
 
+.command-palette__title-row {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .command-palette__name,
 .command-palette__path,
-.command-palette__snippet {
+.command-palette__snippet,
+.command-palette__match-meta {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .command-palette__name {
+  min-width: 0;
   color: var(--text);
   font-size: 13px;
   font-weight: 650;
+  line-height: 1.15;
+}
+
+.command-palette__match-meta {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 620;
   line-height: 1.15;
 }
 
