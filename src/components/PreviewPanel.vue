@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import {
   cancelFileOperation,
+  createMediaStreamUrl,
   getFileMetadata,
   isRemotePath,
   localFileAssetUrl,
@@ -179,8 +180,8 @@ const audioPreviewMimeType = ref('');
 const videoFailed = ref(false);
 const videoLoading = ref(false);
 const videoReady = ref(false);
+const videoElementRef = ref(null);
 const videoPreviewUrl = ref('');
-const videoPreviewMimeType = ref('');
 const textPreview = ref('');
 const textPreviewLoading = ref(false);
 const textPreviewError = ref('');
@@ -191,11 +192,16 @@ const metadataError = ref('');
 const activeInspectorSection = ref('info');
 const mediaPreviewFallbackMaxBytes = 128 * 1024 * 1024;
 const mediaPreviewFallbackDelayMs = 1800;
+const videoHaveMetadataReadyState = 1;
+const videoReadyPollIntervalMs = 350;
+const videoReadyPollMaxAttempts = 20;
 let metadataLoadVersion = 0;
 let audioPreviewLoadVersion = 0;
 let videoPreviewLoadVersion = 0;
 let audioPreviewFallbackTimer = null;
 let videoPreviewFallbackTimer = null;
+let videoReadyPollTimer = null;
+let videoReadyPollAttempts = 0;
 
 const inspectorSections = [
   { id: 'info', label: 'Info', icon: 'info', size: 17, strokeWidth: 2 },
@@ -354,7 +360,7 @@ watch(
 
 watch(
   () => [inspectedEntry.value?.path, inspectedEntry.value?.size, inspectedEntry.value?.name],
-  () => {
+  async () => {
     videoPreviewLoadVersion += 1;
     const loadVersion = videoPreviewLoadVersion;
     revokeVideoPreviewUrl();
@@ -373,18 +379,32 @@ watch(
       return;
     }
 
-    const assetUrl = localFileAssetUrl(entry.path);
+    videoLoading.value = true;
 
-    if (!assetUrl) {
+    try {
+      const streamUrl = await createMediaStreamUrl(entry.path);
+
+      if (videoPreviewLoadVersion !== loadVersion) {
+        return;
+      }
+
+      videoPreviewUrl.value = streamUrl || localFileAssetUrl(entry.path);
+    } catch (error) {
+      if (videoPreviewLoadVersion !== loadVersion) {
+        return;
+      }
+
+      videoPreviewUrl.value = localFileAssetUrl(entry.path);
+    }
+
+    if (!videoPreviewUrl.value) {
       videoFailed.value = true;
       videoLoading.value = false;
       return;
     }
 
-    videoLoading.value = true;
-    videoPreviewMimeType.value = videoMimeType(entry.name) || 'application/octet-stream';
-    videoPreviewUrl.value = assetUrl;
     scheduleVideoBlobFallback(loadVersion);
+    startVideoReadyPolling();
   },
   { immediate: true },
 );
@@ -552,6 +572,18 @@ function shouldShowPdfPreview(entry) {
   return isPdfEntry(entry) && !isArchivePath(entry.path) && !isRemotePath(entry.path);
 }
 
+function pdfPreviewUrl(entry) {
+  return appendUrlFragment(localFileAssetUrl(entry?.path), 'toolbar=0');
+}
+
+function appendUrlFragment(url, fragment) {
+  if (!url) {
+    return '';
+  }
+
+  return `${url}${url.includes('#') ? '&' : '#'}${fragment}`;
+}
+
 function shouldShowTextPreview(entry) {
   return isTextEntry(entry) && !isArchivePath(entry.path) && !isRemotePath(entry.path);
 }
@@ -611,6 +643,15 @@ function clearVideoPreviewFallbackTimer() {
   }
 }
 
+function clearVideoReadyPolling() {
+  if (videoReadyPollTimer) {
+    clearTimeout(videoReadyPollTimer);
+    videoReadyPollTimer = null;
+  }
+
+  videoReadyPollAttempts = 0;
+}
+
 function scheduleAudioBlobFallback(loadVersion) {
   clearAudioPreviewFallbackTimer();
   audioPreviewFallbackTimer = window.setTimeout(() => {
@@ -622,7 +663,8 @@ function scheduleAudioBlobFallback(loadVersion) {
       !audioReady.value &&
       !audioFailed.value &&
       audioPreviewUrl.value &&
-      !audioPreviewUrl.value.startsWith('blob:')
+      !audioPreviewUrl.value.startsWith('blob:') &&
+      canUseMediaBlobFallback(inspectedEntry.value)
     ) {
       loadAudioBlobFallback();
     }
@@ -640,7 +682,8 @@ function scheduleVideoBlobFallback(loadVersion) {
       !videoReady.value &&
       !videoFailed.value &&
       videoPreviewUrl.value &&
-      !videoPreviewUrl.value.startsWith('blob:')
+      !videoPreviewUrl.value.startsWith('blob:') &&
+      canUseMediaBlobFallback(inspectedEntry.value)
     ) {
       loadVideoBlobFallback();
     }
@@ -649,9 +692,9 @@ function scheduleVideoBlobFallback(loadVersion) {
 
 function revokeVideoPreviewUrl() {
   clearVideoPreviewFallbackTimer();
+  clearVideoReadyPolling();
   revokeObjectUrl(videoPreviewUrl.value);
   videoPreviewUrl.value = '';
-  videoPreviewMimeType.value = '';
 }
 
 function revokeAudioPreviewUrl() {
@@ -725,8 +768,8 @@ async function loadVideoBlobFallback() {
     }
 
     revokeVideoPreviewUrl();
-    videoPreviewMimeType.value = mimeType;
     videoPreviewUrl.value = url;
+    startVideoReadyPolling();
   } catch (error) {
     if (videoPreviewLoadVersion !== loadVersion) {
       return;
@@ -763,9 +806,59 @@ async function handleAudioError(event) {
 
 function handleVideoReady() {
   clearVideoPreviewFallbackTimer();
+  clearVideoReadyPolling();
   videoReady.value = true;
   videoFailed.value = false;
   videoLoading.value = false;
+}
+
+function hasLoadedVideoMetadata(video) {
+  return Boolean(
+    video &&
+    (
+      video.readyState >= videoHaveMetadataReadyState ||
+      video.videoWidth > 0 ||
+      video.videoHeight > 0 ||
+      Number.isFinite(video.duration) ||
+      video.seekable?.length > 0
+    ),
+  );
+}
+
+function checkVideoReadyState(event) {
+  const video = event?.currentTarget || videoElementRef.value;
+
+  if (hasLoadedVideoMetadata(video)) {
+    handleVideoReady();
+    return true;
+  }
+
+  return false;
+}
+
+function startVideoReadyPolling() {
+  clearVideoReadyPolling();
+
+  videoReadyPollTimer = window.setTimeout(pollVideoReadyState, videoReadyPollIntervalMs);
+}
+
+function pollVideoReadyState() {
+  videoReadyPollTimer = null;
+
+  if (!videoLoading.value || videoReady.value || videoFailed.value || !videoPreviewUrl.value) {
+    clearVideoReadyPolling();
+    return;
+  }
+
+  if (checkVideoReadyState()) {
+    return;
+  }
+
+  videoReadyPollAttempts += 1;
+
+  if (videoReadyPollAttempts < videoReadyPollMaxAttempts) {
+    videoReadyPollTimer = window.setTimeout(pollVideoReadyState, videoReadyPollIntervalMs);
+  }
 }
 
 async function handleVideoError(event) {
@@ -1078,16 +1171,24 @@ function logDetail(entry) {
           >
             <video
               v-if="videoPreviewUrl"
+              ref="videoElementRef"
               :key="videoPreviewUrl"
+              :src="videoPreviewUrl"
               class="preview-video"
               controls
               playsinline
               preload="metadata"
+              @loadedmetadata="handleVideoReady"
               @loadeddata="handleVideoReady"
               @canplay="handleVideoReady"
+              @canplaythrough="handleVideoReady"
+              @durationchange="checkVideoReadyState"
+              @progress="checkVideoReadyState"
+              @suspend="checkVideoReadyState"
+              @play="handleVideoReady"
+              @playing="handleVideoReady"
               @error="handleVideoError"
             >
-              <source :src="videoPreviewUrl" :type="videoPreviewMimeType" />
               Your system webview cannot play this video.
             </video>
             <span v-if="videoLoading && !videoReady && !videoFailed" class="preview-media-status">
@@ -1124,12 +1225,16 @@ function logDetail(entry) {
               Audio preview unavailable
             </span>
           </span>
-          <iframe
+          <span
             v-else-if="shouldShowPdfPreview(inspectedEntry)"
-            class="preview-pdf"
-            :src="localFileAssetUrl(inspectedEntry.path)"
-            :title="`Preview of ${inspectedEntry.name}`"
-          ></iframe>
+            class="preview-pdf-shell"
+          >
+            <iframe
+              class="preview-pdf"
+              :src="pdfPreviewUrl(inspectedEntry)"
+              :title="`Preview of ${inspectedEntry.name}`"
+            ></iframe>
+          </span>
           <span
             v-else-if="shouldShowTextPreview(inspectedEntry)"
             class="preview-text-shell"
@@ -1518,7 +1623,7 @@ function logDetail(entry) {
 
 .preview-image,
 .preview-video,
-.preview-pdf {
+.preview-pdf-shell {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
@@ -1527,9 +1632,19 @@ function logDetail(entry) {
   background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
-.preview-pdf {
+.preview-pdf-shell {
+  --preview-pdf-toolbar-height: 44px;
   height: min(420px, 52vh);
+  overflow: hidden;
+}
+
+.preview-pdf {
+  display: block;
+  width: 100%;
+  height: calc(100% + var(--preview-pdf-toolbar-height));
   border: 0;
+  border-radius: 0;
+  transform: translateY(calc(var(--preview-pdf-toolbar-height) * -1));
 }
 
 .preview-video-shell,

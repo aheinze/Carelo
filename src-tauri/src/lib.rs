@@ -9,12 +9,12 @@ pub mod window_state;
 use commands::app::quit_app;
 use commands::fs::{
     add_remote_volume, archive_items, cancel_file_operation, copy_items, create_folder,
-    delete_items, get_file_metadata, get_home_directory, list_directory, list_open_with_apps,
-    list_remote_volumes, list_volumes, measure_items_size, mount_volume, move_items, open_with_app,
-    open_with_default_app, pause_file_operation, read_media_preview, read_text_preview,
-    remove_remote_volume, rename_item, resume_file_operation, reveal_in_file_manager,
-    run_custom_tool, same_volume, search_content, search_files, unarchive_items,
-    FileOperationState,
+    create_media_stream_url, delete_items, get_file_metadata, get_home_directory, list_directory,
+    list_open_with_apps, list_remote_volumes, list_volumes, measure_items_size, mount_volume,
+    move_items, open_with_app, open_with_default_app, pause_file_operation, read_media_preview,
+    read_text_preview, remove_remote_volume, rename_item, resume_file_operation,
+    reveal_in_file_manager, run_custom_tool, same_volume, search_content, search_files,
+    unarchive_items, FileOperationState, MediaStreamState,
 };
 use commands::oauth::create_oauth_tokens;
 use commands::store::{
@@ -35,6 +35,7 @@ pub fn run() {
         .manage(TerminalState::default())
         .manage(RemoteVolumeState::default())
         .manage(FileOperationState::default())
+        .manage(MediaStreamState::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let store = AppStoreState::initialize()
@@ -50,6 +51,7 @@ pub fn run() {
             get_file_metadata,
             read_text_preview,
             read_media_preview,
+            create_media_stream_url,
             get_home_directory,
             list_volumes,
             mount_volume,

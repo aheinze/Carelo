@@ -174,6 +174,14 @@ export async function readMediaPreview(path, maxBytes = 128 * 1024 * 1024) {
   return invokeCommand('read_media_preview', { path, maxBytes });
 }
 
+export async function createMediaStreamUrl(path) {
+  if (!hasTauriBridge() || !path || isRemotePath(path) || isArchivePath(path)) {
+    return '';
+  }
+
+  return invokeCommand('create_media_stream_url', { path });
+}
+
 export async function getHomeDirectory() {
   return invokeCommand('get_home_directory');
 }
@@ -329,6 +337,7 @@ export function useFileOperations() {
     areSameVolume,
     cancelFileOperation,
     createOAuthTokens,
+    createMediaStreamUrl,
     copyItems,
     createFolder,
     deleteItems,
