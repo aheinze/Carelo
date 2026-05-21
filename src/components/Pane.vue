@@ -1712,6 +1712,7 @@ async function handleContextAction(action) {
     :data-pane-id="paneId"
     :aria-label="`${title} file pane`"
     tabindex="0"
+    @focusin="store.setActivePane(paneId)"
     @click="store.setActivePane(paneId)"
     @keydown.up.prevent.stop="store.moveSelection(paneId, -1, { extend: $event.shiftKey })"
     @keydown.down.prevent.stop="store.moveSelection(paneId, 1, { extend: $event.shiftKey })"
@@ -1863,6 +1864,7 @@ async function handleContextAction(action) {
           :date-format="store.appSettings.dateFormat"
           :refresh-key="activeTab.loadVersion"
           :column-refresh-request="store.columnRefreshRequests[paneId]"
+          :column-selection-reset-key="store.columnSelectionResetKeys[paneId]"
           :dragging="isFileDragActive"
           :dragged-paths="draggedPaths"
           @select="handleFileSelect"
@@ -2070,7 +2072,7 @@ async function handleContextAction(action) {
   scrollbar-width: none;
   min-height: 46px;
   padding: 4px 14px 6px;
-  background: var(--pane-glass);
+  background: color-mix(in srgb, var(--pane-glass) 78%, var(--desktop-bg));
   border-bottom: 1px solid var(--separator);
 }
 

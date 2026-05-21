@@ -93,6 +93,10 @@ const props = defineProps({
     type: Object,
     default: null,
   },
+  columnSelectionResetKey: {
+    type: [Number, String],
+    default: 0,
+  },
   dateFormat: {
     type: String,
     default: 'system',
@@ -659,12 +663,50 @@ function resetColumnTrail() {
   columnTrail.value = [];
 }
 
+function clearCurrentColumnSelection() {
+  if (columnTrail.value.length === 0) {
+    return;
+  }
+
+  const currentIndex = columnTrail.value.length - 1;
+  const currentColumn = columnTrail.value[currentIndex];
+  const hasSelectionState = currentColumn.selectedIndex >= 0
+    || currentColumn.selectionAnchorIndex >= 0
+    || (currentColumn.selectedPaths || []).length > 0;
+
+  if (!hasSelectionState) {
+    return;
+  }
+
+  columnTrail.value = [
+    ...columnTrail.value.slice(0, currentIndex),
+    {
+      ...currentColumn,
+      selectedIndex: -1,
+      selectionAnchorIndex: -1,
+      selectedPaths: [],
+    },
+  ];
+}
+
 function activeColumnDirectory() {
   if (props.viewMode !== 'columns') {
     return props.directoryKey;
   }
 
   return columnTrail.value.at(-1)?.path || props.directoryKey;
+}
+
+function childPathForEntry(entry) {
+  return entry?.kind === 'directory' ? entry.path : archiveRootPath(entry?.path);
+}
+
+function hasEntryForColumnPath(path) {
+  const targetPath = cleanPath(path);
+
+  return props.entries.some((entry) =>
+    isBrowsableEntry(entry) && cleanPath(childPathForEntry(entry)) === targetPath,
+  );
 }
 
 function emitActiveDirectory() {
@@ -811,7 +853,7 @@ async function loadChildColumn(entry, columnIndex, selectedIndex = -1) {
     return;
   }
 
-  const childPath = entry.kind === 'directory' ? entry.path : archiveRootPath(entry.path);
+  const childPath = childPathForEntry(entry);
   const childPosition = columnIndex;
   const loadVersion = columnLoadVersion + 1;
   columnLoadVersion = loadVersion;
@@ -1128,12 +1170,24 @@ function syncBaseColumnSelection() {
   const entry = props.entries[props.selectedIndex];
   const selectedEntries = props.entries.filter((candidate, index) => props.isEntrySelected(index));
 
+  if (props.selectedIndex < 0 && selectedEntries.length === 0) {
+    const firstColumnPath = columnTrail.value[0]?.path;
+
+    if (!firstColumnPath || hasEntryForColumnPath(firstColumnPath)) {
+      clearCurrentColumnSelection();
+      return;
+    }
+
+    resetColumnTrail();
+    return;
+  }
+
   if (selectedEntries.length !== 1 || !entry || !isBrowsableEntry(entry)) {
     resetColumnTrail();
     return;
   }
 
-  const childPath = entry.kind === 'directory' ? entry.path : archiveRootPath(entry.path);
+  const childPath = childPathForEntry(entry);
 
   if (columnTrail.value[0]?.path === childPath) {
     return;
@@ -1274,6 +1328,13 @@ watch(
     }
   },
 );
+watch(
+  () => props.columnSelectionResetKey,
+  () => {
+    clearCurrentColumnSelection();
+    emitColumnSummary();
+  },
+);
 watch(() => props.refreshKey, () => {
   if (props.viewMode !== 'columns') {
     resetColumnTrail();
@@ -1387,7 +1448,7 @@ watch(
             type="button"
             class="file-parent-card"
             :title="`Go to ${parentDirectory}`"
-            @click="openParentDirectory"
+            @dblclick="openParentDirectory"
             @keydown.stop
           >
             <span class="file-parent-card-frame" aria-hidden="true">
@@ -1597,7 +1658,7 @@ watch(
             type="button"
             class="file-parent-row"
             :title="`Go to ${parentDirectory}`"
-            @click="openParentDirectory"
+            @dblclick="openParentDirectory"
             @keydown.stop
           >
             <span class="file-parent-name">

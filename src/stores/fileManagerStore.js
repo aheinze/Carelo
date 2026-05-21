@@ -175,8 +175,8 @@ function clearTabEntryCache(tab) {
   tab.entries = [];
   tab.entriesPath = '';
   tab.loaded = false;
-  tab.selectedIndex = 0;
-  tab.selectionAnchorIndex = 0;
+  tab.selectedIndex = -1;
+  tab.selectionAnchorIndex = -1;
   tab.selectedPaths = [];
   tab.error = '';
 }
@@ -225,8 +225,8 @@ function createTab(
     loadVersion: 0,
     entries: [],
     entriesPath: '',
-    selectedIndex: 0,
-    selectionAnchorIndex: 0,
+    selectedIndex: -1,
+    selectionAnchorIndex: -1,
     selectedPaths: [],
     loading: false,
     loaded: false,
@@ -530,6 +530,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const columnSelectionStates = ref({ left: null, right: null });
   const columnTargetDirectories = ref({ left: null, right: null });
   const columnRefreshRequests = ref({ left: null, right: null });
+  const columnSelectionResetKeys = ref({ left: 0, right: 0 });
   const dragOperation = ref(null);
   let initializePromise = null;
   let stopOperationProgressListener = null;
@@ -806,7 +807,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       ? entries.findIndex((entry) => entry.path === previousPath)
       : -1;
 
-    tab.selectedIndex = selectedIndex >= 0 ? selectedIndex : entries.length > 0 ? 0 : -1;
+    tab.selectedIndex = selectedIndex >= 0 ? selectedIndex : -1;
     tab.selectionAnchorIndex = tab.selectedIndex;
   }
 
@@ -835,8 +836,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       tab.entries = [];
       tab.entriesPath = '';
       tab.loaded = false;
-      tab.selectedIndex = 0;
-      tab.selectionAnchorIndex = 0;
+      tab.selectedIndex = -1;
+      tab.selectionAnchorIndex = -1;
       tab.selectedPaths = [];
     }
 
@@ -860,7 +861,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       const focusedIndex = focusedPath
         ? visibleEntries.findIndex((entry) => entry.path === focusedPath)
         : -1;
-      tab.selectedIndex = focusedIndex >= 0 ? focusedIndex : visibleEntries.length > 0 ? 0 : -1;
+      tab.selectedIndex = focusedIndex >= 0 ? focusedIndex : -1;
       tab.selectionAnchorIndex = tab.selectedIndex;
     } catch (error) {
       if (tab.loadVersion !== loadVersion) {
@@ -1240,13 +1241,55 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   }
 
   function setActivePane(paneId) {
-    if (panes.value[paneId]) {
-      activePaneId.value = paneId;
+    if (!panes.value[paneId]) {
+      return;
     }
+
+    if (activePaneId.value !== paneId) {
+      clearInactivePaneSelections(paneId);
+    }
+
+    activePaneId.value = paneId;
   }
 
   function switchActivePane() {
-    activePaneId.value = activePaneId.value === 'left' ? 'right' : 'left';
+    setActivePane(activePaneId.value === 'left' ? 'right' : 'left');
+  }
+
+  function resetPaneSelection(paneId) {
+    const tab = activeTabFor(paneId);
+
+    if (!tab) {
+      return;
+    }
+
+    const columnTarget = columnTargetDirectories.value[paneId];
+    const hasNestedColumnPath = tab.viewMode === 'columns'
+      && columnTarget
+      && normalizeComparablePath(columnTarget) !== normalizeComparablePath(tab.currentPath);
+
+    if (!hasNestedColumnPath) {
+      tab.selectedIndex = -1;
+      tab.selectionAnchorIndex = -1;
+    } else if (tab.selectedIndex >= 0) {
+      tab.selectionAnchorIndex = tab.selectedIndex;
+    }
+
+    tab.selectedPaths = [];
+    clearColumnPreviewEntry(paneId);
+    clearColumnSelectionState(paneId);
+    columnSelectionResetKeys.value = {
+      ...columnSelectionResetKeys.value,
+      [paneId]: (columnSelectionResetKeys.value[paneId] || 0) + 1,
+    };
+  }
+
+  function clearInactivePaneSelections(activePane) {
+    Object.keys(panes.value).forEach((paneId) => {
+      if (paneId !== activePane) {
+        resetPaneSelection(paneId);
+      }
+    });
   }
 
   function setActiveTab(paneId, tabId) {
@@ -1543,8 +1586,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       return;
     }
 
-    const currentIndex = tab.selectedIndex < 0 ? 0 : tab.selectedIndex;
-    const nextIndex = Math.min(entries.length - 1, Math.max(0, currentIndex + delta));
+    const nextIndex = tab.selectedIndex < 0
+      ? delta < 0 ? entries.length - 1 : 0
+      : Math.min(entries.length - 1, Math.max(0, tab.selectedIndex + delta));
     clearColumnPreviewEntry(paneId);
 
     if (options.extend) {
@@ -2197,6 +2241,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     volumes,
     favorites,
     columnRefreshRequests,
+    columnSelectionResetKeys,
     dragOperation,
     sidebarSections,
     initialize,
