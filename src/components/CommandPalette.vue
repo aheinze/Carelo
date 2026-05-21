@@ -6,6 +6,7 @@ import { useFileManagerStore } from '../stores/fileManagerStore';
 import { isArchivePath } from '../utils/archivePaths';
 
 const SEARCH_LIMIT = 80;
+const CONTENT_SEARCH_MAX_FILE_BYTES = 24 * 1024 * 1024;
 const store = useFileManagerStore();
 const input = ref(null);
 const resultList = ref(null);
@@ -110,7 +111,7 @@ async function runSearch() {
           respectIgnore: true,
           caseSensitive: false,
           regex: false,
-          maxFileBytes: 2 * 1024 * 1024,
+          maxFileBytes: CONTENT_SEARCH_MAX_FILE_BYTES,
         })
       : await searchFiles(activeRoot.value, query.value, {
           limit: SEARCH_LIMIT,
