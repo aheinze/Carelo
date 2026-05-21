@@ -34,6 +34,7 @@ const searchVisible = ref(false);
 const searchMatches = ref([]);
 const activeMatchIndex = ref(-1);
 const searchLoading = ref(false);
+const searchError = ref('');
 
 const pdfPreviewMaxBytes = 128 * 1024 * 1024;
 const minScale = 0.3;
@@ -50,6 +51,7 @@ let destroyed = false;
 const scaleLabel = computed(() => `${Math.round(scale.value * 100)}%`);
 const matchLabel = computed(() => {
   if (searchLoading.value) return '...';
+  if (searchError.value) return 'Unavailable';
   if (!searchQuery.value.trim()) return '';
   if (searchMatches.value.length === 0) return '0/0';
   return `${activeMatchIndex.value + 1}/${searchMatches.value.length}`;
@@ -389,6 +391,7 @@ async function runSearch() {
   const document = pdfDocument.value;
   searchMatches.value = [];
   activeMatchIndex.value = -1;
+  searchError.value = '';
 
   if (!document || !query) {
     renderCurrentPage();
@@ -432,6 +435,14 @@ async function runSearch() {
         renderCurrentPage();
       }
     } else {
+      renderCurrentPage();
+    }
+  } catch (error) {
+    if (version === searchVersion) {
+      console.warn('PDF search failed', error);
+      searchMatches.value = [];
+      activeMatchIndex.value = -1;
+      searchError.value = 'unavailable';
       renderCurrentPage();
     }
   } finally {
