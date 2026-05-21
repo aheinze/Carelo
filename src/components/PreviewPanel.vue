@@ -1561,7 +1561,7 @@ function logDetail(entry) {
   width: 100%;
   padding: 7px 34px 0;
   border-bottom: 1px solid var(--hairline);
-  background: var(--footer-bg);
+  background: color-mix(in srgb, var(--pane-glass) 78%, var(--desktop-bg));
   box-shadow: 0 1px 0 var(--separator);
 }
 
