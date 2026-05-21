@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 #[cfg(unix)]
 use std::ffi::CStr;
 use std::ffi::OsStr;
@@ -277,7 +276,7 @@ impl FileProvider for LocalFileProvider {
             entries.push(Self::entry_from_path(&entry.path())?);
         }
 
-        entries.sort_by(compare_entries);
+        sort_entries(&mut entries);
         Ok(entries)
     }
 
@@ -556,12 +555,14 @@ fn c_string(value: *const libc::c_char) -> Option<String> {
     )
 }
 
-fn compare_entries(a: &FileEntry, b: &FileEntry) -> Ordering {
-    a.kind
-        .sort_rank()
-        .cmp(&b.kind.sort_rank())
-        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        .then_with(|| a.name.cmp(&b.name))
+fn sort_entries(entries: &mut [FileEntry]) {
+    entries.sort_by_cached_key(|entry| {
+        (
+            entry.kind.sort_rank(),
+            entry.name.to_lowercase(),
+            entry.name.clone(),
+        )
+    });
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ pub fn list_directory(password: &str, path: &str) -> FsResult<Vec<FileEntry>> {
     )?;
     let mut entries = parse_find_entries(&stdout)?;
 
-    entries.sort_by(compare_entries);
+    sort_entries(&mut entries);
     Ok(entries)
 }
 
@@ -1091,10 +1091,12 @@ fn symbolic_mode(mode: u32) -> String {
         .collect()
 }
 
-fn compare_entries(a: &FileEntry, b: &FileEntry) -> std::cmp::Ordering {
-    a.kind
-        .sort_rank()
-        .cmp(&b.kind.sort_rank())
-        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-        .then_with(|| a.name.cmp(&b.name))
+fn sort_entries(entries: &mut [FileEntry]) {
+    entries.sort_by_cached_key(|entry| {
+        (
+            entry.kind.sort_rank(),
+            entry.name.to_lowercase(),
+            entry.name.clone(),
+        )
+    });
 }

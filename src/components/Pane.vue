@@ -268,16 +268,24 @@ const canRunCustomToolContext = computed(() => {
 });
 
 function rootSummarySource() {
+  const tab = activeTab.value;
+  const visibleEntries = entries.value;
+  const selectedPaths = Array.isArray(tab?.selectedPaths) ? tab.selectedPaths : [];
+  const selectedPathSet = selectedPaths.length > 0 ? new Set(selectedPaths) : null;
+  const selectedEntries = selectedPaths.length > 0
+    ? visibleEntries.filter((entry) => selectedPathSet.has(entry.path))
+    : Number.isInteger(tab?.selectedIndex) && tab.selectedIndex >= 0
+      ? [visibleEntries[tab.selectedIndex]].filter(Boolean)
+      : [];
+
   return {
-    loading: activeTab.value?.loading,
-    error: activeTab.value?.error || '',
-    entries: entries.value,
+    loading: tab?.loading,
+    error: tab?.error || '',
+    entries: visibleEntries,
     rawEntryCount: rawEntryCount.value,
     searchQuery: activeSearchQuery.value,
     showHiddenFiles: store.showHiddenFiles,
-    selectedEntries: entries.value.filter((entry, index) =>
-      store.isEntrySelected(props.paneId, index),
-    ),
+    selectedEntries,
   };
 }
 
@@ -1843,6 +1851,7 @@ async function handleContextAction(action) {
           :raw-entry-count="rawEntryCount"
           :search-query="activeSearchQuery"
           :selected-index="activeTab.selectedIndex"
+          :selected-paths="activeTab.selectedPaths"
           :loading="activeTab.loading"
           :loaded="activeTab.loaded"
           :view-mode="activeTab.viewMode"

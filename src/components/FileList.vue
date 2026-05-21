@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import FileRow from './FileRow.vue';
 import { listDirectory } from '../composables/useFileOperations';
@@ -9,6 +9,16 @@ import { fileTypeIconKind, fileTypeIconName } from '../utils/fileTypeIcons';
 
 const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
+const LIST_ROW_HEIGHT = 29;
+const LIST_OVERSCAN_ROWS = 28;
+const COLUMN_ROW_HEIGHT = 29;
+const COLUMN_OVERSCAN_ROWS = 24;
+const GRID_BASE_PADDING_TOP = 36;
+const GRID_HORIZONTAL_PADDING = 60;
+const GRID_MIN_COLUMN_WIDTH = 206;
+const GRID_COLUMN_GAP = 34;
+const GRID_ROW_STRIDE = 214;
+const GRID_OVERSCAN_ROWS = 3;
 
 function fileTypeClass(entry, prefix) {
   return `${prefix}--${fileTypeIconKind(entry)}`;
@@ -30,6 +40,10 @@ const props = defineProps({
   selectedIndex: {
     type: Number,
     required: true,
+  },
+  selectedPaths: {
+    type: Array,
+    default: () => [],
   },
   loading: {
     type: Boolean,
@@ -110,7 +124,15 @@ const columnTrail = ref([]);
 const entryDropPath = ref('');
 const currentDirectoryDropActive = ref(false);
 const currentDirectoryDropPath = ref('');
+const listScrollTop = ref(0);
+const listViewportHeight = ref(0);
+const gridScrollTop = ref(0);
+const gridViewportHeight = ref(0);
+const gridViewportWidth = ref(0);
+const columnScrollTop = ref(0);
+const columnViewportHeight = ref(0);
 let columnLoadVersion = 0;
+let scrollerResizeObserver = null;
 
 const activeSearchQuery = computed(() => props.searchQuery.trim().toLowerCase());
 const isSearchFiltering = computed(() => activeSearchQuery.value.length > 0);
@@ -141,6 +163,153 @@ const baseColumn = computed(() => ({
 
 const columns = computed(() => [baseColumn.value, ...columnTrail.value]);
 const parentDirectory = computed(() => parentPathForDirectory(props.directoryKey));
+const materializedColumns = computed(() =>
+  columns.value.map((column) => ({
+    ...column,
+    visibleEntries: computeVisibleEntriesForColumn(column),
+  })),
+);
+
+function virtualRangeForRows(count, scrollTop, viewportHeight, rowHeight, overscanRows) {
+  const itemCount = Math.max(0, Number(count) || 0);
+
+  if (itemCount === 0) {
+    return {
+      start: 0,
+      end: 0,
+      paddingBefore: 0,
+      paddingAfter: 0,
+    };
+  }
+
+  const safeScrollTop = Math.max(0, Number(scrollTop) || 0);
+  const safeViewportHeight = Math.max(Number(viewportHeight) || rowHeight * 20, rowHeight);
+  const visibleCount = Math.ceil(safeViewportHeight / rowHeight) + (overscanRows * 2);
+  const rawStart = Math.max(0, Math.floor(safeScrollTop / rowHeight) - overscanRows);
+  const start = Math.min(rawStart, Math.max(0, itemCount - visibleCount));
+  const end = Math.min(itemCount, start + visibleCount);
+
+  return {
+    start,
+    end,
+    paddingBefore: start * rowHeight,
+    paddingAfter: Math.max(0, (itemCount - end) * rowHeight),
+  };
+}
+
+const listVirtualRange = computed(() => {
+  const parentOffset = parentDirectory.value ? LIST_ROW_HEIGHT : 0;
+  return virtualRangeForRows(
+    props.entries.length,
+    Math.max(0, listScrollTop.value - parentOffset),
+    listViewportHeight.value,
+    LIST_ROW_HEIGHT,
+    LIST_OVERSCAN_ROWS,
+  );
+});
+
+const virtualListItems = computed(() =>
+  props.entries
+    .slice(listVirtualRange.value.start, listVirtualRange.value.end)
+    .map((entry, offset) => ({
+      entry,
+      index: listVirtualRange.value.start + offset,
+    })),
+);
+
+const gridColumnCount = computed(() => {
+  const availableWidth = Math.max(0, (gridViewportWidth.value || 0) - GRID_HORIZONTAL_PADDING);
+  return Math.max(
+    1,
+    Math.floor((availableWidth + GRID_COLUMN_GAP) / (GRID_MIN_COLUMN_WIDTH + GRID_COLUMN_GAP)) || 1,
+  );
+});
+
+const gridVirtualRange = computed(() => {
+  const totalSlots = props.entries.length + (parentDirectory.value ? 1 : 0);
+  const columnsPerRow = gridColumnCount.value;
+  const totalRows = Math.ceil(totalSlots / columnsPerRow);
+
+  if (totalSlots === 0 || totalRows === 0) {
+    return {
+      startSlot: 0,
+      endSlot: 0,
+      paddingBefore: 0,
+      paddingAfter: 0,
+    };
+  }
+
+  const safeScrollTop = Math.max(0, gridScrollTop.value - GRID_BASE_PADDING_TOP);
+  const safeViewportHeight = Math.max(gridViewportHeight.value || GRID_ROW_STRIDE * 4, GRID_ROW_STRIDE);
+  const visibleRows = Math.ceil(safeViewportHeight / GRID_ROW_STRIDE) + (GRID_OVERSCAN_ROWS * 2);
+  const rawStartRow = Math.max(0, Math.floor(safeScrollTop / GRID_ROW_STRIDE) - GRID_OVERSCAN_ROWS);
+  const startRow = Math.min(rawStartRow, Math.max(0, totalRows - visibleRows));
+  const endRow = Math.min(totalRows, startRow + visibleRows);
+
+  return {
+    startSlot: startRow * columnsPerRow,
+    endSlot: Math.min(totalSlots, endRow * columnsPerRow),
+    paddingBefore: startRow * GRID_ROW_STRIDE,
+    paddingAfter: Math.max(0, (totalRows - endRow) * GRID_ROW_STRIDE),
+  };
+});
+
+const gridWindowStyle = computed(() => ({
+  '--virtual-padding-before': `${gridVirtualRange.value.paddingBefore}px`,
+  '--virtual-padding-after': `${gridVirtualRange.value.paddingAfter}px`,
+}));
+
+const virtualGridSlots = computed(() => {
+  const slots = [];
+  const hasParent = Boolean(parentDirectory.value);
+
+  for (let slotIndex = gridVirtualRange.value.startSlot; slotIndex < gridVirtualRange.value.endSlot; slotIndex += 1) {
+    if (hasParent && slotIndex === 0) {
+      slots.push({
+        key: 'parent',
+        type: 'parent',
+      });
+      continue;
+    }
+
+    const entryIndex = slotIndex - (hasParent ? 1 : 0);
+    const entry = props.entries[entryIndex];
+
+    if (entry) {
+      slots.push({
+        key: entry.path,
+        type: 'entry',
+        entry,
+        index: entryIndex,
+      });
+    }
+  }
+
+  return slots;
+});
+
+const virtualColumns = computed(() =>
+  materializedColumns.value.map((column) => {
+    const range = virtualRangeForRows(
+      column.visibleEntries.length,
+      Math.max(0, columnScrollTop.value - 6),
+      columnViewportHeight.value,
+      COLUMN_ROW_HEIGHT,
+      COLUMN_OVERSCAN_ROWS,
+    );
+
+    return {
+      ...column,
+      virtualRange: range,
+      virtualEntries: column.visibleEntries
+        .slice(range.start, range.end)
+        .map((entry, offset) => ({
+          entry,
+          index: range.start + offset,
+        })),
+    };
+  }),
+);
 
 function activeScroller() {
   if (props.viewMode === 'grid') {
@@ -154,6 +323,72 @@ function activeScroller() {
   return listScroller.value;
 }
 
+function updateListViewport() {
+  const scroller = listScroller.value;
+
+  if (!scroller) {
+    return;
+  }
+
+  listScrollTop.value = scroller.scrollTop;
+  listViewportHeight.value = scroller.clientHeight;
+}
+
+function updateGridViewport() {
+  const scroller = gridScroller.value;
+
+  if (!scroller) {
+    return;
+  }
+
+  gridScrollTop.value = scroller.scrollTop;
+  gridViewportHeight.value = scroller.clientHeight;
+  gridViewportWidth.value = scroller.clientWidth;
+}
+
+function updateColumnViewport() {
+  const scroller = columnScroller.value;
+
+  if (!scroller) {
+    return;
+  }
+
+  columnScrollTop.value = scroller.scrollTop;
+  columnViewportHeight.value = scroller.clientHeight;
+}
+
+function updateAllViewports() {
+  updateListViewport();
+  updateGridViewport();
+  updateColumnViewport();
+}
+
+function handleListScroll() {
+  updateListViewport();
+}
+
+function handleGridScroll() {
+  updateGridViewport();
+}
+
+function handleColumnScroll() {
+  updateColumnViewport();
+}
+
+function observeScrollers() {
+  nextTick(() => {
+    scrollerResizeObserver?.disconnect();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const targets = [listScroller.value, gridScroller.value, columnScroller.value].filter(Boolean);
+      scrollerResizeObserver = new ResizeObserver(updateAllViewports);
+      targets.forEach((target) => scrollerResizeObserver.observe(target));
+    }
+
+    updateAllViewports();
+  });
+}
+
 function resetScroll() {
   nextTick(() => {
     const scroller = activeScroller();
@@ -161,7 +396,42 @@ function resetScroll() {
     if (scroller) {
       scroller.scrollTop = 0;
     }
+
+    updateAllViewports();
   });
+}
+
+function scrollIndexIntoView(scroller, index, rowHeight, offset = 0) {
+  if (!scroller || index < 0) {
+    return false;
+  }
+
+  const itemTop = offset + (index * rowHeight);
+  const itemBottom = itemTop + rowHeight;
+  const viewportTop = scroller.scrollTop;
+  const viewportBottom = viewportTop + scroller.clientHeight;
+
+  if (itemTop < viewportTop) {
+    scroller.scrollTop = itemTop;
+    return true;
+  }
+
+  if (itemBottom > viewportBottom) {
+    scroller.scrollTop = Math.max(0, itemBottom - scroller.clientHeight);
+    return true;
+  }
+
+  return false;
+}
+
+function scrollGridIndexIntoView(scroller, index) {
+  if (!scroller || index < 0) {
+    return false;
+  }
+
+  const slotIndex = index + (parentDirectory.value ? 1 : 0);
+  const rowIndex = Math.floor(slotIndex / gridColumnCount.value);
+  return scrollIndexIntoView(scroller, rowIndex, GRID_ROW_STRIDE, GRID_BASE_PADDING_TOP);
 }
 
 function scrollSelectedIntoView() {
@@ -171,6 +441,23 @@ function scrollSelectedIntoView() {
     }
 
     const scroller = activeScroller();
+
+    if (props.viewMode === 'list') {
+      const didScroll = scrollIndexIntoView(
+        scroller,
+        props.selectedIndex,
+        LIST_ROW_HEIGHT,
+        parentDirectory.value ? LIST_ROW_HEIGHT : 0,
+      );
+      if (didScroll) updateListViewport();
+    } else if (props.viewMode === 'grid') {
+      const didScroll = scrollGridIndexIntoView(scroller, props.selectedIndex);
+      if (didScroll) updateGridViewport();
+    } else if (props.viewMode === 'columns') {
+      const didScroll = scrollIndexIntoView(scroller, props.selectedIndex, COLUMN_ROW_HEIGHT, 6);
+      if (didScroll) updateColumnViewport();
+    }
+
     const item = scroller?.querySelector(`[data-file-index="${props.selectedIndex}"]`);
 
     item?.scrollIntoView({ block: 'nearest' });
@@ -296,7 +583,7 @@ function sortEntries(entries) {
   });
 }
 
-function visibleEntriesForColumn(column) {
+function computeVisibleEntriesForColumn(column) {
   if (column.base) {
     return column.entries;
   }
@@ -309,6 +596,12 @@ function visibleEntriesForColumn(column) {
     : visibleEntries;
 
   return sortEntries(entries);
+}
+
+function visibleEntriesForColumn(column) {
+  return Array.isArray(column?.visibleEntries)
+    ? column.visibleEntries
+    : computeVisibleEntriesForColumn(column);
 }
 
 function emptyMessageForColumn(column) {
@@ -330,7 +623,15 @@ function selectedEntriesForColumn(column, columnIndex) {
   const visibleEntries = visibleEntriesForColumn(column);
 
   if (columnIndex === 0) {
-    return visibleEntries.filter((entry, index) => props.isEntrySelected(index));
+    const selectedPaths = Array.isArray(props.selectedPaths) ? props.selectedPaths : [];
+
+    if (selectedPaths.length > 0) {
+      const selectedPathSet = new Set(selectedPaths);
+      return visibleEntries.filter((entry) => selectedPathSet.has(entry.path));
+    }
+
+    const focusedEntry = visibleEntries[props.selectedIndex];
+    return focusedEntry ? [focusedEntry] : [];
   }
 
   const selectedPaths = new Set(column.selectedPaths || []);
@@ -371,8 +672,8 @@ function emitActiveDirectory() {
 }
 
 function activeColumnState() {
-  const activeColumnIndex = Math.max(0, columns.value.length - 1);
-  const column = columns.value[activeColumnIndex];
+  const activeColumnIndex = Math.max(0, materializedColumns.value.length - 1);
+  const column = materializedColumns.value[activeColumnIndex];
 
   if (!column) {
     return null;
@@ -440,7 +741,7 @@ function updateColumnSelection(columnIndex, selectedIndex, selectedPaths = [], s
 }
 
 function updateChildColumnSelection(entry, index, columnIndex, event = null) {
-  const column = columns.value[columnIndex];
+  const column = materializedColumns.value[columnIndex];
 
   if (!column || columnIndex === 0) {
     return;
@@ -599,7 +900,7 @@ function handleColumnContext(entry, index, columnIndex, event) {
   let operationEntries = [entry];
 
   if (columnIndex !== 0) {
-    const column = columns.value[columnIndex];
+    const column = materializedColumns.value[columnIndex];
     const isSelected = columnSelectionClass(column, columnIndex, index);
 
     if (isSelected) {
@@ -674,7 +975,7 @@ function handleEntryPointerDown(entry, index, columnIndex, event) {
   let operationEntries = [];
 
   if (columnIndex !== 0) {
-    const column = columns.value[columnIndex];
+    const column = materializedColumns.value[columnIndex];
 
     if (columnSelectionClass(column, columnIndex, index)) {
       operationEntries = selectedEntriesForColumn(column, columnIndex);
@@ -694,7 +995,7 @@ function emitEntryDragStart(entry, index, columnIndex, event, eventName) {
   let operationEntries = [];
 
   if (columnIndex !== 0) {
-    const column = columns.value[columnIndex];
+    const column = materializedColumns.value[columnIndex];
     const isSelected = columnSelectionClass(column, columnIndex, index);
 
     if (isSelected) {
@@ -915,11 +1216,34 @@ async function refreshColumnDirectory(path) {
   }
 }
 
+onMounted(() => {
+  observeScrollers();
+  if (typeof window !== 'undefined') {
+    window.addEventListener('resize', updateAllViewports);
+  }
+});
+
+onBeforeUnmount(() => {
+  scrollerResizeObserver?.disconnect();
+  scrollerResizeObserver = null;
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('resize', updateAllViewports);
+  }
+});
+
 watch(() => props.directoryKey, () => {
   resetColumnTrail();
   resetScroll();
 });
-watch(() => props.viewMode, resetScroll);
+watch(() => props.viewMode, () => {
+  observeScrollers();
+  resetScroll();
+});
+watch(
+  () => [props.loaded, props.loading, props.entries.length, parentDirectory.value],
+  observeScrollers,
+  { flush: 'post' },
+);
 watch(
   () => [props.viewMode, props.directoryKey, columnTrail.value.map((column) => column.path).join('\u0000')],
   emitActiveDirectory,
@@ -1054,9 +1378,11 @@ watch(
       role="list"
       aria-label="Directory grid"
       :data-drop-directory-path="directoryKey"
+      @scroll.passive="handleGridScroll"
     >
-      <div class="file-grid-window">
-        <div v-if="parentDirectory" class="file-grid-item file-parent-grid-item">
+      <div class="file-grid-window" :style="gridWindowStyle">
+        <template v-for="slot in virtualGridSlots" :key="slot.key">
+        <div v-if="slot.type === 'parent'" class="file-grid-item file-parent-grid-item">
           <button
             type="button"
             class="file-parent-card"
@@ -1072,36 +1398,36 @@ watch(
           </button>
         </div>
 
-        <div v-if="entries.length === 0 && parentDirectory" class="file-grid-empty-message">
-          {{ emptyDirectoryMessage }}
-        </div>
-
         <div
-          v-for="(entry, index) in entries"
-          :key="entry.path"
-          v-memo="[entry.path, entry.name, entry.size, entry.modifiedAt, isEntrySelected(index), entryDropPath === entry.path, dateFormat]"
+          v-else
+          v-memo="[slot.entry.path, slot.entry.name, slot.entry.size, slot.entry.modifiedAt, isEntrySelected(slot.index), entryDropPath === slot.entry.path, dateFormat]"
           class="file-grid-item"
-          :class="{ 'file-drop-target': entryDropPath === entry.path }"
-          :data-file-index="index"
-          :data-drop-entry-path="entry.path"
-          :data-drop-entry-kind="entry.kind"
+          :class="{ 'file-drop-target': entryDropPath === slot.entry.path }"
+          :data-file-index="slot.index"
+          :data-drop-entry-path="slot.entry.path"
+          :data-drop-entry-kind="slot.entry.kind"
           data-file-drag-source="true"
-          @pointerdown="handleEntryPointerDown(entry, index, 0, $event)"
-          @dragstart.stop="handleEntryDragStart(entry, index, 0, $event)"
+          @pointerdown="handleEntryPointerDown(slot.entry, slot.index, 0, $event)"
+          @dragstart.stop="handleEntryDragStart(slot.entry, slot.index, 0, $event)"
           @dragend="handleDragEnd"
-          @dragover="handleEntryDragOver(entry, $event, directoryKey)"
-          @dragleave="handleEntryDragLeave(entry, $event)"
-          @drop="handleEntryDrop(entry, $event, directoryKey)"
-          @contextmenu.prevent="$emit('context', { index, entry, x: $event.clientX, y: $event.clientY })"
+          @dragover="handleEntryDragOver(slot.entry, $event, directoryKey)"
+          @dragleave="handleEntryDragLeave(slot.entry, $event)"
+          @drop="handleEntryDrop(slot.entry, $event, directoryKey)"
+          @contextmenu.prevent="$emit('context', { index: slot.index, entry: slot.entry, x: $event.clientX, y: $event.clientY })"
         >
           <FileRow
-            :entry="entry"
-            :selected="isEntrySelected(index)"
+            :entry="slot.entry"
+            :selected="isEntrySelected(slot.index)"
             :date-format="dateFormat"
             variant="grid"
-            @click="$emit('select', { index, event: $event })"
-            @open="$emit('open', index)"
+            @click="$emit('select', { index: slot.index, event: $event })"
+            @open="$emit('open', slot.index)"
           />
+        </div>
+        </template>
+
+        <div v-if="entries.length === 0 && parentDirectory" class="file-grid-empty-message">
+          {{ emptyDirectoryMessage }}
         </div>
       </div>
     </div>
@@ -1114,10 +1440,11 @@ watch(
       aria-multiselectable="true"
       aria-label="Directory columns"
       :data-drop-directory-path="activeColumnDirectory()"
+      @scroll.passive="handleColumnScroll"
     >
       <div class="file-column-track">
         <section
-          v-for="(column, columnIndex) in columns"
+          v-for="(column, columnIndex) in virtualColumns"
           :key="`${column.path}-${columnIndex}`"
           class="file-column"
           :class="{ 'file-column--drop-target': isCurrentDirectoryDropTarget(column.path) }"
@@ -1135,54 +1462,66 @@ watch(
           </div>
 
           <p v-else-if="column.error" class="file-column-message">{{ column.error }}</p>
-          <p v-else-if="visibleEntriesForColumn(column).length === 0" class="file-column-message">
+          <p v-else-if="column.visibleEntries.length === 0" class="file-column-message">
             {{ emptyMessageForColumn(column) }}
           </p>
 
           <template v-else>
+            <div
+              v-if="column.virtualRange.paddingBefore > 0"
+              class="file-column-spacer"
+              :style="{ height: `${column.virtualRange.paddingBefore}px` }"
+              aria-hidden="true"
+            ></div>
             <button
-              v-for="(entry, index) in visibleEntriesForColumn(column)"
-              :key="entry.path"
+              v-for="item in column.virtualEntries"
+              :key="item.entry.path"
               type="button"
               class="file-column-row"
               :class="{
-                'file-column-row--selected': columnSelectionClass(column, columnIndex, index),
-                'file-column-row--directory': entry.kind === 'directory',
-                'file-column-row--archive': isArchiveEntry(entry),
-                'file-drop-target': entryDropPath === entry.path,
+                'file-column-row--selected': columnSelectionClass(column, columnIndex, item.index),
+                'file-column-row--directory': item.entry.kind === 'directory',
+                'file-column-row--archive': isArchiveEntry(item.entry),
+                'file-drop-target': entryDropPath === item.entry.path,
               }"
-              :data-file-index="columnIndex === 0 ? index : null"
-              :data-drop-entry-path="entry.path"
-              :data-drop-entry-kind="entry.kind"
+              :data-file-index="columnIndex === 0 ? item.index : null"
+              :data-drop-entry-path="item.entry.path"
+              :data-drop-entry-kind="item.entry.kind"
               data-file-drag-source="true"
-              :aria-selected="columnSelectionClass(column, columnIndex, index)"
-              :title="entry.name"
-              @pointerdown="handleEntryPointerDown(entry, index, columnIndex, $event)"
-              @dragstart.stop="handleEntryDragStart(entry, index, columnIndex, $event)"
+              :aria-selected="columnSelectionClass(column, columnIndex, item.index)"
+              :title="item.entry.name"
+              @pointerdown="handleEntryPointerDown(item.entry, item.index, columnIndex, $event)"
+              @dragstart.stop="handleEntryDragStart(item.entry, item.index, columnIndex, $event)"
               @dragend="handleDragEnd"
-              @dragover="handleEntryDragOver(entry, $event, column.path)"
-              @dragleave="handleEntryDragLeave(entry, $event)"
-              @drop="handleEntryDrop(entry, $event, column.path)"
-              @click="handleColumnSelect(entry, index, columnIndex, $event)"
-              @dblclick="handleColumnOpen(entry, index, columnIndex)"
-              @contextmenu.prevent="handleColumnContext(entry, index, columnIndex, $event)"
+              @dragover="handleEntryDragOver(item.entry, $event, column.path)"
+              @dragleave="handleEntryDragLeave(item.entry, $event)"
+              @drop="handleEntryDrop(item.entry, $event, column.path)"
+              @click="handleColumnSelect(item.entry, item.index, columnIndex, $event)"
+              @dblclick="handleColumnOpen(item.entry, item.index, columnIndex)"
+              @contextmenu.prevent="handleColumnContext(item.entry, item.index, columnIndex, $event)"
             >
-              <span class="file-column-glyph" :class="[ `file-column-glyph--${entry.kind}`, fileTypeClass(entry, 'file-column-glyph') ]">
+              <span class="file-column-glyph" :class="[ `file-column-glyph--${item.entry.kind}`, fileTypeClass(item.entry, 'file-column-glyph') ]">
                 <AppIcon
-                  :name="fileTypeIconName(entry)"
+                  :name="fileTypeIconName(item.entry)"
                   :size="17"
                   :stroke-width="1.8"
                 />
               </span>
-              <span class="file-column-name">{{ entry.name }}</span>
+              <span class="file-column-name">{{ item.entry.name }}</span>
               <AppIcon
-                v-if="isBrowsableEntry(entry)"
+                v-if="isBrowsableEntry(item.entry)"
                 class="file-column-chevron"
                 name="chevron-right"
                 :size="14"
                 :stroke-width="2.1"
               />
             </button>
+            <div
+              v-if="column.virtualRange.paddingAfter > 0"
+              class="file-column-spacer"
+              :style="{ height: `${column.virtualRange.paddingAfter}px` }"
+              aria-hidden="true"
+            ></div>
           </template>
         </section>
       </div>
@@ -1247,7 +1586,12 @@ watch(
         </button>
       </div>
 
-      <div ref="listScroller" class="file-list" :data-drop-directory-path="directoryKey">
+      <div
+        ref="listScroller"
+        class="file-list"
+        :data-drop-directory-path="directoryKey"
+        @scroll.passive="handleListScroll"
+      >
         <div v-if="parentDirectory" class="file-list-item file-parent-list-item">
           <button
             type="button"
@@ -1273,32 +1617,46 @@ watch(
         </div>
 
         <div
-          v-for="(entry, index) in entries"
-          :key="entry.path"
-          v-memo="[entry.path, entry.name, entry.size, entry.modifiedAt, isEntrySelected(index), entryDropPath === entry.path, dateFormat]"
+          v-if="listVirtualRange.paddingBefore > 0"
+          class="file-list-spacer"
+          :style="{ height: `${listVirtualRange.paddingBefore}px` }"
+          aria-hidden="true"
+        ></div>
+
+        <div
+          v-for="item in virtualListItems"
+          :key="item.entry.path"
+          v-memo="[item.entry.path, item.entry.name, item.entry.size, item.entry.modifiedAt, isEntrySelected(item.index), entryDropPath === item.entry.path, dateFormat]"
           class="file-list-item"
-          :class="{ 'file-drop-target': entryDropPath === entry.path }"
-          :data-file-index="index"
-          :data-drop-entry-path="entry.path"
-          :data-drop-entry-kind="entry.kind"
+          :class="{ 'file-drop-target': entryDropPath === item.entry.path }"
+          :data-file-index="item.index"
+          :data-drop-entry-path="item.entry.path"
+          :data-drop-entry-kind="item.entry.kind"
           data-file-drag-source="true"
-          @pointerdown="handleEntryPointerDown(entry, index, 0, $event)"
-          @dragstart.stop="handleEntryDragStart(entry, index, 0, $event)"
+          @pointerdown="handleEntryPointerDown(item.entry, item.index, 0, $event)"
+          @dragstart.stop="handleEntryDragStart(item.entry, item.index, 0, $event)"
           @dragend="handleDragEnd"
-          @dragover="handleEntryDragOver(entry, $event, directoryKey)"
-          @dragleave="handleEntryDragLeave(entry, $event)"
-          @drop="handleEntryDrop(entry, $event, directoryKey)"
-          @contextmenu.prevent="$emit('context', { index, entry, x: $event.clientX, y: $event.clientY })"
+          @dragover="handleEntryDragOver(item.entry, $event, directoryKey)"
+          @dragleave="handleEntryDragLeave(item.entry, $event)"
+          @drop="handleEntryDrop(item.entry, $event, directoryKey)"
+          @contextmenu.prevent="$emit('context', { index: item.index, entry: item.entry, x: $event.clientX, y: $event.clientY })"
         >
           <FileRow
-            :entry="entry"
-            :selected="isEntrySelected(index)"
+            :entry="item.entry"
+            :selected="isEntrySelected(item.index)"
             :date-format="dateFormat"
             variant="list"
-            @click="$emit('select', { index, event: $event })"
-            @open="$emit('open', index)"
+            @click="$emit('select', { index: item.index, event: $event })"
+            @open="$emit('open', item.index)"
           />
         </div>
+
+        <div
+          v-if="listVirtualRange.paddingAfter > 0"
+          class="file-list-spacer"
+          :style="{ height: `${listVirtualRange.paddingAfter}px` }"
+          aria-hidden="true"
+        ></div>
       </div>
     </div>
   </div>
@@ -1409,6 +1767,12 @@ watch(
 .file-list-item {
   height: 29px;
   contain: layout paint style;
+}
+
+.file-list-spacer,
+.file-column-spacer {
+  flex: 0 0 auto;
+  pointer-events: none;
 }
 
 .file-parent-list-item {
@@ -1638,7 +2002,10 @@ watch(
   grid-template-columns: repeat(auto-fill, minmax(206px, 1fr));
   column-gap: 34px;
   row-gap: 38px;
-  padding: 36px 30px 52px;
+  padding:
+    calc(36px + var(--virtual-padding-before, 0px))
+    30px
+    calc(52px + var(--virtual-padding-after, 0px));
 }
 
 .file-grid-empty-message {

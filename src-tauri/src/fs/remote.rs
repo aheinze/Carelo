@@ -502,11 +502,11 @@ fn lock_error<T>(error: std::sync::PoisonError<T>) -> FsError {
 }
 
 fn sort_remote_entries(entries: &mut [FileEntry]) {
-    entries.sort_by(|a, b| {
-        a.kind
-            .sort_rank()
-            .cmp(&b.kind.sort_rank())
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-            .then_with(|| a.name.cmp(&b.name))
+    entries.sort_by_cached_key(|entry| {
+        (
+            entry.kind.sort_rank(),
+            entry.name.to_lowercase(),
+            entry.name.clone(),
+        )
     });
 }
