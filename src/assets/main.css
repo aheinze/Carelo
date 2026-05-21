@@ -43,7 +43,7 @@ body,
 
 body {
   min-width: 1100px;
-  background: var(--body-bg);
+  background: transparent;
   color: var(--text);
   overflow: hidden;
 }
@@ -62,8 +62,9 @@ body.is-file-pointer-dragging * {
 body::before {
   position: fixed;
   inset: 0;
-  background: var(--desktop-bg);
+  background: transparent;
   content: "";
+  pointer-events: none;
 }
 
 button,
@@ -118,6 +119,7 @@ input:focus-visible {
   height: 100%;
   overflow: hidden;
   border-radius: 12px;
+  clip-path: inset(0 round 12px);
   padding: 0;
   background: var(--pane-glass);
   box-shadow:
