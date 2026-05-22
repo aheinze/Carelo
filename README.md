@@ -1,3 +1,6 @@
+<img width="1888" height="1045" alt="Image" src="https://github.com/user-attachments/assets/d62d2fdf-5232-4963-b498-81312b17ef72" />
+
+
 # Carelo
 
 Carelo is fast, local-first file management with dual panes, previews, remotes,
