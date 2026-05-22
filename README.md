@@ -102,7 +102,41 @@ The release script runs:
 tauri build --ci
 ```
 
-Current bundle targets are configured for Linux `deb` and `rpm` packages.
+Current bundle targets are configured for Linux `deb`, `rpm`, and `AppImage`
+packages. The updater uses the `AppImage` artifact for in-app updates.
+
+### GitHub Releases Updates
+
+Carelo checks for updater metadata at:
+
+```text
+https://github.com/aheinze/Carelo/releases/latest/download/latest.json
+```
+
+The updater public key is committed in `src-tauri/tauri.conf.json`. The private
+signing key was generated at:
+
+```text
+/home/artur/.tauri/carelo.key
+```
+
+For local signed release builds:
+
+```sh
+TAURI_SIGNING_PRIVATE_KEY_PATH=/home/artur/.tauri/carelo.key npm run release
+```
+
+For GitHub Actions releases, add these repository secrets:
+
+```text
+TAURI_SIGNING_PRIVATE_KEY
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD (optional)
+```
+
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` can be omitted while the generated key has
+no password. Pushing a tag like `v0.4.1` runs `.github/workflows/release.yml`,
+creates a draft GitHub Release, uploads the Linux bundles, and publishes
+`latest.json` for the in-app updater.
 
 ## Data Storage
 

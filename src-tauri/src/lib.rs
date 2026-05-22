@@ -32,7 +32,14 @@ use window_state::restore_main_window_state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build());
+
+    builder
         .manage(TerminalState::default())
         .manage(RemoteVolumeState::default())
         .manage(FileOperationState::default())

@@ -1,4 +1,6 @@
 <script setup>
+import { check } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { useFileManagerStore } from '../stores/fileManagerStore';
@@ -10,6 +12,13 @@ import appIconUrl from '../../src-tauri/icons/128x128.png';
 const store = useFileManagerStore();
 const searchQuery = ref('');
 const activeSectionId = ref('appearance');
+const updateState = ref('idle');
+const updateMessage = ref('');
+const updateError = ref('');
+const updateDetails = ref(null);
+const updateProgress = ref(null);
+let pendingUpdate = null;
+
 const appInfo = {
   name: tauriConfig.productName || 'Carelo',
   version: tauriConfig.version || '',
@@ -18,6 +27,7 @@ const appInfo = {
   publisher: tauriConfig.bundle?.publisher || '',
   license: tauriConfig.bundle?.license || '',
   copyright: tauriConfig.bundle?.copyright || '',
+  updateEndpoint: tauriConfig.plugins?.updater?.endpoints?.[0] || '',
 };
 
 const sections = [
@@ -61,7 +71,7 @@ const sections = [
     id: 'about',
     label: 'About',
     icon: 'info',
-    keywords: 'about version info license copyright publisher app carelo',
+    keywords: 'about version info license copyright publisher app carelo update updater github releases',
   },
 ];
 
@@ -88,6 +98,53 @@ const activeSection = computed(() =>
 );
 const dateFormatPreview = computed(() =>
   formatDate(new Date(2026, 4, 18, 14, 30), store.appSettings.dateFormat, { includeTime: true }),
+);
+const updateProgressLabel = computed(() => {
+  const progress = updateProgress.value;
+
+  if (!progress) {
+    return '';
+  }
+
+  if (progress.contentLength > 0) {
+    const percent = Math.min(100, Math.round((progress.downloaded / progress.contentLength) * 100));
+    return `${percent}%`;
+  }
+
+  return formatBytes(progress.downloaded);
+});
+const updateProgressWidth = computed(() => {
+  const progress = updateProgress.value;
+
+  if (!progress || progress.contentLength <= 0) {
+    return '0%';
+  }
+
+  const percent = Math.min(100, Math.round((progress.downloaded / progress.contentLength) * 100));
+  return `${percent}%`;
+});
+const updateActionLabel = computed(() => {
+  if (updateState.value === 'checking') {
+    return 'Checking...';
+  }
+
+  if (updateState.value === 'available') {
+    return 'Install update';
+  }
+
+  if (updateState.value === 'downloading') {
+    return updateProgressLabel.value ? `Downloading ${updateProgressLabel.value}` : 'Downloading...';
+  }
+
+  if (updateState.value === 'installed') {
+    return 'Restarting...';
+  }
+
+  return 'Check for updates';
+});
+const updateActionIcon = computed(() => (updateState.value === 'available' ? 'download' : 'refresh'));
+const updateActionDisabled = computed(() =>
+  ['checking', 'downloading', 'installed'].includes(updateState.value),
 );
 
 const visibleSections = computed(() => {
@@ -129,6 +186,132 @@ function setDateFormat(event) {
 
 function setBooleanSetting(key, event) {
   store.setAppSetting(key, event.target.checked);
+}
+
+function formatBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0 B';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const precision = unitIndex === 0 || size >= 10 ? 0 : 1;
+  return `${size.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function formatUpdateDate(value) {
+  if (!value) {
+    return '';
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  return formatDate(date, store.appSettings.dateFormat, { includeTime: true });
+}
+
+function formatUpdateError(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+
+  if (/404|not found|release json|latest\.json/i.test(message)) {
+    return 'No GitHub update metadata has been published yet.';
+  }
+
+  return message || 'The update check failed.';
+}
+
+async function checkForUpdates() {
+  pendingUpdate = null;
+  updateState.value = 'checking';
+  updateMessage.value = '';
+  updateError.value = '';
+  updateDetails.value = null;
+  updateProgress.value = null;
+
+  try {
+    const update = await check();
+
+    if (!update) {
+      updateState.value = 'current';
+      updateMessage.value = 'Carelo is up to date.';
+      return;
+    }
+
+    pendingUpdate = update;
+    updateDetails.value = {
+      version: update.version || '',
+      date: update.date || '',
+      body: update.body || '',
+    };
+    updateState.value = 'available';
+    updateMessage.value = `Version ${update.version} is available.`;
+  } catch (error) {
+    updateState.value = 'error';
+    updateError.value = formatUpdateError(error);
+  }
+}
+
+async function installUpdate() {
+  if (!pendingUpdate) {
+    await checkForUpdates();
+    return;
+  }
+
+  let downloaded = 0;
+  let contentLength = 0;
+  updateState.value = 'downloading';
+  updateMessage.value = 'Downloading update...';
+  updateError.value = '';
+  updateProgress.value = { downloaded, contentLength };
+
+  try {
+    await pendingUpdate.downloadAndInstall((event) => {
+      if (event.event === 'Started') {
+        contentLength = Number(event.data?.contentLength || 0);
+        downloaded = 0;
+      } else if (event.event === 'Progress') {
+        downloaded += Number(event.data?.chunkLength || 0);
+      } else if (event.event === 'Finished') {
+        downloaded = contentLength || downloaded;
+      }
+
+      updateProgress.value = { downloaded, contentLength };
+    });
+
+    pendingUpdate = null;
+    updateState.value = 'installed';
+    updateMessage.value = 'Update installed. Restarting Carelo...';
+
+    try {
+      await relaunch();
+    } catch (error) {
+      updateMessage.value = 'Update installed. Restart Carelo to finish.';
+      updateError.value = formatUpdateError(error);
+    }
+  } catch (error) {
+    updateState.value = 'error';
+    updateMessage.value = '';
+    updateError.value = formatUpdateError(error);
+  }
+}
+
+function handleUpdateAction() {
+  if (updateState.value === 'available') {
+    installUpdate();
+    return;
+  }
+
+  checkForUpdates();
 }
 
 function createToolId() {
@@ -611,6 +794,41 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
                       <dd>{{ appInfo.copyright }}</dd>
                     </div>
                   </dl>
+
+                  <div class="about-update" aria-live="polite">
+                    <div class="about-update-main">
+                      <span class="about-update-copy">
+                        <strong>Updates</strong>
+                        <span v-if="updateError" class="about-update-error">{{ updateError }}</span>
+                        <span v-else-if="updateMessage">{{ updateMessage }}</span>
+                        <span v-else>Check whether a newer version is available.</span>
+                      </span>
+
+                      <button
+                        type="button"
+                        class="about-update-button"
+                        :disabled="updateActionDisabled"
+                        @click="handleUpdateAction"
+                      >
+                        <AppIcon :name="updateActionIcon" :size="15" :stroke-width="2" />
+                        <span>{{ updateActionLabel }}</span>
+                      </button>
+                    </div>
+
+                    <div v-if="updateState === 'downloading'" class="about-update-progress">
+                      <span :style="{ width: updateProgressWidth }"></span>
+                    </div>
+
+                    <div v-if="updateDetails" class="about-update-release">
+                      <span>
+                        <strong>{{ updateDetails.version }}</strong>
+                        <template v-if="formatUpdateDate(updateDetails.date)">
+                          - {{ formatUpdateDate(updateDetails.date) }}
+                        </template>
+                      </span>
+                      <p v-if="updateDetails.body">{{ updateDetails.body }}</p>
+                    </div>
+                  </div>
                 </div>
               </section>
             </div>
@@ -1444,6 +1662,117 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   line-height: 1.35;
 }
 
+.about-update {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--hairline);
+  padding: 14px;
+}
+
+.about-update-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.about-update-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.about-update-copy strong {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 730;
+}
+
+.about-update-copy span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.35;
+}
+
+.about-update-copy .about-update-error {
+  color: var(--danger);
+}
+
+.about-update-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  gap: 7px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  box-shadow: var(--input-shadow);
+  color: var(--text-muted);
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+
+.about-update-button:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text);
+}
+
+.about-update-button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.about-update-progress {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.about-update-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 140ms ease;
+}
+
+.about-update-release {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 2.5%, transparent);
+  padding: 10px 12px;
+}
+
+.about-update-release span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.about-update-release strong {
+  color: var(--text);
+  font-weight: 730;
+}
+
+.about-update-release p {
+  max-height: 92px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 520;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 .switch-input {
   position: absolute;
   width: 1px;
@@ -1574,6 +1903,15 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
     grid-template-columns: 1fr;
     gap: 3px;
     align-items: start;
+  }
+
+  .about-update-main {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .about-update-button {
+    width: 100%;
   }
 }
 </style>
