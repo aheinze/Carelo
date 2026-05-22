@@ -4,10 +4,21 @@ import AppIcon from './AppIcon.vue';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { COLOR_SCHEME_OPTIONS } from '../utils/colorSchemes';
 import { DATE_FORMAT_OPTIONS, formatDate } from '../utils/dateFormat';
+import tauriConfig from '../../src-tauri/tauri.conf.json';
+import appIconUrl from '../../src-tauri/icons/128x128.png';
 
 const store = useFileManagerStore();
 const searchQuery = ref('');
 const activeSectionId = ref('appearance');
+const appInfo = {
+  name: tauriConfig.productName || 'Carelo',
+  version: tauriConfig.version || '',
+  identifier: tauriConfig.identifier || '',
+  description: tauriConfig.bundle?.longDescription || tauriConfig.bundle?.shortDescription || '',
+  publisher: tauriConfig.bundle?.publisher || '',
+  license: tauriConfig.bundle?.license || '',
+  copyright: tauriConfig.bundle?.copyright || '',
+};
 
 const sections = [
   {
@@ -45,6 +56,12 @@ const sections = [
     label: 'Terminal',
     icon: 'terminal',
     keywords: 'terminal shell cwd active folder directory',
+  },
+  {
+    id: 'about',
+    label: 'About',
+    icon: 'info',
+    keywords: 'about version info license copyright publisher app carelo',
   },
 ];
 
@@ -556,6 +573,44 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
                     />
                     <span class="settings-switch" aria-hidden="true"></span>
                   </label>
+                </div>
+              </section>
+
+              <section v-else-if="activeSectionId === 'about'" class="settings-page">
+                <div class="settings-section-heading">
+                  <h3>About</h3>
+                  <p>Application details and build metadata.</p>
+                </div>
+
+                <div class="settings-group about-group">
+                  <div class="about-summary">
+                    <span class="about-app-mark" aria-hidden="true">
+                      <img :src="appIconUrl" alt="" />
+                    </span>
+                    <div class="about-copy">
+                      <strong>{{ appInfo.name }}</strong>
+                      <span>{{ appInfo.description }}</span>
+                    </div>
+                  </div>
+
+                  <dl class="about-details">
+                    <div>
+                      <dt>Version</dt>
+                      <dd>{{ appInfo.version }}</dd>
+                    </div>
+                    <div>
+                      <dt>Publisher</dt>
+                      <dd>{{ appInfo.publisher }}</dd>
+                    </div>
+                    <div>
+                      <dt>License</dt>
+                      <dd>{{ appInfo.license }}</dd>
+                    </div>
+                    <div v-if="appInfo.copyright">
+                      <dt>Copyright</dt>
+                      <dd>{{ appInfo.copyright }}</dd>
+                    </div>
+                  </dl>
                 </div>
               </section>
             </div>
@@ -1299,6 +1354,96 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   color: var(--text);
 }
 
+.about-group {
+  display: grid;
+}
+
+.about-summary {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  align-items: center;
+  gap: 18px;
+  min-height: 136px;
+  padding: 16px;
+}
+
+.about-app-mark {
+  display: grid;
+  width: 96px;
+  height: 96px;
+  place-items: center;
+  border-radius: 12px;
+  background: transparent;
+}
+
+.about-app-mark img {
+  display: block;
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+}
+
+.about-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.about-copy strong {
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 780;
+  letter-spacing: 0;
+}
+
+.about-copy span {
+  max-width: 430px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 560;
+  line-height: 1.45;
+}
+
+.about-details {
+  display: grid;
+  margin: 0;
+  border-top: 1px solid var(--hairline);
+}
+
+.about-details div {
+  display: grid;
+  grid-template-columns: 126px minmax(0, 1fr);
+  gap: 16px;
+  min-height: 44px;
+  align-items: center;
+  padding: 9px 14px;
+}
+
+.about-details div + div {
+  border-top: 1px solid var(--hairline);
+}
+
+.about-details dt {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.about-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 610;
+  line-height: 1.35;
+}
+
 .switch-input {
   position: absolute;
   width: 1px;
@@ -1423,6 +1568,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   .custom-tool-targets button {
     min-width: 0;
     flex: 1;
+  }
+
+  .about-details div {
+    grid-template-columns: 1fr;
+    gap: 3px;
+    align-items: start;
   }
 }
 </style>

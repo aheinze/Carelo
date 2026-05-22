@@ -1,11 +1,7 @@
 # Carelo
 
-Carelo is a local-first dual-pane file manager built with Tauri 2, Rust, Vue 3,
-Pinia, Vite, and plain JavaScript.
-
-It targets power users who want a keyboard-friendly desktop file manager with
-real local file operations, remote-volume groundwork, a preview inspector, and
-an embedded terminal.
+Carelo is fast, local-first file management with dual panes, previews, remotes,
+and custom tools.
 
 ## Features
 
@@ -27,8 +23,7 @@ an embedded terminal.
   actions.
 - Embedded xterm terminal panel on Unix platforms.
 - Remote volume dialog backed by OpenDAL for supported providers such as SFTP,
-  FTP, WebDAV, S3-compatible storage, Backblaze B2, Google Drive, OneDrive,
-  Dropbox, and Swift/Rackspace-style object storage.
+  FTP, WebDAV, S3-compatible storage.
 - Sudo password retry flow for local file operations that require elevated
   permissions.
 - Light and dark themes based on the system color scheme.

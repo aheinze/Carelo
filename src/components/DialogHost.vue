@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { useDialog } from '../composables/useDialog';
 
@@ -8,6 +8,8 @@ const dialogPanel = ref(null);
 const promptInput = ref(null);
 const inputValue = ref('');
 const checkboxValue = ref(false);
+let promptFocusFrame = 0;
+let promptFocusTimers = [];
 
 const activeDialog = computed(() => dialog.activeDialog.value);
 const iconName = computed(() => {
@@ -22,9 +24,59 @@ const iconName = computed(() => {
   return activeDialog.value?.type === 'prompt' ? 'file' : 'info';
 });
 
+function clearPromptFocusRequests() {
+  if (promptFocusFrame) {
+    window.cancelAnimationFrame(promptFocusFrame);
+    promptFocusFrame = 0;
+  }
+
+  for (const timer of promptFocusTimers) {
+    window.clearTimeout(timer);
+  }
+
+  promptFocusTimers = [];
+}
+
+function focusPromptInput(dialogId, shouldSelect = true) {
+  if (activeDialog.value?.id !== dialogId || activeDialog.value?.type !== 'prompt') {
+    return false;
+  }
+
+  const input = promptInput.value;
+
+  if (!input) {
+    return false;
+  }
+
+  input.focus({ preventScroll: true });
+
+  if (document.activeElement === input && shouldSelect) {
+    input.select();
+  }
+
+  return document.activeElement === input;
+}
+
+function requestPromptInputFocus(dialogId) {
+  clearPromptFocusRequests();
+  const focus = () => focusPromptInput(dialogId);
+
+  focus();
+  promptFocusFrame = window.requestAnimationFrame(() => {
+    promptFocusFrame = 0;
+    focus();
+    promptFocusTimers = [
+      window.setTimeout(focus, 40),
+      window.setTimeout(focus, 120),
+    ];
+  });
+}
+
 watch(
   activeDialog,
   async (nextDialog) => {
+    clearPromptFocusRequests();
+
     if (!nextDialog) {
       inputValue.value = '';
       return;
@@ -35,13 +87,15 @@ watch(
     await nextTick();
 
     if (nextDialog.type === 'prompt') {
-      promptInput.value?.focus();
-      promptInput.value?.select();
+      requestPromptInputFocus(nextDialog.id);
     } else {
       dialogPanel.value?.focus();
     }
   },
+  { flush: 'post' },
 );
+
+onUnmounted(clearPromptFocusRequests);
 
 function confirmDialog() {
   const current = activeDialog.value;
@@ -64,7 +118,7 @@ function confirmDialog() {
     const value = inputValue.value;
 
     if (current.inputRequired && !value.trim()) {
-      promptInput.value?.focus();
+      focusPromptInput(current.id, false);
       return;
     }
 
@@ -157,6 +211,7 @@ function handleKeydown(event) {
               <input
                 ref="promptInput"
                 v-model="inputValue"
+                autofocus
                 :type="activeDialog.inputType || 'text'"
                 :placeholder="activeDialog.inputPlaceholder"
                 @keydown.enter.stop.prevent="confirmDialog"

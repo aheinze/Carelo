@@ -37,12 +37,12 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "rpm"],
-    "publisher": "Carelo Contributors",
-    "copyright": "Copyright © 2026 Carelo Contributors",
+    "publisher": "Agentejo - Artur Heinze",
+    "copyright": "Copyright © 2026 Agentejo - Artur Heinze",
     "license": "Proprietary",
     "category": "Utility",
-    "shortDescription": "A modern dual-pane file manager.",
-    "longDescription": "Carelo is a modern dual-pane file manager for developers and infrastructure operators.",
+    "shortDescription": "Fast, local-first file management.",
+    "longDescription": "Fast, local-first file management with dual panes, previews, remotes, and custom tools.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

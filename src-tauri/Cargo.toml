@@ -1,8 +1,8 @@
 [package]
 name = "carelo"
 version = "0.4.0"
-description = "A modern dual-pane file manager for developers and infrastructure operators."
-authors = ["Carelo Contributors"]
+description = "Fast, local-first file management with dual panes and custom tools."
+authors = ["Agentejo - Artur Heinze"]
 edition = "2021"
 rust-version = "1.77"
 

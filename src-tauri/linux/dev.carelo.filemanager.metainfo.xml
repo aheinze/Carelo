@@ -4,9 +4,9 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>LicenseRef-Proprietary</project_license>
   <name>Carelo</name>
-  <summary>Modern dual-pane file manager</summary>
+  <summary>Fast, local-first file management</summary>
   <description>
-    <p>Carelo is a modern dual-pane file manager for developers and infrastructure operators.</p>
+    <p>Fast, local-first file management with dual panes, previews, remotes, and custom tools.</p>
   </description>
   <launchable type="desktop-id">Carelo.desktop</launchable>
   <categories>
@@ -17,7 +17,7 @@
     <binary>carelo</binary>
   </provides>
   <developer id="dev.carelo">
-    <name>Carelo Contributors</name>
+    <name>Agentejo - Artur Heinze</name>
   </developer>
   <content_rating type="oars-1.1" />
   <releases>
