@@ -36,6 +36,7 @@ const OpenWithDialog = defineAsyncComponent(() => import('./OpenWithDialog.vue')
 
 const FILE_DRAG_MIME = 'application/x-carelo-files';
 const TAB_DRAG_MIME = 'application/x-carelo-tab';
+const DEFAULT_FAVORITE_GROUP_ID = 'favorites';
 const POINTER_DRAG_THRESHOLD = 6;
 
 const props = defineProps({
@@ -753,8 +754,12 @@ function pointerFavoriteDrop(elements, event) {
     return null;
   }
 
+  const groupId = favoriteZone.dataset.favoriteGroupId || DEFAULT_FAVORITE_GROUP_ID;
   const favoriteItem = closestFromElements(elements, '[data-favorite-index]');
-  let index = store.favorites.length;
+  const groupFavoriteCount = store.favorites.filter((favorite) =>
+    (favorite.groupId || DEFAULT_FAVORITE_GROUP_ID) === groupId,
+  ).length;
+  let index = groupFavoriteCount;
 
   if (favoriteItem && favoriteZone.contains(favoriteItem)) {
     const candidateIndex = Number(favoriteItem.dataset.favoriteIndex);
@@ -769,7 +774,8 @@ function pointerFavoriteDrop(elements, event) {
 
   return {
     type: 'favorite',
-    index: Number.isInteger(index) ? index : store.favorites.length,
+    groupId,
+    index: Number.isInteger(index) ? index : groupFavoriteCount,
   };
 }
 
@@ -823,7 +829,7 @@ async function finishPointerFileDrop(event, state) {
     );
 
     if (directories.length > 0) {
-      await store.addFavoritesFromEntries(directories, favoriteDrop.index);
+      await store.addFavoritesFromEntries(directories, favoriteDrop.index, favoriteDrop.groupId);
     }
 
     return;

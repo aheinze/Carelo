@@ -218,6 +218,18 @@ export async function listFavorites() {
   return invokeCommand('list_favorites');
 }
 
+export async function listFavoriteGroups() {
+  return invokeCommand('list_favorite_groups');
+}
+
+export async function addFavoriteGroup(name) {
+  return invokeCommand('add_favorite_group', { name });
+}
+
+export async function removeFavoriteGroup(id) {
+  return invokeCommand('remove_favorite_group', { id });
+}
+
 export async function addFavorite(favorite) {
   return invokeCommand('add_favorite', { favorite });
 }
@@ -226,8 +238,8 @@ export async function removeFavorite(id) {
   return invokeCommand('remove_favorite', { id });
 }
 
-export async function moveFavorite(id, targetIndex) {
-  return invokeCommand('move_favorite', { id, targetIndex });
+export async function moveFavorite(id, targetIndex, targetGroupId = null) {
+  return invokeCommand('move_favorite', { id, targetIndex, targetGroupId });
 }
 
 export async function appStorePath() {
@@ -349,9 +361,11 @@ export function useFileOperations() {
     getFileMetadata,
     getHomeDirectory,
     addFavorite,
+    addFavoriteGroup,
     addRemoteVolume,
     appStorePath,
     isRemotePath,
+    listFavoriteGroups,
     listFavorites,
     listDirectory,
     searchContent,
@@ -369,6 +383,7 @@ export function useFileOperations() {
     pauseFileOperation,
     runCustomTool,
     removeFavorite,
+    removeFavoriteGroup,
     removeRemoteVolume,
     renameItem,
     readTextPreview,

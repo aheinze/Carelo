@@ -13,13 +13,17 @@ import {
 
 const FILE_DRAG_MIME = 'application/x-carelo-files';
 const FAVORITE_DRAG_MIME = 'application/x-carelo-favorite';
+const DEFAULT_FAVORITE_GROUP_ID = 'favorites';
 const RemoteVolumeModal = defineAsyncComponent(() => import('./RemoteVolumeModal.vue'));
 
 const store = useFileManagerStore();
 const dialog = useDialog();
 const remoteModalVisible = ref(false);
+const sidebarFooter = ref(null);
+const sidebarAddMenuOpen = ref(false);
 const draggedFavoriteId = ref(null);
 const favoriteDropIndex = ref(null);
+const favoriteDropGroupId = ref('');
 const mountingDevicePath = ref('');
 let volumeRefreshTimer = null;
 
@@ -66,6 +70,7 @@ function remoteIdFromPath(path) {
 }
 
 function openRemoteModal() {
+  closeSidebarAddMenu();
   remoteModalVisible.value = true;
 }
 
@@ -81,12 +86,54 @@ function hasDataTransferType(event, type) {
   return dataTransferTypes(event).includes(type);
 }
 
-function isFavoritesSection(section) {
-  return section.title === 'Favorites';
+function isFavoriteGroupSection(section) {
+  return Boolean(section?.isFavoriteGroup);
+}
+
+function favoriteGroupIdForSection(section) {
+  return section?.favoriteGroupId || DEFAULT_FAVORITE_GROUP_ID;
+}
+
+function favoriteGroupIdForItem(item) {
+  return item?.favoriteGroupId || item?.groupId || DEFAULT_FAVORITE_GROUP_ID;
+}
+
+function favoriteGroupItems(groupId) {
+  return store.favorites.filter((favorite) =>
+    (favorite.groupId || DEFAULT_FAVORITE_GROUP_ID) === groupId,
+  );
+}
+
+function favoriteCountForGroup(groupId) {
+  return favoriteGroupItems(groupId).length;
 }
 
 function favoriteIndexForItem(item) {
-  return store.favorites.findIndex((favorite) => favorite.id === item.id);
+  const groupId = favoriteGroupIdForItem(item);
+  return favoriteGroupItems(groupId).findIndex((favorite) => favorite.id === item.id);
+}
+
+function isFavoriteDropTarget(section) {
+  return (
+    isFavoriteGroupSection(section) &&
+    favoriteDropIndex.value !== null &&
+    favoriteDropGroupId.value === favoriteGroupIdForSection(section)
+  );
+}
+
+function isFavoriteDropTargetEnd(section) {
+  return (
+    isFavoriteDropTarget(section) &&
+    favoriteDropIndex.value === favoriteCountForGroup(favoriteGroupIdForSection(section))
+  );
+}
+
+function isFavoriteItemDropBefore(item) {
+  return (
+    item.isFavorite &&
+    favoriteDropGroupId.value === favoriteGroupIdForItem(item) &&
+    favoriteDropIndex.value === favoriteIndexForItem(item)
+  );
 }
 
 function readFavoriteDragPayload(event) {
@@ -202,8 +249,13 @@ async function directoryEntriesFromDrop(event) {
     }));
 }
 
-function setFavoriteDropIndex(index) {
-  const nextIndex = Math.max(0, Math.min(store.favorites.length, Number(index) || 0));
+function setFavoriteDropTarget(groupId, index) {
+  const targetGroupId = groupId || DEFAULT_FAVORITE_GROUP_ID;
+  const nextIndex = Math.max(0, Math.min(favoriteCountForGroup(targetGroupId), Number(index) || 0));
+
+  if (favoriteDropGroupId.value !== targetGroupId) {
+    favoriteDropGroupId.value = targetGroupId;
+  }
 
   if (favoriteDropIndex.value !== nextIndex) {
     favoriteDropIndex.value = nextIndex;
@@ -213,6 +265,7 @@ function setFavoriteDropIndex(index) {
 function clearFavoriteDragState() {
   draggedFavoriteId.value = null;
   favoriteDropIndex.value = null;
+  favoriteDropGroupId.value = '';
 }
 
 function isDragPointInsideElement(event, element) {
@@ -230,15 +283,22 @@ function isDragPointInsideElement(event, element) {
   );
 }
 
-function favoriteDropIndexForEvent(item, event) {
+function favoriteDropTargetForEvent(item, event) {
+  const groupId = favoriteGroupIdForItem(item);
   const index = favoriteIndexForItem(item);
 
   if (index < 0) {
-    return store.favorites.length;
+    return {
+      groupId,
+      index: favoriteCountForGroup(groupId),
+    };
   }
 
   const rect = event.currentTarget.getBoundingClientRect();
-  return event.clientY < rect.top + rect.height / 2 ? index : index + 1;
+  return {
+    groupId,
+    index: event.clientY < rect.top + rect.height / 2 ? index : index + 1,
+  };
 }
 
 function closestFromElements(elements, selector) {
@@ -265,7 +325,7 @@ function hasActiveDirectoryFileDrag() {
   return (store.dragOperation?.entries || []).some((entry) => entry.kind === 'directory');
 }
 
-function favoriteDropIndexForPointerEvent(event) {
+function favoriteDropTargetForPointerEvent(event) {
   if (!hasActiveDirectoryFileDrag()) {
     return null;
   }
@@ -277,6 +337,7 @@ function favoriteDropIndexForPointerEvent(event) {
     return null;
   }
 
+  const groupId = favoriteZone.dataset.favoriteGroupId || DEFAULT_FAVORITE_GROUP_ID;
   const favoriteItem = closestFromElements(elements, '[data-favorite-index]');
 
   if (favoriteItem && favoriteZone.contains(favoriteItem)) {
@@ -284,11 +345,17 @@ function favoriteDropIndexForPointerEvent(event) {
 
     if (Number.isInteger(index)) {
       const rect = favoriteItem.getBoundingClientRect();
-      return event.clientY < rect.top + rect.height / 2 ? index : index + 1;
+      return {
+        groupId,
+        index: event.clientY < rect.top + rect.height / 2 ? index : index + 1,
+      };
     }
   }
 
-  return store.favorites.length;
+  return {
+    groupId,
+    index: favoriteCountForGroup(groupId),
+  };
 }
 
 function handlePointerFileDragMove(event) {
@@ -296,19 +363,21 @@ function handlePointerFileDragMove(event) {
     return;
   }
 
-  const nextIndex = favoriteDropIndexForPointerEvent(event);
+  const nextTarget = favoriteDropTargetForPointerEvent(event);
 
-  if (nextIndex === null) {
+  if (nextTarget === null) {
     favoriteDropIndex.value = null;
+    favoriteDropGroupId.value = '';
     return;
   }
 
-  setFavoriteDropIndex(nextIndex);
+  setFavoriteDropTarget(nextTarget.groupId, nextTarget.index);
 }
 
 function clearPointerFileDragIndicator() {
   if (!draggedFavoriteId.value) {
     favoriteDropIndex.value = null;
+    favoriteDropGroupId.value = '';
   }
 }
 
@@ -336,22 +405,24 @@ function handleFavoriteItemDragOver(item, event) {
   event.preventDefault();
   event.stopPropagation();
   event.dataTransfer.dropEffect = hasDataTransferType(event, FAVORITE_DRAG_MIME) ? 'move' : 'copy';
-  setFavoriteDropIndex(favoriteDropIndexForEvent(item, event));
+  const target = favoriteDropTargetForEvent(item, event);
+  setFavoriteDropTarget(target.groupId, target.index);
 }
 
 function handleFavoriteSectionDragOver(section, event) {
-  if (!isFavoritesSection(section) || !isFavoriteDropEvent(event)) {
+  if (!isFavoriteGroupSection(section) || !isFavoriteDropEvent(event)) {
     return;
   }
 
   event.preventDefault();
   event.stopPropagation();
   event.dataTransfer.dropEffect = hasDataTransferType(event, FAVORITE_DRAG_MIME) ? 'move' : 'copy';
-  setFavoriteDropIndex(store.favorites.length);
+  const groupId = favoriteGroupIdForSection(section);
+  setFavoriteDropTarget(groupId, favoriteCountForGroup(groupId));
 }
 
 function handleFavoriteSectionDragLeave(section, event) {
-  if (!isFavoritesSection(section) || !isFavoriteDropEvent(event)) {
+  if (!isFavoriteGroupSection(section) || !isFavoriteDropEvent(event)) {
     return;
   }
 
@@ -367,6 +438,7 @@ function handleFavoriteSectionDragLeave(section, event) {
   }
 
   favoriteDropIndex.value = null;
+  favoriteDropGroupId.value = '';
 }
 
 function handleSidebarFileDragOver(event) {
@@ -376,7 +448,7 @@ function handleSidebarFileDragOver(event) {
 
   event.preventDefault();
   event.dataTransfer.dropEffect = 'copy';
-  setFavoriteDropIndex(store.favorites.length);
+  setFavoriteDropTarget(DEFAULT_FAVORITE_GROUP_ID, favoriteCountForGroup(DEFAULT_FAVORITE_GROUP_ID));
 }
 
 function handleSidebarFileDragLeave(event) {
@@ -385,6 +457,7 @@ function handleSidebarFileDragLeave(event) {
   }
 
   favoriteDropIndex.value = null;
+  favoriteDropGroupId.value = '';
 }
 
 async function handleSidebarFileDrop(event) {
@@ -392,25 +465,30 @@ async function handleSidebarFileDrop(event) {
     return;
   }
 
-  await dropFavoriteAt(favoriteDropIndex.value ?? store.favorites.length, event);
+  await dropFavoriteAt(
+    favoriteDropGroupId.value || DEFAULT_FAVORITE_GROUP_ID,
+    favoriteDropIndex.value ?? favoriteCountForGroup(DEFAULT_FAVORITE_GROUP_ID),
+    event,
+  );
 }
 
-async function dropFavoriteAt(index, event) {
+async function dropFavoriteAt(groupId, index, event) {
   const favoritePayload = readFavoriteDragPayload(event);
+  const targetGroupId = groupId || DEFAULT_FAVORITE_GROUP_ID;
 
   event.preventDefault();
   event.stopPropagation();
 
   try {
     if (favoritePayload?.id) {
-      await store.moveFavorite(favoritePayload.id, index);
+      await store.moveFavorite(favoritePayload.id, index, targetGroupId);
       return;
     }
 
     const directories = await directoryEntriesFromDrop(event);
 
     if (directories.length > 0) {
-      await store.addFavoritesFromEntries(directories, index);
+      await store.addFavoritesFromEntries(directories, index, targetGroupId);
     }
   } finally {
     store.clearFileDrag();
@@ -423,20 +501,59 @@ async function handleFavoriteItemDrop(item, event) {
     return;
   }
 
-  await dropFavoriteAt(favoriteDropIndexForEvent(item, event), event);
+  const target = favoriteDropTargetForEvent(item, event);
+  await dropFavoriteAt(target.groupId, target.index, event);
 }
 
 async function handleFavoriteSectionDrop(section, event) {
-  if (!isFavoritesSection(section) || !isFavoriteDropEvent(event)) {
+  if (!isFavoriteGroupSection(section) || !isFavoriteDropEvent(event)) {
     return;
   }
 
-  await dropFavoriteAt(favoriteDropIndex.value ?? store.favorites.length, event);
+  const groupId = favoriteGroupIdForSection(section);
+  await dropFavoriteAt(
+    groupId,
+    favoriteDropIndex.value ?? favoriteCountForGroup(groupId),
+    event,
+  );
 }
 
 async function removeFavoriteItem(item, event) {
   event.stopPropagation();
   await store.removeFavorite(item.id);
+}
+
+async function removeFavoriteGroup(section, event) {
+  event.stopPropagation();
+
+  if (!section?.favoriteGroupId || section.isDefaultFavoriteGroup) {
+    return;
+  }
+
+  const itemCount = section.items.length;
+  const confirmed = await dialog.confirm({
+    title: 'Delete Group',
+    message: itemCount > 0
+      ? `Delete "${section.title}" and remove its ${itemCount === 1 ? 'shortcut' : `${itemCount} shortcuts`} from the sidebar?`
+      : `Delete "${section.title}"?`,
+    confirmLabel: 'Delete Group',
+    variant: 'danger',
+    destructive: true,
+  });
+
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await store.removeFavoriteGroup(section.favoriteGroupId);
+  } catch (error) {
+    await dialog.alert({
+      title: 'Group Not Deleted',
+      message: error?.message || 'Unable to delete sidebar group.',
+      variant: 'warning',
+    });
+  }
 }
 
 async function disconnectRemoteItem(item, event) {
@@ -475,6 +592,55 @@ async function disconnectRemoteItem(item, event) {
   }
 }
 
+function closeSidebarAddMenu() {
+  sidebarAddMenuOpen.value = false;
+}
+
+function toggleSidebarAddMenu(event) {
+  event?.stopPropagation();
+  sidebarAddMenuOpen.value = !sidebarAddMenuOpen.value;
+}
+
+function handleDocumentPointerDown(event) {
+  if (!sidebarAddMenuOpen.value) {
+    return;
+  }
+
+  if (sidebarFooter.value?.contains(event.target)) {
+    return;
+  }
+
+  closeSidebarAddMenu();
+}
+
+async function createFavoriteGroup() {
+  closeSidebarAddMenu();
+
+  const name = (await dialog.prompt({
+    title: 'New Sidebar Group',
+    message: 'Create a section for sidebar shortcuts.',
+    inputLabel: 'Group name',
+    inputValue: 'New Group',
+    inputRequired: true,
+    confirmLabel: 'Create',
+    icon: 'folder-plus',
+  }))?.trim();
+
+  if (!name) {
+    return;
+  }
+
+  try {
+    await store.addFavoriteGroup(name);
+  } catch (error) {
+    await dialog.alert({
+      title: 'Group Not Created',
+      message: error?.message || 'Unable to create sidebar group.',
+      variant: 'warning',
+    });
+  }
+}
+
 function startDragging(event) {
   if (event.button !== 0 || event.detail > 1) return;
   event.preventDefault();
@@ -498,6 +664,7 @@ function closeWindow(event) {
 
 onMounted(() => {
   store.initialize();
+  document.addEventListener('pointerdown', handleDocumentPointerDown, true);
   window.addEventListener('pointermove', handlePointerFileDragMove, true);
   window.addEventListener('pointerup', clearPointerFileDragIndicator, true);
   window.addEventListener('pointercancel', clearPointerFileDragIndicator, true);
@@ -507,6 +674,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
   window.removeEventListener('pointermove', handlePointerFileDragMove, true);
   window.removeEventListener('pointerup', clearPointerFileDragIndicator, true);
   window.removeEventListener('pointercancel', clearPointerFileDragIndicator, true);
@@ -574,12 +742,13 @@ onUnmounted(() => {
     >
       <div
         v-for="section in store.sidebarSections"
-        :key="section.title"
+        :key="section.id || section.title"
         class="sidebar-section"
-        :data-favorite-drop-zone="isFavoritesSection(section) ? 'true' : null"
+        :data-favorite-drop-zone="isFavoriteGroupSection(section) ? 'true' : null"
+        :data-favorite-group-id="isFavoriteGroupSection(section) ? favoriteGroupIdForSection(section) : null"
         :class="{
-          'sidebar-section--favorite-drop': isFavoritesSection(section) && favoriteDropIndex !== null,
-          'sidebar-section--favorite-drop-end': isFavoritesSection(section) && favoriteDropIndex === store.favorites.length,
+          'sidebar-section--favorite-drop': isFavoriteDropTarget(section),
+          'sidebar-section--favorite-drop-end': isFavoriteDropTargetEnd(section),
         }"
         @dragenter="handleFavoriteSectionDragOver(section, $event)"
         @dragover="handleFavoriteSectionDragOver(section, $event)"
@@ -588,17 +757,33 @@ onUnmounted(() => {
       >
         <div class="sidebar-section-header">
           <h2>{{ section.title }}</h2>
+          <button
+            v-if="section.isFavoriteGroup && !section.isDefaultFavoriteGroup"
+            type="button"
+            class="sidebar-section-action"
+            aria-label="Delete group"
+            title="Delete group"
+            @click="removeFavoriteGroup(section, $event)"
+          >
+            <AppIcon name="x" :size="13" :stroke-width="2.2" />
+          </button>
         </div>
+        <div
+          v-if="isFavoriteGroupSection(section) && section.items.length === 0"
+          class="sidebar-empty-group-drop"
+          aria-hidden="true"
+        ></div>
         <div
           v-for="item in section.items"
           :key="`${section.title}-${item.id || item.path || item.devicePath || item.name}`"
           class="sidebar-item-shell"
           :class="{
             'sidebar-item-shell--favorite-dragging': draggedFavoriteId === item.id,
-            'sidebar-item-shell--favorite-drop-before': item.isFavorite && favoriteDropIndex === favoriteIndexForItem(item),
+            'sidebar-item-shell--favorite-drop-before': isFavoriteItemDropBefore(item),
           }"
           :data-favorite-index="item.isFavorite ? favoriteIndexForItem(item) : null"
           :data-favorite-id="item.isFavorite ? item.id : null"
+          :data-favorite-group-id="item.isFavorite ? favoriteGroupIdForItem(item) : null"
           :draggable="item.isFavorite"
           @dragstart.stop="handleFavoriteDragStart(item, $event)"
           @dragend.stop="handleFavoriteDragEnd"
@@ -639,16 +824,47 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
-    <footer class="sidebar-footer">
+    <footer ref="sidebarFooter" class="sidebar-footer">
       <button
         type="button"
         class="sidebar-footer-btn"
-        aria-label="Connect remote volume"
-        v-tooltip="{ text: 'Connect Remote Volume', description: 'Add SFTP, S3, WebDAV and more' }"
-        @click="openRemoteModal"
+        aria-label="Add to sidebar"
+        aria-haspopup="menu"
+        :aria-expanded="sidebarAddMenuOpen"
+        v-tooltip="{ text: 'Add to Sidebar', description: 'Add a remote storage or group' }"
+        @click="toggleSidebarAddMenu"
       >
         <AppIcon name="plus" :size="16" :stroke-width="2.1" />
       </button>
+
+      <Transition name="sidebar-add-menu">
+        <div
+          v-if="sidebarAddMenuOpen"
+          class="sidebar-add-menu"
+          role="menu"
+          aria-label="Add to sidebar"
+          @click.stop
+        >
+          <button type="button" role="menuitem" @click="openRemoteModal">
+            <span class="sidebar-add-menu-icon" aria-hidden="true">
+              <AppIcon name="network" :size="16" :stroke-width="1.9" />
+            </span>
+            <span>
+              <strong>Remote Storage</strong>
+              <small>SFTP, FTP, WebDAV, S3</small>
+            </span>
+          </button>
+          <button type="button" role="menuitem" @click="createFavoriteGroup">
+            <span class="sidebar-add-menu-icon" aria-hidden="true">
+              <AppIcon name="folder-plus" :size="16" :stroke-width="1.9" />
+            </span>
+            <span>
+              <strong>New Group</strong>
+              <small>Organize sidebar shortcuts</small>
+            </span>
+          </button>
+        </div>
+      </Transition>
     </footer>
     <RemoteVolumeModal
       v-if="remoteModalVisible"
@@ -786,9 +1002,51 @@ onUnmounted(() => {
 
 .sidebar-section-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   min-height: 25px;
+}
+
+.sidebar-section-action {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 6px;
+  padding: 0;
+  background: transparent;
+  color: var(--text-faint);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    background 100ms ease,
+    color 100ms ease,
+    opacity 100ms ease;
+}
+
+.sidebar-section:hover .sidebar-section-action,
+.sidebar-section:focus-within .sidebar-section-action,
+.sidebar-section-action:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sidebar-section-action:hover,
+.sidebar-section-action:focus-visible {
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+.sidebar-empty-group-drop {
+  min-height: 32px;
+  margin: 1px 0 0;
+  border-radius: 7px;
+  transition: background 100ms ease, box-shadow 100ms ease;
+}
+
+.sidebar-section--favorite-drop .sidebar-empty-group-drop {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent);
 }
 
 h2 {
@@ -924,6 +1182,7 @@ h2 {
 
 /* ── Footer ──────────────────────────────────────────────── */
 .sidebar-footer {
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -946,5 +1205,80 @@ h2 {
 .sidebar-footer-btn:hover {
   background: var(--btn-hover);
   color: var(--text);
+}
+
+.sidebar-add-menu {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  left: 10px;
+  display: grid;
+  width: min(238px, calc(100% - 20px));
+  gap: 3px;
+  border: 1px solid var(--control-border);
+  border-radius: 9px;
+  padding: 5px;
+  background: var(--popover-bg);
+  box-shadow: var(--shadow-overlay);
+}
+
+.sidebar-add-menu button {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 43px;
+  border-radius: 7px;
+  padding: 6px 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition: background 100ms ease, color 100ms ease;
+}
+
+.sidebar-add-menu button:hover,
+.sidebar-add-menu button:focus-visible {
+  background: var(--btn-hover);
+}
+
+.sidebar-add-menu-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  color: var(--accent);
+}
+
+.sidebar-add-menu strong,
+.sidebar-add-menu small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-add-menu strong {
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.sidebar-add-menu small {
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 560;
+}
+
+.sidebar-add-menu-enter-active,
+.sidebar-add-menu-leave-active {
+  transition: opacity 90ms ease, transform 90ms ease;
+}
+
+.sidebar-add-menu-enter-from,
+.sidebar-add-menu-leave-to {
+  opacity: 0;
+  transform: translateY(4px);
 }
 </style>

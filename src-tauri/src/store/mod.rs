@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const STORE_DIRECTORY: &str = ".local/share/carelo";
 const STORE_FILE: &str = "carelo.store";
 const FAVORITES_SEEDED_KEY: &str = "favorites.seeded.v1";
+const DEFAULT_FAVORITE_GROUP_ID: &str = "favorites";
+const DEFAULT_FAVORITE_GROUP_NAME: &str = "Favorites";
 const WINDOW_DIMENSIONS_KEY: &str = "window.dimensions.v1";
 const APP_SETTINGS_KEY: &str = "app.settings.v1";
 const MIN_WINDOW_WIDTH: f64 = 960.0;
@@ -22,6 +24,7 @@ const MAX_WINDOW_DIMENSION: f64 = 10000.0;
 #[serde(rename_all = "camelCase")]
 pub struct FavoriteEntry {
     pub id: String,
+    pub group_id: String,
     pub name: String,
     pub path: String,
     pub icon: String,
@@ -31,9 +34,20 @@ pub struct FavoriteEntry {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteGroupEntry {
+    pub id: String,
+    pub name: String,
+    pub sort_order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FavoriteInput {
+    pub group_id: Option<String>,
     pub name: Option<String>,
     pub path: String,
     pub icon: Option<String>,
@@ -94,6 +108,94 @@ impl AppStoreState {
         list_favorites(&connection, &self.path)
     }
 
+    pub fn list_favorite_groups(&self) -> FsResult<Vec<FavoriteGroupEntry>> {
+        let connection = self.connection()?;
+        list_favorite_groups(&connection, &self.path)
+    }
+
+    pub fn add_favorite_group(&self, name: String) -> FsResult<FavoriteGroupEntry> {
+        let connection = self.connection()?;
+        let name = normalize_favorite_group_name(&name)?;
+
+        if let Some(existing) = favorite_group_by_name(&connection, &self.path, &name)? {
+            return Ok(existing);
+        }
+
+        let now = unix_timestamp();
+        let entry = FavoriteGroupEntry {
+            id: favorite_group_id_for_name(&name, now),
+            name,
+            sort_order: next_favorite_group_sort_order(&connection, &self.path)?,
+            created_at: now,
+            updated_at: now,
+        };
+
+        connection
+            .execute(
+                "INSERT INTO favorite_groups (id, name, sort_order, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    entry.id,
+                    entry.name,
+                    entry.sort_order,
+                    entry.created_at,
+                    entry.updated_at
+                ],
+            )
+            .map_err(|error| store_sql_error("Unable to add favorite group", &self.path, error))?;
+
+        favorite_group_by_id(&connection, &self.path, &entry.id)?.ok_or_else(|| {
+            FsError::new(
+                "store_error",
+                "Favorite group was not created.",
+                Some(entry.name),
+            )
+        })
+    }
+
+    pub fn remove_favorite_group(&self, id: String) -> FsResult<()> {
+        let connection = self.connection()?;
+        let id = id.trim();
+
+        if id.is_empty() || id == DEFAULT_FAVORITE_GROUP_ID {
+            return Err(FsError::new(
+                "invalid_favorite_group",
+                "The default Favorites group cannot be removed.",
+                None,
+            ));
+        }
+
+        if favorite_group_by_id(&connection, &self.path, id)?.is_none() {
+            return Ok(());
+        }
+
+        let transaction = connection.unchecked_transaction().map_err(|error| {
+            store_sql_error("Unable to remove favorite group", &self.path, error)
+        })?;
+
+        transaction
+            .execute("DELETE FROM favorites WHERE group_id = ?1", params![id])
+            .map_err(|error| {
+                store_sql_error(
+                    "Unable to remove favorite group shortcuts",
+                    &self.path,
+                    error,
+                )
+            })?;
+
+        transaction
+            .execute("DELETE FROM favorite_groups WHERE id = ?1", params![id])
+            .map_err(|error| {
+                store_sql_error("Unable to remove favorite group", &self.path, error)
+            })?;
+
+        transaction.commit().map_err(|error| {
+            store_sql_error("Unable to save favorite group changes", &self.path, error)
+        })?;
+
+        Ok(())
+    }
+
     pub fn add_favorite(&self, favorite: FavoriteInput) -> FsResult<FavoriteEntry> {
         let connection = self.connection()?;
         let path = normalize_favorite_path(&favorite.path)?;
@@ -104,11 +206,22 @@ impl AppStoreState {
             return Ok(existing);
         }
 
-        let next_sort_order = favorite
-            .sort_order
-            .unwrap_or(next_favorite_sort_order(&connection, &self.path)?);
+        let group_id = favorite
+            .group_id
+            .as_deref()
+            .and_then(|group_id| {
+                favorite_group_id_if_exists(&connection, &self.path, group_id).transpose()
+            })
+            .transpose()?
+            .unwrap_or_else(|| DEFAULT_FAVORITE_GROUP_ID.to_string());
+        let next_sort_order = favorite.sort_order.unwrap_or(next_favorite_sort_order(
+            &connection,
+            &self.path,
+            &group_id,
+        )?);
         let entry = FavoriteEntry {
             id: favorite_id_for_path(&path),
+            group_id,
             name: favorite
                 .name
                 .map(|name| name.trim().to_string())
@@ -131,10 +244,11 @@ impl AppStoreState {
 
         connection
             .execute(
-                "INSERT INTO favorites (id, name, path, icon, color, sort_order, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO favorites (id, group_id, name, path, icon, color, sort_order, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     entry.id,
+                    entry.group_id,
                     entry.name,
                     entry.path,
                     entry.icon,
@@ -146,7 +260,7 @@ impl AppStoreState {
             )
             .map_err(|error| store_sql_error("Unable to add favorite", &self.path, error))?;
 
-        reorder_favorites(&connection, &self.path)?;
+        reorder_favorites_in_group(&connection, &self.path, &entry.group_id)?;
         favorite_by_id(&connection, &self.path, &entry.id)?.ok_or_else(|| {
             FsError::new("store_error", "Favorite was not created.", Some(entry.path))
         })
@@ -154,45 +268,86 @@ impl AppStoreState {
 
     pub fn remove_favorite(&self, id: String) -> FsResult<()> {
         let connection = self.connection()?;
+        let group_id = favorite_by_id(&connection, &self.path, &id)?
+            .map(|favorite| favorite.group_id)
+            .unwrap_or_else(|| DEFAULT_FAVORITE_GROUP_ID.to_string());
 
         connection
             .execute("DELETE FROM favorites WHERE id = ?1", params![id])
             .map_err(|error| store_sql_error("Unable to remove favorite", &self.path, error))?;
 
-        reorder_favorites(&connection, &self.path)
+        reorder_favorites_in_group(&connection, &self.path, &group_id)
     }
 
-    pub fn move_favorite(&self, id: String, target_index: i64) -> FsResult<Vec<FavoriteEntry>> {
+    pub fn move_favorite(
+        &self,
+        id: String,
+        target_group_id: Option<String>,
+        target_index: i64,
+    ) -> FsResult<Vec<FavoriteEntry>> {
         let connection = self.connection()?;
-        let mut favorites = list_favorites(&connection, &self.path)?;
-        let Some(source_index) = favorites.iter().position(|favorite| favorite.id == id) else {
-            return Ok(favorites);
+        let Some(existing) = favorite_by_id(&connection, &self.path, &id)? else {
+            return list_favorites(&connection, &self.path);
         };
 
-        let favorite = favorites.remove(source_index);
-        let target_index = target_index.max(0).min(favorites.len() as i64) as usize;
-        let target_index = if source_index < target_index {
+        let source_group_id = existing.group_id;
+        let target_group_id = target_group_id
+            .as_deref()
+            .and_then(|group_id| {
+                favorite_group_id_if_exists(&connection, &self.path, group_id).transpose()
+            })
+            .transpose()?
+            .unwrap_or_else(|| source_group_id.clone());
+
+        let mut source_favorites =
+            list_favorites_in_group(&connection, &self.path, &source_group_id)?;
+        let Some(source_index) = source_favorites
+            .iter()
+            .position(|favorite| favorite.id == id)
+        else {
+            return list_favorites(&connection, &self.path);
+        };
+
+        let mut favorite = source_favorites.remove(source_index);
+        favorite.group_id = target_group_id.clone();
+
+        let same_group = source_group_id == target_group_id;
+        let mut target_favorites = if same_group {
+            source_favorites.clone()
+        } else {
+            list_favorites_in_group(&connection, &self.path, &target_group_id)?
+        };
+
+        let target_limit = target_favorites.len() + usize::from(same_group);
+        let target_index = target_index.max(0).min(target_limit as i64) as usize;
+        let target_index = if same_group && source_index < target_index {
             target_index.saturating_sub(1)
         } else {
             target_index
         };
-        favorites.insert(target_index, favorite);
+        target_favorites.insert(target_index, favorite);
 
         let now = unix_timestamp();
         let transaction = connection
             .unchecked_transaction()
             .map_err(|error| store_sql_error("Unable to reorder favorites", &self.path, error))?;
 
-        for (index, favorite) in favorites.iter().enumerate() {
-            transaction
-                .execute(
-                    "UPDATE favorites SET sort_order = ?1, updated_at = ?2 WHERE id = ?3",
-                    params![index as i64, now, favorite.id],
-                )
-                .map_err(|error| {
-                    store_sql_error("Unable to reorder favorites", &self.path, error)
-                })?;
+        if !same_group {
+            write_favorite_order(
+                &transaction,
+                &self.path,
+                &source_group_id,
+                &source_favorites,
+                now,
+            )?;
         }
+        write_favorite_order(
+            &transaction,
+            &self.path,
+            &target_group_id,
+            &target_favorites,
+            now,
+        )?;
 
         transaction
             .commit()
@@ -403,6 +558,7 @@ fn migrate(connection: &Connection, path: &Path) -> FsResult<()> {
 
             CREATE TABLE IF NOT EXISTS favorites (
               id TEXT PRIMARY KEY,
+              group_id TEXT NOT NULL DEFAULT 'favorites',
               name TEXT NOT NULL,
               path TEXT NOT NULL UNIQUE,
               icon TEXT NOT NULL DEFAULT 'folder',
@@ -412,7 +568,16 @@ fn migrate(connection: &Connection, path: &Path) -> FsResult<()> {
               updated_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS favorite_groups (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              sort_order INTEGER NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_favorites_sort_order ON favorites(sort_order);
+            CREATE INDEX IF NOT EXISTS idx_favorite_groups_sort_order ON favorite_groups(sort_order);
 
             CREATE TABLE IF NOT EXISTS open_with_defaults (
               file_type_key TEXT PRIMARY KEY,
@@ -422,7 +587,71 @@ fn migrate(connection: &Connection, path: &Path) -> FsResult<()> {
             );
             "#,
         )
-        .map_err(|error| store_sql_error("Unable to migrate app store", path, error))
+        .map_err(|error| store_sql_error("Unable to migrate app store", path, error))?;
+
+    ensure_favorites_group_column(connection, path)?;
+    connection
+        .execute(
+            "CREATE INDEX IF NOT EXISTS idx_favorites_group_sort_order ON favorites(group_id, sort_order)",
+            [],
+        )
+        .map_err(|error| store_sql_error("Unable to index favorite groups", path, error))?;
+    seed_default_favorite_group(connection, path)
+}
+
+fn ensure_favorites_group_column(connection: &Connection, path: &Path) -> FsResult<()> {
+    if table_has_column(connection, path, "favorites", "group_id")? {
+        return Ok(());
+    }
+
+    connection
+        .execute(
+            "ALTER TABLE favorites ADD COLUMN group_id TEXT NOT NULL DEFAULT 'favorites'",
+            [],
+        )
+        .map_err(|error| store_sql_error("Unable to migrate favorite groups", path, error))?;
+
+    Ok(())
+}
+
+fn table_has_column(
+    connection: &Connection,
+    path: &Path,
+    table_name: &str,
+    column_name: &str,
+) -> FsResult<bool> {
+    let sql = format!("PRAGMA table_info({table_name})");
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| store_sql_error("Unable to inspect app store", path, error))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| store_sql_error("Unable to inspect app store", path, error))?;
+
+    for row in rows {
+        if row.map_err(|error| store_sql_error("Unable to inspect app store", path, error))?
+            == column_name
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn seed_default_favorite_group(connection: &Connection, path: &Path) -> FsResult<()> {
+    let now = unix_timestamp();
+
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO favorite_groups
+             (id, name, sort_order, created_at, updated_at)
+             VALUES (?1, ?2, 0, ?3, ?3)",
+            params![DEFAULT_FAVORITE_GROUP_ID, DEFAULT_FAVORITE_GROUP_NAME, now],
+        )
+        .map_err(|error| store_sql_error("Unable to seed favorite groups", path, error))?;
+
+    Ok(())
 }
 
 fn seed_default_favorites(connection: &Connection, path: &Path) -> FsResult<()> {
@@ -475,9 +704,19 @@ fn seed_default_favorites(connection: &Connection, path: &Path) -> FsResult<()> 
         transaction
             .execute(
                 "INSERT OR IGNORE INTO favorites
-                 (id, name, path, icon, color, sort_order, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![id, name, favorite_path, icon, color, sort_order, now, now],
+                 (id, group_id, name, path, icon, color, sort_order, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    id,
+                    DEFAULT_FAVORITE_GROUP_ID,
+                    name,
+                    favorite_path,
+                    icon,
+                    color,
+                    sort_order,
+                    now,
+                    now
+                ],
             )
             .map_err(|error| store_sql_error("Unable to seed favorites", path, error))?;
     }
@@ -493,15 +732,15 @@ fn seed_default_favorites(connection: &Connection, path: &Path) -> FsResult<()> 
         .commit()
         .map_err(|error| store_sql_error("Unable to save default favorites", path, error))?;
 
-    reorder_favorites(connection, path)
+    reorder_favorites_in_group(connection, path, DEFAULT_FAVORITE_GROUP_ID)
 }
 
 fn list_favorites(connection: &Connection, path: &Path) -> FsResult<Vec<FavoriteEntry>> {
     let mut statement = connection
         .prepare(
-            "SELECT id, name, path, icon, color, sort_order, created_at, updated_at
+            "SELECT id, group_id, name, path, icon, color, sort_order, created_at, updated_at
              FROM favorites
-             ORDER BY sort_order ASC, name COLLATE NOCASE ASC",
+             ORDER BY group_id ASC, sort_order ASC, name COLLATE NOCASE ASC",
         )
         .map_err(|error| store_sql_error("Unable to read favorites", path, error))?;
 
@@ -513,6 +752,45 @@ fn list_favorites(connection: &Connection, path: &Path) -> FsResult<Vec<Favorite
         .map_err(|error| store_sql_error("Unable to read favorites", path, error))
 }
 
+fn list_favorites_in_group(
+    connection: &Connection,
+    path: &Path,
+    group_id: &str,
+) -> FsResult<Vec<FavoriteEntry>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, group_id, name, path, icon, color, sort_order, created_at, updated_at
+             FROM favorites
+             WHERE group_id = ?1
+             ORDER BY sort_order ASC, name COLLATE NOCASE ASC",
+        )
+        .map_err(|error| store_sql_error("Unable to read favorites", path, error))?;
+
+    let rows = statement
+        .query_map(params![group_id], favorite_from_row)
+        .map_err(|error| store_sql_error("Unable to read favorites", path, error))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| store_sql_error("Unable to read favorites", path, error))
+}
+
+fn list_favorite_groups(connection: &Connection, path: &Path) -> FsResult<Vec<FavoriteGroupEntry>> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, name, sort_order, created_at, updated_at
+             FROM favorite_groups
+             ORDER BY sort_order ASC, name COLLATE NOCASE ASC",
+        )
+        .map_err(|error| store_sql_error("Unable to read favorite groups", path, error))?;
+
+    let rows = statement
+        .query_map([], favorite_group_from_row)
+        .map_err(|error| store_sql_error("Unable to read favorite groups", path, error))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| store_sql_error("Unable to read favorite groups", path, error))
+}
+
 fn favorite_by_path(
     connection: &Connection,
     path: &Path,
@@ -520,7 +798,7 @@ fn favorite_by_path(
 ) -> FsResult<Option<FavoriteEntry>> {
     connection
         .query_row(
-            "SELECT id, name, path, icon, color, sort_order, created_at, updated_at
+            "SELECT id, group_id, name, path, icon, color, sort_order, created_at, updated_at
              FROM favorites
              WHERE path = ?1",
             params![favorite_path],
@@ -537,7 +815,7 @@ fn favorite_by_id(
 ) -> FsResult<Option<FavoriteEntry>> {
     connection
         .query_row(
-            "SELECT id, name, path, icon, color, sort_order, created_at, updated_at
+            "SELECT id, group_id, name, path, icon, color, sort_order, created_at, updated_at
              FROM favorites
              WHERE id = ?1",
             params![id],
@@ -550,13 +828,24 @@ fn favorite_by_id(
 fn favorite_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteEntry> {
     Ok(FavoriteEntry {
         id: row.get(0)?,
+        group_id: row.get(1)?,
+        name: row.get(2)?,
+        path: row.get(3)?,
+        icon: row.get(4)?,
+        color: row.get(5)?,
+        sort_order: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn favorite_group_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteGroupEntry> {
+    Ok(FavoriteGroupEntry {
+        id: row.get(0)?,
         name: row.get(1)?,
-        path: row.get(2)?,
-        icon: row.get(3)?,
-        color: row.get(4)?,
-        sort_order: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        sort_order: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
     })
 }
 
@@ -569,35 +858,111 @@ fn open_with_default_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OpenW
     })
 }
 
-fn next_favorite_sort_order(connection: &Connection, path: &Path) -> FsResult<i64> {
+fn favorite_group_by_id(
+    connection: &Connection,
+    path: &Path,
+    id: &str,
+) -> FsResult<Option<FavoriteGroupEntry>> {
     connection
         .query_row(
-            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM favorites",
-            [],
+            "SELECT id, name, sort_order, created_at, updated_at
+             FROM favorite_groups
+             WHERE id = ?1",
+            params![id],
+            favorite_group_from_row,
+        )
+        .optional()
+        .map_err(|error| store_sql_error("Unable to read favorite group", path, error))
+}
+
+fn favorite_group_by_name(
+    connection: &Connection,
+    path: &Path,
+    name: &str,
+) -> FsResult<Option<FavoriteGroupEntry>> {
+    connection
+        .query_row(
+            "SELECT id, name, sort_order, created_at, updated_at
+             FROM favorite_groups
+             WHERE name = ?1 COLLATE NOCASE",
+            params![name],
+            favorite_group_from_row,
+        )
+        .optional()
+        .map_err(|error| store_sql_error("Unable to read favorite group", path, error))
+}
+
+fn favorite_group_id_if_exists(
+    connection: &Connection,
+    path: &Path,
+    id: &str,
+) -> FsResult<Option<String>> {
+    let id = id.trim();
+
+    if id.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(favorite_group_by_id(connection, path, id)?.map(|group| group.id))
+}
+
+fn next_favorite_sort_order(connection: &Connection, path: &Path, group_id: &str) -> FsResult<i64> {
+    connection
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM favorites WHERE group_id = ?1",
+            params![group_id],
             |row| row.get(0),
         )
         .map_err(|error| store_sql_error("Unable to read favorite order", path, error))
 }
 
-fn reorder_favorites(connection: &Connection, path: &Path) -> FsResult<()> {
-    let favorites = list_favorites(connection, path)?;
+fn next_favorite_group_sort_order(connection: &Connection, path: &Path) -> FsResult<i64> {
+    connection
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM favorite_groups",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| store_sql_error("Unable to read favorite group order", path, error))
+}
+
+fn reorder_favorites_in_group(
+    connection: &Connection,
+    path: &Path,
+    group_id: &str,
+) -> FsResult<()> {
+    let favorites = list_favorites_in_group(connection, path, group_id)?;
     let now = unix_timestamp();
     let transaction = connection
         .unchecked_transaction()
         .map_err(|error| store_sql_error("Unable to normalize favorite order", path, error))?;
 
-    for (index, favorite) in favorites.iter().enumerate() {
-        transaction
-            .execute(
-                "UPDATE favorites SET sort_order = ?1, updated_at = ?2 WHERE id = ?3",
-                params![index as i64, now, favorite.id],
-            )
-            .map_err(|error| store_sql_error("Unable to normalize favorite order", path, error))?;
-    }
+    write_favorite_order(&transaction, path, group_id, &favorites, now)?;
 
     transaction
         .commit()
         .map_err(|error| store_sql_error("Unable to normalize favorite order", path, error))?;
+
+    Ok(())
+}
+
+fn write_favorite_order(
+    transaction: &rusqlite::Transaction<'_>,
+    path: &Path,
+    group_id: &str,
+    favorites: &[FavoriteEntry],
+    now: i64,
+) -> FsResult<()> {
+    for (index, favorite) in favorites.iter().enumerate() {
+        transaction
+            .execute(
+                "UPDATE favorites
+                 SET group_id = ?1, sort_order = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![group_id, index as i64, now, favorite.id],
+            )
+            .map_err(|error| store_sql_error("Unable to reorder favorites", path, error))?;
+    }
 
     Ok(())
 }
@@ -616,10 +981,31 @@ fn normalize_favorite_path(path: &str) -> FsResult<String> {
     Ok(value.trim_end_matches('/').to_string())
 }
 
+fn normalize_favorite_group_name(name: &str) -> FsResult<String> {
+    let value = name.trim();
+
+    if value.is_empty() {
+        return Err(FsError::new(
+            "invalid_favorite_group",
+            "Sidebar group names cannot be empty.",
+            None,
+        ));
+    }
+
+    Ok(value.to_string())
+}
+
 fn favorite_id_for_path(path: &str) -> String {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
     format!("favorite-{:x}", hasher.finish())
+}
+
+fn favorite_group_id_for_name(name: &str, created_at: i64) -> String {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    created_at.hash(&mut hasher);
+    format!("favorite-group-{:x}", hasher.finish())
 }
 
 fn favorite_name_for_path(path: &str) -> String {

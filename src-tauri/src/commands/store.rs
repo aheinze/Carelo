@@ -1,13 +1,33 @@
 use crate::fs::models::{FsError, FsResult};
 use crate::store::{
-    window_dimensions as build_window_dimensions, AppStoreState, FavoriteEntry, FavoriteInput,
-    WindowDimensions,
+    window_dimensions as build_window_dimensions, AppStoreState, FavoriteEntry, FavoriteGroupEntry,
+    FavoriteInput, WindowDimensions,
 };
 use serde_json::Value;
 
 #[tauri::command]
 pub fn list_favorites(store: tauri::State<'_, AppStoreState>) -> FsResult<Vec<FavoriteEntry>> {
     store.list_favorites()
+}
+
+#[tauri::command]
+pub fn list_favorite_groups(
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<Vec<FavoriteGroupEntry>> {
+    store.list_favorite_groups()
+}
+
+#[tauri::command]
+pub fn add_favorite_group(
+    name: String,
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<FavoriteGroupEntry> {
+    store.add_favorite_group(name)
+}
+
+#[tauri::command]
+pub fn remove_favorite_group(id: String, store: tauri::State<'_, AppStoreState>) -> FsResult<()> {
+    store.remove_favorite_group(id)
 }
 
 #[tauri::command]
@@ -26,10 +46,11 @@ pub fn remove_favorite(id: String, store: tauri::State<'_, AppStoreState>) -> Fs
 #[tauri::command]
 pub fn move_favorite(
     id: String,
+    target_group_id: Option<String>,
     target_index: i64,
     store: tauri::State<'_, AppStoreState>,
 ) -> FsResult<Vec<FavoriteEntry>> {
-    store.move_favorite(id, target_index)
+    store.move_favorite(id, target_group_id, target_index)
 }
 
 #[tauri::command]

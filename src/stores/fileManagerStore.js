@@ -3,14 +3,17 @@ import { defineStore } from 'pinia';
 import { listen } from '@tauri-apps/api/event';
 import {
   addFavorite as addStoredFavorite,
+  addFavoriteGroup as addStoredFavoriteGroup,
   cancelFileOperation,
   canUseLocalFileAssets,
   getAppSettings as getStoredAppSettings,
   getHomeDirectory,
   listDirectory,
+  listFavoriteGroups as listStoredFavoriteGroups,
   listFavorites as listStoredFavorites,
   listVolumes,
   moveFavorite as moveStoredFavorite,
+  removeFavoriteGroup as removeStoredFavoriteGroup,
   pauseFileOperation,
   removeFavorite as removeStoredFavorite,
   resumeFileOperation,
@@ -36,6 +39,7 @@ const SORT_DIRECTIONS = ['asc', 'desc'];
 const VIEW_MODES = ['list', 'grid', 'columns'];
 const APPEARANCE_MODES = ['system', 'light', 'dark'];
 const CUSTOM_TOOL_TARGETS = ['both', 'files', 'folders'];
+const DEFAULT_FAVORITE_GROUP_ID = 'favorites';
 const NAV_HISTORY_LIMIT = 80;
 const INACTIVE_TAB_ENTRY_CACHE_LIMIT = 2;
 const LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT = 1500;
@@ -525,6 +529,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const queue = ref([]);
   const operationLog = ref([]);
   const volumes = ref([]);
+  const favoriteGroups = ref([]);
   const favorites = ref([]);
   const columnPreviewEntries = ref({ left: null, right: null });
   const columnSelectionStates = ref({ left: null, right: null });
@@ -550,17 +555,38 @@ export const useFileManagerStore = defineStore('file-manager', () => {
           },
         ],
       },
-      {
-        title: 'Favorites',
-        items: favorites.value.map((favorite) => ({
-          ...favorite,
-          icon: favorite.icon || 'folder',
-          color: favorite.color || '#5ca8ff',
-          isFavorite: true,
-          matchPrefix: true,
-        })),
-      },
     ];
+
+    const knownGroupIds = new Set(favoriteGroups.value.map((group) => group.id));
+    const fallbackGroups = favoriteGroups.value.length
+      ? favoriteGroups.value
+      : [{
+        id: DEFAULT_FAVORITE_GROUP_ID,
+        name: 'Favorites',
+        sortOrder: 0,
+      }];
+    const groupedFavorites = new Map(
+      fallbackGroups.map((group) => [group.id, []]),
+    );
+
+    for (const favorite of favorites.value) {
+      const groupId = knownGroupIds.has(favorite.groupId)
+        ? favorite.groupId
+        : DEFAULT_FAVORITE_GROUP_ID;
+
+      if (!groupedFavorites.has(groupId)) {
+        groupedFavorites.set(groupId, []);
+      }
+
+      groupedFavorites.get(groupId).push({
+        ...favorite,
+        favoriteGroupId: groupId,
+        icon: favorite.icon || 'folder',
+        color: favorite.color || '#5ca8ff',
+        isFavorite: true,
+        matchPrefix: true,
+      });
+    }
 
     sections.splice(1, 0, {
       title: 'Devices',
@@ -583,7 +609,17 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       }),
     });
 
-    return sections;
+    return [
+      ...sections,
+      ...fallbackGroups.map((group) => ({
+        id: group.id,
+        title: group.name,
+        favoriteGroupId: group.id,
+        isFavoriteGroup: true,
+        isDefaultFavoriteGroup: group.id === DEFAULT_FAVORITE_GROUP_ID,
+        items: groupedFavorites.get(group.id) || [],
+      })),
+    ];
   });
 
   const activePane = computed(() => activeTabFor(activePaneId.value));
@@ -616,6 +652,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       await loadAppSettings();
       await initializeOperationProgressListener();
       await Promise.all([
+        loadFavoriteGroups(),
         loadFavorites(),
         refreshVolumes(),
       ]);
@@ -698,6 +735,18 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       favorites.value = await listStoredFavorites();
     } catch {
       favorites.value = [];
+    }
+  }
+
+  async function loadFavoriteGroups() {
+    try {
+      favoriteGroups.value = await listStoredFavoriteGroups();
+    } catch {
+      favoriteGroups.value = [{
+        id: DEFAULT_FAVORITE_GROUP_ID,
+        name: 'Favorites',
+        sortOrder: 0,
+      }];
     }
   }
 
@@ -1991,8 +2040,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     );
   }
 
-  function favoriteInputForEntry(entry) {
+  function favoriteInputForEntry(entry, groupId = DEFAULT_FAVORITE_GROUP_ID) {
     return {
+      groupId,
       name: entry.name,
       path: entry.path,
       icon: entry.path === '~' ? 'home' : 'folder',
@@ -2000,7 +2050,11 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     };
   }
 
-  async function addFavoritesFromEntries(entries, targetIndex = null) {
+  async function addFavoritesFromEntries(
+    entries,
+    targetIndex = null,
+    groupId = DEFAULT_FAVORITE_GROUP_ID,
+  ) {
     const directories = (entries || []).filter((entry) =>
       entry?.kind === 'directory' && entry.path && !isArchivePath(entry.path),
     );
@@ -2010,16 +2064,49 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     }
 
     const added = [];
-    let insertIndex = Number.isInteger(targetIndex) ? targetIndex : favorites.value.length;
+    let insertIndex = Number.isInteger(targetIndex)
+      ? targetIndex
+      : favorites.value.filter((favorite) =>
+        (favorite.groupId || DEFAULT_FAVORITE_GROUP_ID) === groupId,
+      ).length;
 
     for (const entry of directories) {
-      const favorite = await addStoredFavorite(favoriteInputForEntry(entry));
+      const favorite = await addStoredFavorite(favoriteInputForEntry(entry, groupId));
       added.push(favorite);
-      favorites.value = await moveStoredFavorite(favorite.id, insertIndex);
+      favorites.value = await moveStoredFavorite(favorite.id, insertIndex, groupId);
       insertIndex += 1;
     }
 
     return added;
+  }
+
+  async function addFavoriteGroup(name) {
+    const group = await addStoredFavoriteGroup(name);
+    const existingIndex = favoriteGroups.value.findIndex((item) => item.id === group.id);
+
+    if (existingIndex >= 0) {
+      favoriteGroups.value.splice(existingIndex, 1, group);
+    } else {
+      favoriteGroups.value.push(group);
+      favoriteGroups.value.sort((a, b) =>
+        (a.sortOrder ?? 0) - (b.sortOrder ?? 0)
+        || NAME_COLLATOR.compare(a.name || '', b.name || ''),
+      );
+    }
+
+    return group;
+  }
+
+  async function removeFavoriteGroup(id) {
+    if (!id || id === DEFAULT_FAVORITE_GROUP_ID) {
+      return;
+    }
+
+    await removeStoredFavoriteGroup(id);
+    await Promise.all([
+      loadFavoriteGroups(),
+      loadFavorites(),
+    ]);
   }
 
   async function removeFavorite(id) {
@@ -2031,12 +2118,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     favorites.value = favorites.value.filter((favorite) => favorite.id !== id);
   }
 
-  async function moveFavorite(id, targetIndex) {
+  async function moveFavorite(id, targetIndex, targetGroupId = null) {
     if (!id) {
       return;
     }
 
-    favorites.value = await moveStoredFavorite(id, targetIndex);
+    favorites.value = await moveStoredFavorite(id, targetIndex, targetGroupId);
   }
 
   function setPaneSort(paneId, sortKey) {
@@ -2239,6 +2326,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     queue,
     operationLog,
     volumes,
+    favoriteGroups,
     favorites,
     columnRefreshRequests,
     columnSelectionResetKeys,
@@ -2308,6 +2396,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     setFileDragMode,
     clearFileDrag,
     isFavoritePath,
+    addFavoriteGroup,
+    removeFavoriteGroup,
     addFavoritesFromEntries,
     removeFavorite,
     moveFavorite,
