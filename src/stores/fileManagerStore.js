@@ -7,6 +7,7 @@ import {
   cancelFileOperation,
   canUseLocalFileAssets,
   checkRemoteVolume,
+  clearRemotePreviewCache,
   getAppSettings as getStoredAppSettings,
   getHomeDirectory,
   listDirectory,
@@ -39,6 +40,7 @@ let nextOperationLogId = 1;
 let remoteHealthRefreshInFlight = false;
 let activeRemoteSyncTimer = null;
 let lastReportedRemoteVolumeIds = '';
+let stopRemoteEditSyncListener = null;
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
 const SORT_DIRECTIONS = ['asc', 'desc'];
 const VIEW_MODES = ['list', 'grid', 'columns'];
@@ -355,6 +357,16 @@ function parentPathFor(path) {
 
   const parent = cleanPath.slice(0, cleanPath.lastIndexOf('/'));
   return parent || '/';
+}
+
+function fileNameForPath(path) {
+  const cleanPath = String(path || '').replace(/\/+$/, '');
+
+  if (!cleanPath || cleanPath === '/' || cleanPath === '~') {
+    return cleanPath || '~';
+  }
+
+  return cleanPath.split('/').filter(Boolean).pop() || cleanPath;
 }
 
 function normalizeComparablePath(path) {
@@ -748,7 +760,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     initializePromise = (async () => {
       await loadAppSettings();
-      await initializeOperationProgressListener();
+      await Promise.all([
+        initializeOperationProgressListener(),
+        initializeRemoteEditSyncListener(),
+      ]);
       await Promise.all([
         loadFavoriteGroups(),
         loadFavorites(),
@@ -817,6 +832,56 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       });
     } catch {
       stopOperationProgressListener = null;
+    }
+  }
+
+  async function initializeRemoteEditSyncListener() {
+    if (stopRemoteEditSyncListener || !canUseLocalFileAssets()) {
+      return;
+    }
+
+    let stopSynced = null;
+    let stopFailed = null;
+
+    try {
+      stopSynced = await listen('remote-edit-synced', (event) => {
+        const path = event.payload?.path || '';
+
+        if (!path) {
+          return;
+        }
+
+        clearRemotePreviewCache(path);
+        reloadDirectoryInPanes(parentPathFor(path)).catch(() => {});
+        addOperationLog({
+          operation: 'remote-edit',
+          label: 'Remote edit synced',
+          detail: fileNameForPath(path),
+          status: 'completed',
+          path,
+        });
+      });
+      stopFailed = await listen('remote-edit-sync-failed', (event) => {
+        const path = event.payload?.path || '';
+        const message = event.payload?.message || 'Unable to sync remote edit.';
+
+        addOperationLog({
+          operation: 'remote-edit',
+          label: 'Remote edit not synced',
+          detail: message,
+          status: 'failed',
+          path,
+        });
+      });
+
+      stopRemoteEditSyncListener = () => {
+        stopSynced();
+        stopFailed();
+      };
+    } catch {
+      stopSynced?.();
+      stopFailed?.();
+      stopRemoteEditSyncListener = null;
     }
   }
 

@@ -3,11 +3,12 @@ use crate::fs::models::{FileEntry, FileEntryKind, FileMetadata, FsError, FsResul
 use crate::fs::provider::FileProvider;
 use crate::fs::remote::{
     check_registered_remote, check_remote, copy_local_to_remote_item, copy_remote_item,
-    copy_remote_to_local_item, create_remote_folder, delete_remote_item, list_remote_directory,
-    materialize_remote_file, measure_remote_items_size as measure_remote_paths_size,
-    move_local_to_remote_item, move_remote_item, move_remote_to_local_item, parse_remote_path,
-    read_remote_file_prefix, release_remote_volume_resources, rename_remote_item, stat_remote_item,
-    RemotePath, RemoteReleaseResult, RemoteSizeMeasure, RemoteVolumeConfig, RemoteVolumeInfo,
+    copy_remote_to_local_item, create_remote_folder, delete_remote_item, format_remote_uri,
+    list_remote_directory, materialize_remote_file,
+    measure_remote_items_size as measure_remote_paths_size, move_local_to_remote_item,
+    move_remote_item, move_remote_to_local_item, parse_remote_path, read_remote_file_prefix,
+    release_remote_volume_resources, rename_remote_item, stat_remote_item, RemotePath,
+    RemoteReleaseResult, RemoteSizeMeasure, RemoteVolumeConfig, RemoteVolumeInfo,
     RemoteVolumeState,
 };
 use crate::fs::sudo;
@@ -35,8 +36,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, Manager};
 
 const MEDIA_PREVIEW_MAX_BYTES: u64 = 128 * 1024 * 1024;
 const MEDIA_STREAM_MAX_ENTRIES: usize = 256;

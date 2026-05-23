@@ -27,6 +27,10 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  canRemoteEdit: {
+    type: Boolean,
+    default: false,
+  },
   canCustomTools: {
     type: Boolean,
     default: true,
@@ -256,6 +260,16 @@ onUnmounted(() => {
       <button type="button" role="menuitem" class="context-menu-item" @click="emitAction('open')">
         <AppIcon :name="entry.kind === 'directory' ? 'folder' : 'file'" :size="16" />
         <span>Open</span>
+      </button>
+      <button
+        v-if="canRemoteEdit"
+        type="button"
+        role="menuitem"
+        class="context-menu-item"
+        @click="emitAction('editRemote')"
+      >
+        <AppIcon name="sync" :size="16" />
+        <span>Edit Remote File</span>
       </button>
       <button
         type="button"

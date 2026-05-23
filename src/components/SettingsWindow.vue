@@ -635,7 +635,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
               <section v-else-if="activeSectionId === 'tools'" class="settings-page">
                 <div class="settings-section-heading">
                   <h3>Tools</h3>
-                  <p>Add commands to the file context menu for local files and folders.</p>
+                  <p>Add commands to the file context menu for files and folders.</p>
                 </div>
 
                 <div class="settings-group">

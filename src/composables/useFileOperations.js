@@ -61,6 +61,21 @@ function cacheRemotePreview(kind, path, maxBytes, value, byteLength = 0) {
   }
 }
 
+export function clearRemotePreviewCache(pathPrefix = '') {
+  const prefix = String(pathPrefix || '');
+
+  if (!prefix) {
+    remotePreviewCache.clear();
+    return;
+  }
+
+  for (const key of remotePreviewCache.keys()) {
+    if (key.endsWith(`\0${prefix}`)) {
+      remotePreviewCache.delete(key);
+    }
+  }
+}
+
 function previewPayloadByteLength(payload) {
   if (!payload) {
     return 0;

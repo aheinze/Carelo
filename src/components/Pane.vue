@@ -283,6 +283,11 @@ const canOpenWithContext = computed(() => {
 
   return operationEntries.length === 1 && operationEntries[0]?.kind === 'file' && isLocalEntry(operationEntries[0]);
 });
+const canRemoteEditContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  return operationEntries.length === 1 && operationEntries[0]?.kind === 'file' && isRemoteEntry(operationEntries[0]);
+});
 const configuredCustomTools = computed(() =>
   (store.appSettings.customTools || []).filter((tool) => tool?.enabled !== false && tool?.name && tool?.command),
 );
@@ -1198,6 +1203,10 @@ function isLocalEntry(entry) {
   return Boolean(entry?.path) && !isArchivePath(entry.path);
 }
 
+function isRemoteEntry(entry) {
+  return Boolean(entry?.path?.startsWith('remote://')) && !isArchivePath(entry.path);
+}
+
 function isZipEntry(entry) {
   return entry?.kind === 'file' && !isArchivePath(entry.path) && /\.zip$/i.test(entry.name || '');
 }
@@ -1638,6 +1647,11 @@ async function handleContextAction(action) {
       return;
     }
 
+    if (action === 'editRemote') {
+      await openWithDefaultApp(entry.path);
+      return;
+    }
+
     if (action === 'reveal') {
       await revealInFileManager(entry.path);
       return;
@@ -1934,6 +1948,7 @@ async function handleContextAction(action) {
       :can-archive="canArchiveContext"
       :can-unarchive="canUnarchiveContext"
       :can-open-with="canOpenWithContext"
+      :can-remote-edit="canRemoteEditContext"
       :can-custom-tools="canRunCustomToolContext"
       :custom-tools="availableCustomTools"
       :can-transfer="canTransferToOtherPane"
