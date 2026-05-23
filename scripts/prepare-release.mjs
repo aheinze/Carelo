@@ -7,12 +7,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const today = new Date().toISOString().slice(0, 10);
-const args = process.argv.slice(2);
-const version = args.find((arg) => !arg.startsWith('-'));
-const dryRun = args.includes('--dry-run');
-const noCommit = args.includes('--no-commit');
-const noTag = args.includes('--no-tag');
-const help = args.includes('--help') || args.includes('-h');
+const parsedArgs = parseArgs(process.argv.slice(2));
+const version = parsedArgs.positionals[0] || '';
+const dryRun = parsedArgs.flags.has('--dry-run');
+const noCommit = parsedArgs.flags.has('--no-commit');
+const noTag = parsedArgs.flags.has('--no-tag');
+const help = parsedArgs.flags.has('--help') || parsedArgs.flags.has('-h');
 const date = getOptionValue('--date') || today;
 const rpmRelease = getOptionValue('--rpm-release') || '1';
 const tagName = version ? `v${version}` : '';
@@ -29,6 +29,10 @@ const files = {
 if (help || !version) {
   printHelp();
   process.exit(help ? 0 : 1);
+}
+
+if (parsedArgs.positionals.length > 1) {
+  fail(`Unexpected extra argument "${parsedArgs.positionals[1]}". Pass exactly one version.`);
 }
 
 if (!isValidVersion(version)) {
@@ -88,17 +92,59 @@ const branch = gitOutput(['branch', '--show-current']) || 'HEAD';
 const pushTarget = noTag ? branch : `${branch} ${tagName}`;
 log(`Prepared ${tagName}. Push it with: git push origin ${pushTarget}`);
 
-function getOptionValue(name) {
-  const exact = args.indexOf(name);
+function parseArgs(argv) {
+  const flags = new Set();
+  const options = new Map();
+  const positionals = [];
+  const optionsWithValues = new Set(['--date', '--rpm-release']);
+  const knownFlags = new Set(['--dry-run', '--no-commit', '--no-tag', '--help', '-h']);
 
-  if (exact !== -1) {
-    return args[exact + 1];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+
+    if (arg === '--') {
+      positionals.push(...argv.slice(index + 1));
+      break;
+    }
+
+    if (!arg.startsWith('-')) {
+      positionals.push(arg);
+      continue;
+    }
+
+    const equalsIndex = arg.indexOf('=');
+    const optionName = equalsIndex === -1 ? arg : arg.slice(0, equalsIndex);
+    const inlineValue = equalsIndex === -1 ? '' : arg.slice(equalsIndex + 1);
+
+    if (optionsWithValues.has(optionName)) {
+      const value = equalsIndex === -1 ? argv[index + 1] : inlineValue;
+
+      if (!value || (equalsIndex === -1 && value.startsWith('-'))) {
+        fail(`Missing value for ${optionName}.`);
+      }
+
+      options.set(optionName, value);
+
+      if (equalsIndex === -1) {
+        index += 1;
+      }
+
+      continue;
+    }
+
+    if (knownFlags.has(arg)) {
+      flags.add(arg);
+      continue;
+    }
+
+    fail(`Unknown option "${arg}".`);
   }
 
-  const prefix = `${name}=`;
-  const arg = args.find((item) => item.startsWith(prefix));
+  return { flags, options, positionals };
+}
 
-  return arg ? arg.slice(prefix.length) : '';
+function getOptionValue(name) {
+  return parsedArgs.options.get(name) || '';
 }
 
 function updatePackageJson() {
@@ -202,7 +248,11 @@ function git(argsForGit) {
 }
 
 function gitOutput(argsForGit) {
-  return execFileSync('git', argsForGit, { cwd: root, encoding: 'utf8' }).trim();
+  return execFileSync('git', argsForGit, {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
 }
 
 function hasStagedChanges() {
