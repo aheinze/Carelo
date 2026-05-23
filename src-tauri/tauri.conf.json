@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Carelo",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "identifier": "dev.carelo.filemanager",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -36,7 +36,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "appimage"],
+    "targets": [
+      "deb",
+      "rpm",
+      "appimage"
+    ],
     "createUpdaterArtifacts": true,
     "publisher": "Agentejo - Artur Heinze",
     "copyright": "Copyright © 2026 Agentejo - Artur Heinze",
@@ -64,7 +68,7 @@
         "files": {
           "/usr/share/metainfo/dev.carelo.filemanager.metainfo.xml": "linux/dev.carelo.filemanager.metainfo.xml"
         },
-        "release": "4"
+        "release": "1"
       }
     }
   },
