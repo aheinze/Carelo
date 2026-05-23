@@ -1,7 +1,7 @@
 {
   "name": "carelo",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "description": "Fast, local-first file management with dual panes and custom tools.",
   "scripts": {
