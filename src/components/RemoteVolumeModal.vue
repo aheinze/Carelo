@@ -20,6 +20,30 @@ const OAUTH_CALLBACK_URL = 'http://127.0.0.1:53682/oauth/callback';
 const NETWORK_LOCATION_SCHEME = 'network';
 const oauthClientSecretRequired = new Set(['gdrive', 'dropbox']);
 const hiddenProviderSchemes = new Set(['b2', 'gdrive', 'onedrive', 'dropbox', 'swift']);
+const basicProviderSchemes = new Set([NETWORK_LOCATION_SCHEME, 's3']);
+const showAdvancedProviders = ref(false);
+const networkProtocolOptions = [
+  { value: 'sftp', label: 'SFTP' },
+  { value: 'smb', label: 'SMB' },
+  { value: 'ftp', label: 'FTP' },
+  { value: 'ftps', label: 'FTPS' },
+  { value: 'davs', label: 'WebDAV' },
+  { value: 'dav', label: 'WebDAV HTTP' },
+];
+const networkProtocolKinds = {
+  ssh: 'sftp',
+  sftp: 'sftp',
+  smb: 'smb',
+  cifs: 'smb',
+  ftp: 'ftp',
+  ftps: 'ftp',
+  dav: 'webdav',
+  davs: 'webdav',
+  webdav: 'webdav',
+  webdavs: 'webdav',
+  http: 'webdav',
+  https: 'webdav',
+};
 
 // ── Protocol custom select ─────────────────────────────────
 const protocolDropdownOpen = ref(false);
@@ -51,8 +75,19 @@ function toggleProtocolDropdown() {
 }
 
 function selectProtocol(scheme) {
+  if (!basicProviderSchemes.has(scheme)) {
+    showAdvancedProviders.value = true;
+  }
   form.scheme = scheme;
   closeProtocolDropdown();
+}
+
+function toggleAdvancedProviders() {
+  showAdvancedProviders.value = !showAdvancedProviders.value;
+
+  if (!showAdvancedProviders.value && !basicProviderSchemes.has(form.scheme)) {
+    form.scheme = NETWORK_LOCATION_SCHEME;
+  }
 }
 
 function handleProtocolOutsideClick(e) {
@@ -70,18 +105,33 @@ onUnmounted(closeProtocolDropdown);
 // Special: { divider: 'Label' } renders a section heading inside the creds grid.
 const providers = [
   {
-    label: 'Network Location',
+    label: 'Server Address',
     scheme: NETWORK_LOCATION_SCHEME,
     icon: 'network',
-    description: 'Connect by server address',
+    description: 'SMB, SFTP, FTP, WebDAV',
     rootPlaceholder: '',
     fields: [
-      { key: 'address', label: 'Server Address', type: 'text', placeholder: 'sftp://server.example.com/home/user' },
+      { key: 'protocol', label: 'Protocol', type: 'select', default: 'sftp' },
+      { key: 'host', label: 'Host', type: 'text', placeholder: 'server.example.com/path' },
       { key: 'username', label: 'Username', type: 'text', placeholder: '', optional: true, half: true },
-      { key: 'password', label: 'Password', type: 'password', placeholder: 'FTP / WebDAV', optional: true, half: true },
+      { key: 'password', label: 'Password', type: 'password', placeholder: '', optional: true, half: true },
+      { key: 'domain', label: 'Domain / Workgroup', type: 'text', placeholder: 'WORKGROUP', optional: true, half: true },
       { key: 'key', label: 'SSH Private Key / Path', type: 'text', placeholder: '~/.ssh/id_rsa', optional: true },
       { key: 'known_hosts_strategy', label: 'SSH Known Hosts', type: 'select', optional: true, half: true,
         options: [{ value: '', label: '— default (strict) —' }, { value: 'strict', label: 'Strict' }, { value: 'accept', label: 'Accept all' }, { value: 'add', label: 'Add & trust' }] },
+    ],
+  },
+  {
+    label: 'SMB / CIFS',
+    scheme: 'smb',
+    icon: 'server',
+    description: 'Windows and NAS shares',
+    rootPlaceholder: 'Projects',
+    fields: [
+      { key: 'endpoint', label: 'Share URL', type: 'text', placeholder: 'smb://server/share' },
+      { key: 'username', label: 'Username', type: 'text', placeholder: '', optional: true, half: true },
+      { key: 'password', label: 'Password', type: 'password', placeholder: '', optional: true, half: true },
+      { key: 'domain', label: 'Domain / Workgroup', type: 'text', placeholder: 'WORKGROUP', optional: true, half: true },
     ],
   },
   {
@@ -94,6 +144,7 @@ const providers = [
       { key: 'endpoint', label: 'Host', type: 'text', placeholder: 'example.com', half: true },
       { key: '_port', label: 'Port', type: 'text', placeholder: '22', optional: true, half: true },
       { key: 'user', label: 'Username', type: 'text', placeholder: 'deploy', optional: true, half: true },
+      { key: 'password', label: 'Password', type: 'password', placeholder: '', optional: true, half: true },
       { key: 'key', label: 'Private Key / Path', type: 'text', placeholder: '~/.ssh/id_rsa  or  raw PEM/OpenSSH key', optional: true },
       { key: 'known_hosts_strategy', label: 'Known Hosts Strategy', type: 'select', optional: true, half: true,
         options: [{ value: '', label: '— default (strict) —' }, { value: 'strict', label: 'Strict' }, { value: 'accept', label: 'Accept all' }, { value: 'add', label: 'Add & trust' }] },
@@ -280,13 +331,23 @@ const providers = [
   },
 ];
 
-const visibleProviders = providers.filter((provider) => !hiddenProviderSchemes.has(provider.scheme));
-const initialProvider = visibleProviders[0] ?? providers[0];
+const initialProvider = providers.find((provider) => provider.scheme === NETWORK_LOCATION_SCHEME) ?? providers[0];
+const visibleProviders = computed(() => providers.filter((provider) => {
+  if (hiddenProviderSchemes.has(provider.scheme)) {
+    return false;
+  }
+
+  return showAdvancedProviders.value || basicProviderSchemes.has(provider.scheme);
+}));
+const hasAdvancedProviders = computed(() => providers.some((provider) => (
+  !hiddenProviderSchemes.has(provider.scheme)
+  && !basicProviderSchemes.has(provider.scheme)
+)));
 
 function makeFields(provider) {
   const obj = {};
   for (const f of provider.fields) {
-    if (!f.divider) obj[f.key] = '';
+    if (!f.divider) obj[f.key] = f.default ?? '';
   }
   return obj;
 }
@@ -302,8 +363,28 @@ const selectedProvider = computed(
   () => providers.find((p) => p.scheme === form.scheme) ?? initialProvider,
 );
 const isNetworkLocation = computed(() => selectedProvider.value.scheme === NETWORK_LOCATION_SCHEME);
-const primaryFieldKey = computed(() => (isNetworkLocation.value ? 'address' : ''));
+const primaryFieldKey = computed(() => (isNetworkLocation.value ? 'host' : ''));
 const selectedProviderSupportsOAuth = computed(() => Boolean(selectedProvider.value.oauth));
+const selectedNetworkProtocol = computed(() => (
+  form.fields.protocol || networkProtocolOptions[0].value
+).toLowerCase());
+const selectedNetworkKind = computed(() => (
+  networkProtocolKinds[selectedNetworkProtocol.value] ?? 'sftp'
+));
+const isNetworkSmb = computed(() => selectedNetworkKind.value === 'smb');
+const isNetworkSftp = computed(() => selectedNetworkKind.value === 'sftp');
+const networkHostPlaceholder = computed(() => {
+  switch (selectedNetworkKind.value) {
+    case 'smb':
+      return 'nas.local/share';
+    case 'ftp':
+      return 'ftp.example.com/public_html';
+    case 'webdav':
+      return 'cloud.example.com/remote.php/dav/files/user';
+    default:
+      return 'server.example.com/home/user';
+  }
+});
 
 function setPrimaryFieldInput(el) {
   primaryFieldInput.value = el;
@@ -325,6 +406,26 @@ watch(
 );
 
 watch(
+  () => form.fields.protocol,
+  () => {
+    if (!isNetworkLocation.value) {
+      return;
+    }
+
+    errorMessage.value = '';
+
+    if (!isNetworkSmb.value) {
+      form.fields.domain = '';
+    }
+
+    if (!isNetworkSftp.value) {
+      form.fields.key = '';
+      form.fields.known_hosts_strategy = '';
+    }
+  },
+);
+
+watch(
   () => props.visible,
   async (visible) => {
     if (!visible) {
@@ -335,6 +436,7 @@ watch(
     form.scheme = initialProvider.scheme;
     form.root = '';
     form.fields = makeFields(initialProvider);
+    showAdvancedProviders.value = false;
     errorMessage.value = '';
     oauthMessage.value = '';
     primaryFieldInput.value = null;
@@ -381,9 +483,20 @@ function normalizeNetworkRoot(pathname) {
     .replace(/\/+$/, '');
 }
 
+function networkPathSegments(url) {
+  return String(url.pathname || '')
+    .split('/')
+    .filter(Boolean);
+}
+
 function networkEndpoint(url, protocol, targetScheme) {
   if (targetScheme === 'sftp') {
     return url.host;
+  }
+
+  if (targetScheme === 'smb') {
+    const share = networkPathSegments(url)[0] || '';
+    return `smb://${url.host}/${share}`;
   }
 
   if (targetScheme === 'ftp') {
@@ -395,8 +508,88 @@ function networkEndpoint(url, protocol, targetScheme) {
   return `${webdavProtocol}://${url.host}`;
 }
 
+function networkAddressFromFields() {
+  const host = (form.fields.host || '').trim();
+
+  if (!host) {
+    return '';
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(host)) {
+    return host;
+  }
+
+  const protocol = selectedNetworkProtocol.value || 'sftp';
+
+  if (host.startsWith('//')) {
+    return `${protocol}:${host}`;
+  }
+
+  return `${protocol}://${host}`;
+}
+
+function protocolOptionForUrlProtocol(protocol) {
+  const aliases = {
+    ssh: 'sftp',
+    cifs: 'smb',
+    webdav: 'davs',
+    webdavs: 'davs',
+    https: 'davs',
+    http: 'dav',
+  };
+  const normalized = aliases[protocol] ?? protocol;
+
+  return networkProtocolOptions.some((option) => option.value === normalized)
+    ? normalized
+    : '';
+}
+
+function normalizeNetworkHostField() {
+  const host = (form.fields.host || '').trim();
+
+  if (!host) {
+    form.fields.host = '';
+    return;
+  }
+
+  const match = host.match(/^([a-z][a-z0-9+.-]*):\/\//i);
+
+  if (!match) {
+    form.fields.host = host;
+    return;
+  }
+
+  const protocol = protocolOptionForUrlProtocol(match[1].toLowerCase());
+
+  if (!protocol) {
+    return;
+  }
+
+  try {
+    const url = new URL(host);
+    const suffix = `${url.pathname || ''}${url.search || ''}${url.hash || ''}`;
+    const username = decodeUrlValue(url.username);
+    const password = decodeUrlValue(url.password || '');
+
+    form.fields.protocol = protocol;
+    form.fields.host = `${url.host}${suffix === '/' ? '' : suffix}`;
+
+    if (username && !form.fields.username?.trim()) {
+      form.fields.username = username;
+    }
+
+    if (password && !form.fields.password?.trim()) {
+      form.fields.password = password;
+    }
+  } catch {
+    form.fields.host = host;
+  }
+}
+
 function networkVolumeName(url, targetScheme) {
-  const rootName = normalizeNetworkRoot(url.pathname)
+  const rootName = (targetScheme === 'smb'
+    ? decodeUrlValue(networkPathSegments(url)[0] || '')
+    : normalizeNetworkRoot(url.pathname))
     .split('/')
     .filter(Boolean)
     .pop();
@@ -405,40 +598,24 @@ function networkVolumeName(url, targetScheme) {
 }
 
 function parseNetworkLocation() {
-  const address = (form.fields.address || '').trim();
+  const address = networkAddressFromFields();
 
   if (!address) {
-    return { error: 'Enter a server address.' };
+    return { error: 'Enter a server host or path.' };
   }
 
   let url;
   try {
     url = new URL(address);
   } catch {
-    return { error: 'Use a full server address, for example sftp://server/path or davs://server/path.' };
+    return { error: 'Enter a valid server address, for example server/path or nas/share.' };
   }
 
   const protocol = url.protocol.replace(/:$/, '').toLowerCase();
-  const protocolMap = {
-    ssh: 'sftp',
-    sftp: 'sftp',
-    ftp: 'ftp',
-    ftps: 'ftp',
-    dav: 'webdav',
-    davs: 'webdav',
-    webdav: 'webdav',
-    webdavs: 'webdav',
-    http: 'webdav',
-    https: 'webdav',
-  };
-  const targetScheme = protocolMap[protocol];
-
-  if (['smb', 'cifs'].includes(protocol)) {
-    return { error: 'SMB shares are not supported by the embedded remote backend yet. Use SFTP, FTP/FTPS, or WebDAV.' };
-  }
+  const targetScheme = networkProtocolKinds[protocol];
 
   if (!targetScheme) {
-    return { error: 'Supported network addresses are sftp://, ssh://, ftp://, ftps://, dav://, davs://, webdav://, http://, and https://.' };
+    return { error: 'Supported network addresses are smb://, cifs://, sftp://, ssh://, ftp://, ftps://, dav://, davs://, webdav://, http://, and https://.' };
   }
 
   if (!url.hostname) {
@@ -447,16 +624,29 @@ function parseNetworkLocation() {
 
   const username = (form.fields.username || '').trim() || decodeUrlValue(url.username);
   const password = (form.fields.password || '').trim() || decodeUrlValue(url.password);
-  const root = normalizeNetworkRoot(url.pathname);
+  const domain = (form.fields.domain || '').trim();
+  const root = targetScheme === 'smb'
+    ? normalizeNetworkRoot(`/${networkPathSegments(url).slice(1).join('/')}`)
+    : normalizeNetworkRoot(url.pathname);
   const options = {
     endpoint: networkEndpoint(url, protocol, targetScheme),
   };
 
-  if (targetScheme === 'sftp' && password) {
-    return { error: 'SFTP password authentication is not supported here. Use an SSH key or SSH agent.' };
+  if (targetScheme === 'smb' && !networkPathSegments(url)[0]) {
+    return { error: 'SMB/CIFS addresses must include a share name, for example smb://server/share.' };
   }
 
-  if (targetScheme === 'webdav') {
+  if (targetScheme === 'smb') {
+    if (username) options.username = username;
+    if (password) options.password = password;
+    if (domain) options.domain = domain;
+  } else if (targetScheme === 'sftp') {
+    if (password && !username) {
+      return { error: 'SFTP password authentication requires a username.' };
+    }
+    if (username) options.user = username;
+    if (password) options.password = password;
+  } else if (targetScheme === 'webdav') {
     if (username) options.username = username;
     if (password) options.password = password;
   } else {
@@ -695,7 +885,19 @@ async function submit() {
           <form class="remote-form" @submit.prevent="submit">
             <!-- Protocol picker -->
             <div class="remote-section">
-              <p class="remote-section-label">Protocol</p>
+              <div class="remote-section-heading">
+                <p class="remote-section-label">Connection</p>
+                <button
+                  v-if="hasAdvancedProviders"
+                  type="button"
+                  class="provider-advanced-toggle"
+                  :class="{ 'provider-advanced-toggle--active': showAdvancedProviders }"
+                  @click="toggleAdvancedProviders"
+                >
+                  <AppIcon name="sliders" :size="13" :stroke-width="2" />
+                  Advanced forms
+                </button>
+              </div>
               <div ref="protocolTriggerRef" class="protocol-select">
                 <button
                   type="button"
@@ -782,7 +984,7 @@ async function submit() {
 
             <!-- Provider-specific credentials -->
             <div class="remote-section">
-              <p class="remote-section-label">{{ isNetworkLocation ? 'Server Address' : 'Credentials' }}</p>
+              <p class="remote-section-label">{{ isNetworkLocation ? 'Details' : 'Credentials' }}</p>
               <div v-if="selectedProviderSupportsOAuth" class="oauth-helper">
                 <div class="oauth-helper-copy">
                   <strong>OAuth</strong>
@@ -801,7 +1003,83 @@ async function submit() {
               <p v-if="oauthMessage" class="oauth-message">
                 {{ oauthMessage }}
               </p>
-              <div class="creds-grid">
+              <div v-if="isNetworkLocation" class="network-fields">
+                <label class="remote-field">
+                  <span>Server</span>
+                  <div class="server-address-control">
+                    <select v-model="form.fields.protocol" aria-label="Protocol">
+                      <option
+                        v-for="option in networkProtocolOptions"
+                        :key="option.value"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </option>
+                    </select>
+                    <input
+                      ref="primaryFieldInput"
+                      v-model="form.fields.host"
+                      type="text"
+                      autocomplete="off"
+                      spellcheck="false"
+                      :placeholder="networkHostPlaceholder"
+                      aria-label="Server host and path"
+                      @blur="normalizeNetworkHostField"
+                    />
+                  </div>
+                </label>
+
+                <div class="creds-grid">
+                  <label class="remote-field remote-field--half">
+                    <span>Username <em>(optional)</em></span>
+                    <input
+                      v-model="form.fields.username"
+                      type="text"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <label class="remote-field remote-field--half">
+                    <span>Password <em>(optional)</em></span>
+                    <input
+                      v-model="form.fields.password"
+                      type="password"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                  </label>
+                  <label v-if="isNetworkSmb" class="remote-field remote-field--half">
+                    <span>Domain / Workgroup <em>(optional)</em></span>
+                    <input
+                      v-model="form.fields.domain"
+                      type="text"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="WORKGROUP"
+                    />
+                  </label>
+                  <label v-if="isNetworkSftp" class="remote-field">
+                    <span>SSH Private Key / Path <em>(optional)</em></span>
+                    <input
+                      v-model="form.fields.key"
+                      type="text"
+                      autocomplete="off"
+                      spellcheck="false"
+                      placeholder="~/.ssh/id_rsa"
+                    />
+                  </label>
+                  <label v-if="isNetworkSftp" class="remote-field remote-field--half">
+                    <span>SSH Known Hosts <em>(optional)</em></span>
+                    <select v-model="form.fields.known_hosts_strategy">
+                      <option value="">— default (strict) —</option>
+                      <option value="strict">Strict</option>
+                      <option value="accept">Accept all</option>
+                      <option value="add">Add & trust</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div v-else class="creds-grid">
                 <template v-for="field in selectedProvider.fields" :key="field.divider ?? field.key">
                   <!-- Section divider -->
                   <div v-if="field.divider" class="creds-divider">{{ field.divider }}</div>
@@ -951,6 +1229,45 @@ async function submit() {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.remote-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.remote-section-heading .remote-section-label {
+  margin: 0;
+}
+
+.provider-advanced-toggle {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 650;
+  transition: background 90ms ease, border-color 90ms ease, color 90ms ease;
+}
+
+.provider-advanced-toggle:hover {
+  background: var(--btn-hover);
+  color: var(--text-muted);
+}
+
+.provider-advanced-toggle--active {
+  border-color: rgb(var(--accent-rgb) / 0.22);
+  background: rgb(var(--accent-rgb) / 0.10);
+  color: var(--accent);
 }
 
 /* ── Protocol custom select ───────────────────────────────── */
@@ -1260,6 +1577,62 @@ async function submit() {
   box-shadow:
     var(--accent-focus-ring),
     var(--input-shadow);
+}
+
+.network-fields {
+  display: grid;
+  gap: 10px;
+}
+
+.server-address-control {
+  display: grid;
+  grid-template-columns: minmax(112px, 132px) minmax(0, 1fr);
+  overflow: hidden;
+  height: 36px;
+  border: 1px solid var(--input-border);
+  border-radius: 9px;
+  background: var(--input-bg);
+  box-shadow: var(--input-shadow);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.server-address-control:focus-within {
+  border-color: var(--accent-border);
+  box-shadow:
+    var(--accent-focus-ring),
+    var(--input-shadow);
+}
+
+.server-address-control select,
+.server-address-control input {
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.server-address-control select {
+  border-right: 1px solid var(--hairline);
+  background-position: right 8px center;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.server-address-control input {
+  padding-left: 12px;
+}
+
+.server-address-control select:focus,
+.server-address-control input:focus {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+@media (max-width: 460px) {
+  .server-address-control {
+    grid-template-columns: minmax(92px, 108px) minmax(0, 1fr);
+  }
 }
 
 /* ── Error ────────────────────────────────────────────────── */

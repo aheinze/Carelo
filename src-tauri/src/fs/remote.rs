@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs::models::{FileEntry, FileEntryKind, FileMetadata, FsError, FsResult, VolumeEntry};
 use crate::fs::operations::SymlinkMode;
+use crate::fs::sftp_mount::{is_password_sftp_config, sftp_password_fs_operator_options};
+use crate::fs::smb::{is_smb_scheme, smb_fs_operator_options};
 
 const REMOTE_PATH_PREFIX: &str = "remote://";
 const TRANSFER_BUFFER_BYTES: usize = 256 * 1024;
@@ -160,6 +162,36 @@ impl RemoteVolumeConfig {
 
     fn operator(&self) -> FsResult<Operator> {
         self.validate()?;
+        let scheme = self.scheme.to_ascii_lowercase();
+
+        if is_smb_scheme(&scheme) {
+            let options = smb_fs_operator_options(self)?;
+            return Operator::via_iter("fs", options).map_err(|error| {
+                FsError::new(
+                    "remote_operator_error",
+                    format!(
+                        "Unable to initialize remote volume '{}': {error}",
+                        self.name
+                    ),
+                    Some(remote_root_uri(&self.id)),
+                )
+            });
+        }
+
+        if is_password_sftp_config(self) {
+            let options = sftp_password_fs_operator_options(self)?;
+            return Operator::via_iter("fs", options).map_err(|error| {
+                FsError::new(
+                    "remote_operator_error",
+                    format!(
+                        "Unable to initialize remote volume '{}': {error}",
+                        self.name
+                    ),
+                    Some(remote_root_uri(&self.id)),
+                )
+            });
+        }
+
         let mut options: Vec<(String, String)> = self
             .options
             .iter()
@@ -176,7 +208,7 @@ impl RemoteVolumeConfig {
             options.push(("root".to_string(), root.clone()));
         }
 
-        Operator::via_iter(self.scheme.to_ascii_lowercase(), options).map_err(|error| {
+        Operator::via_iter(scheme, options).map_err(|error| {
             FsError::new(
                 "remote_operator_error",
                 format!(
@@ -599,8 +631,8 @@ pub async fn measure_remote_items_size(
 
 fn validate_remote_scheme(scheme: &str) -> FsResult<()> {
     match scheme.to_ascii_lowercase().as_str() {
-        "b2" | "dropbox" | "fs" | "ftp" | "gdrive" | "memory" | "onedrive" | "s3" | "sftp"
-        | "swift" | "webdav" => Ok(()),
+        "b2" | "cifs" | "dropbox" | "fs" | "ftp" | "gdrive" | "memory" | "onedrive" | "s3"
+        | "sftp" | "smb" | "swift" | "webdav" => Ok(()),
         _ => Err(FsError::new(
             "unsupported_remote_scheme",
             format!("Remote scheme '{scheme}' is not enabled in Carelo."),
@@ -1454,11 +1486,24 @@ mod tests {
             .expect_err("invalid ids should be rejected");
         assert_eq!(invalid.code, "invalid_remote_config");
 
+        state
+            .add(RemoteVolumeConfig {
+                id: "smb-share".to_string(),
+                name: "SMB Share".to_string(),
+                scheme: "smb".to_string(),
+                root: None,
+                options: HashMap::from([(
+                    "endpoint".to_string(),
+                    "smb://server/share".to_string(),
+                )]),
+            })
+            .expect("SMB remotes should be accepted");
+
         let unsupported = state
             .add(RemoteVolumeConfig {
                 id: "bad".to_string(),
                 name: "Bad".to_string(),
-                scheme: "smb".to_string(),
+                scheme: "nfs".to_string(),
                 root: Some(root.path().to_string_lossy().into_owned()),
                 options: HashMap::new(),
             })

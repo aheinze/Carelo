@@ -4,4 +4,6 @@ pub mod models;
 pub mod operations;
 pub mod provider;
 pub mod remote;
+pub mod sftp_mount;
+pub mod smb;
 pub mod sudo;
