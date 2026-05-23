@@ -2,6 +2,7 @@ import { onMounted, onUnmounted } from 'vue';
 import {
   createFolder,
   deleteItems,
+  editFile,
   getFileMetadata,
   openWithDefaultApp,
 } from './useFileOperations';
@@ -222,7 +223,7 @@ function dispatchSelectedContextMenu(store) {
 
 function shortcutHelpText() {
   return [
-    'F3 Preview, F4 Open, F5 Copy, F6 Move, F7 New Folder, F8/Delete Delete',
+    'F3 Preview, F4 Edit, F5 Copy, F6 Move, F7 New Folder, F8/Delete Delete',
     'Ctrl+P Fuzzy Search, Ctrl+Shift+F Content Search, Ctrl+C Copy, Ctrl+X Cut, Ctrl+V Paste',
     'Tab Switch Pane, Alt+Left/Right History, Ctrl+\\ Root, Ctrl+PageUp Parent',
     'Insert/Space Toggle Selection, Ctrl+A/Num+ Select All, Num- Clear, Num* Invert',
@@ -448,6 +449,16 @@ export function useKeyboardShortcuts() {
     }
 
     await openWithDefaultApp(entry.path);
+  }
+
+  async function editFocusedFile() {
+    const entry = store.selectedEntryFor(activePane());
+
+    if (!entry || entry.kind !== 'file' || isArchivePath(entry.path)) {
+      return;
+    }
+
+    await editFile(entry.path, store.appSettings.editorCommand);
   }
 
   function previewFocused() {
@@ -823,9 +834,9 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      if (key === 'F4') {
+      if (key === 'F4' && !command && !event.altKey) {
         event.preventDefault();
-        await openFocusedExternally();
+        await editFocusedFile();
         return;
       }
 

@@ -70,6 +70,7 @@ const DEFAULT_APP_SETTINGS = Object.freeze({
   restoreTerminalPanel: false,
   confirmDelete: true,
   terminalStartsInActiveFolder: true,
+  editorCommand: '',
   customTools: [],
 });
 const NAME_COLLATOR = new Intl.Collator(undefined, {
@@ -144,6 +145,10 @@ function normalizeCustomTools(tools = []) {
     });
 }
 
+function normalizeEditorCommand(command) {
+  return String(command || '').slice(0, 600);
+}
+
 function normalizeAppSettings(settings = {}) {
   const value = settings && typeof settings === 'object' ? settings : {};
 
@@ -159,6 +164,7 @@ function normalizeAppSettings(settings = {}) {
     restoreTerminalPanel: value.restoreTerminalPanel === true,
     confirmDelete: value.confirmDelete !== false,
     terminalStartsInActiveFolder: value.terminalStartsInActiveFolder !== false,
+    editorCommand: normalizeEditorCommand(value.editorCommand),
     customTools: normalizeCustomTools(value.customTools),
   };
 }

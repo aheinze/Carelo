@@ -178,7 +178,7 @@ pub use state::{
     SizeMeasureResult,
 };
 pub use tools::{
-    list_open_with_apps, open_with_app, open_with_default_app, reveal_in_file_manager,
+    edit_file, list_open_with_apps, open_with_app, open_with_default_app, reveal_in_file_manager,
     run_custom_tool, RemoteEditSyncState,
 };
 pub use transfer::{

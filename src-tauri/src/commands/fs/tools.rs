@@ -66,6 +66,58 @@ pub async fn list_open_with_apps(
 }
 
 #[tauri::command]
+pub async fn edit_file(
+    app: AppHandle,
+    path: String,
+    editor_command: Option<String>,
+    store: tauri::State<'_, AppStoreState>,
+    remotes: tauri::State<'_, RemoteVolumeState>,
+    remote_edit_sync: tauri::State<'_, RemoteEditSyncState>,
+) -> Result<(), FsError> {
+    let editor_command = normalize_editor_command(editor_command);
+
+    if let Some(archive_path) = archive::parse_archive_uri(&path) {
+        let remembered = if editor_command.is_none() {
+            let file_type = open_with::file_type_for_path(Path::new(&path));
+            store.open_with_default(&file_type.key)?
+        } else {
+            None
+        };
+        let materialized_path =
+            run_local(move |_| archive::materialize_archive_file(&archive_path)).await?;
+        return open_path_for_edit(&materialized_path, editor_command.as_deref(), remembered);
+    }
+
+    if let Some(remote_path) = parse_remote_path(&path) {
+        let remembered = if editor_command.is_none() {
+            let file_type = open_with::file_type_for_virtual_path(&remote_path.path);
+            store.open_with_default(&file_type.key)?
+        } else {
+            None
+        };
+        let materialized_path = materialize_remote_file(&remotes, remote_path.clone()).await?;
+        open_path_for_edit(&materialized_path, editor_command.as_deref(), remembered)?;
+        start_remote_edit_sync(
+            app,
+            &remote_edit_sync,
+            vec![RemoteEditTarget {
+                local_path: materialized_path,
+                remote_path,
+            }],
+        );
+        return Ok(());
+    }
+
+    let remembered = if editor_command.is_none() {
+        let file_type = open_with::file_type_for_path(Path::new(&path));
+        store.open_with_default(&file_type.key)?
+    } else {
+        None
+    };
+    open_path_for_edit(&PathBuf::from(path), editor_command.as_deref(), remembered)
+}
+
+#[tauri::command]
 pub async fn open_with_app(
     app: AppHandle,
     path: String,
@@ -625,6 +677,44 @@ fn local_file_signature(path: &Path) -> Option<LocalFileSignature> {
 
 fn remote_edit_path(target: &RemoteEditTarget) -> String {
     format_remote_uri(&target.remote_path.volume_id, &target.remote_path.path)
+}
+
+fn normalize_editor_command(command: Option<String>) -> Option<String> {
+    command
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn open_path_for_edit(
+    path: &Path,
+    editor_command: Option<&str>,
+    remembered: Option<crate::store::OpenWithDefaultEntry>,
+) -> FsResult<()> {
+    if let Some(command) = editor_command {
+        run_local_editor_command(command, path)
+    } else {
+        open_with::open_with_default(path, remembered)
+    }
+}
+
+fn run_local_editor_command(command: &str, path: &Path) -> FsResult<()> {
+    let path_value = path.to_string_lossy().into_owned();
+    let cwd = path
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned());
+
+    run_local_custom_tool(command, &[path_value], cwd.as_deref()).map_err(editor_command_error)
+}
+
+fn editor_command_error(error: FsError) -> FsError {
+    FsError::new(
+        error.code.replace("custom_tool", "editor"),
+        error
+            .message
+            .replace("Custom tool", "Editor")
+            .replace("custom tool", "editor"),
+        error.path,
+    )
 }
 
 fn run_local_custom_tool(command: &str, paths: &[String], cwd: Option<&str>) -> FsResult<()> {

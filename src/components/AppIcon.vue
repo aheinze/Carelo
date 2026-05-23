@@ -53,6 +53,13 @@ defineProps({
       <circle cx="4" cy="18" r="1" fill="currentColor" stroke="none" />
     </template>
 
+    <template v-else-if="name === 'menu'">
+      <path d="M5 6h14" />
+      <path d="M5 10h14" />
+      <path d="M5 14h14" />
+      <path d="M5 18h14" />
+    </template>
+
     <template v-else-if="name === 'columns'">
       <rect x="4" y="5" width="16" height="14" rx="2" />
       <path d="M9.5 5v14" />

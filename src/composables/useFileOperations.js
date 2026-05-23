@@ -433,6 +433,10 @@ export async function listOpenWithApps(path) {
   return invokeCommand('list_open_with_apps', { path });
 }
 
+export async function editFile(path, editorCommand = '') {
+  return invokeCommand('edit_file', { path, editorCommand: editorCommand || null });
+}
+
 export async function openWithApp(path, appId, remember = false) {
   return invokeCommand('open_with_app', { path, appId, remember });
 }
@@ -473,6 +477,7 @@ export function useFileOperations() {
     copyItems,
     createFolder,
     deleteItems,
+    editFile,
     getFileMetadata,
     getHomeDirectory,
     addFavorite,

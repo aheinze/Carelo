@@ -9,7 +9,7 @@ const sections = [
   {
     title: 'File Operations',
     shortcuts: [
-      { keys: ['F4'],          label: 'Open' },
+      { keys: ['F4'],          label: 'Edit file' },
       { keys: ['Enter'],       label: 'Open externally' },
       { keys: ['F3'],          label: 'Preview' },
       { keys: ['F5'],          label: 'Copy to other pane' },

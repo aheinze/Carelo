@@ -27,7 +27,7 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
-  canRemoteEdit: {
+  canEditFile: {
     type: Boolean,
     default: false,
   },
@@ -262,14 +262,14 @@ onUnmounted(() => {
         <span>Open</span>
       </button>
       <button
-        v-if="canRemoteEdit"
+        v-if="canEditFile"
         type="button"
         role="menuitem"
         class="context-menu-item"
-        @click="emitAction('editRemote')"
+        @click="emitAction('editFile')"
       >
-        <AppIcon name="sync" :size="16" />
-        <span>Edit Remote File</span>
+        <AppIcon name="file-code" :size="16" />
+        <span>Edit File</span>
       </button>
       <button
         type="button"

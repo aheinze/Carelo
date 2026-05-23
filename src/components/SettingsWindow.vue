@@ -12,6 +12,8 @@ import appIconUrl from '../../src-tauri/icons/128x128.png';
 const store = useFileManagerStore();
 const searchQuery = ref('');
 const activeSectionId = ref('appearance');
+const editorTemplatesVisible = ref(false);
+const editorTemplateControl = ref(null);
 const updateState = ref('idle');
 const updateMessage = ref('');
 const updateError = ref('');
@@ -59,7 +61,7 @@ const sections = [
     id: 'tools',
     label: 'Tools',
     icon: 'terminal',
-    keywords: 'tools context menu right click command code editor path external',
+    keywords: 'tools context menu right click command code editor path external edit file preferred vscode vscodium cursor zed sublime kate neovim',
   },
   {
     id: 'terminal',
@@ -91,6 +93,17 @@ const toolTargets = [
   { value: 'both', label: 'Both' },
   { value: 'files', label: 'Files' },
   { value: 'folders', label: 'Folders' },
+];
+const editorTemplates = [
+  { id: 'system-default', label: 'System default', command: '' },
+  { id: 'vscode', label: 'Visual Studio Code', command: 'code --reuse-window %path%' },
+  { id: 'vscodium', label: 'VSCodium', command: 'codium --reuse-window %path%' },
+  { id: 'cursor', label: 'Cursor', command: 'cursor --reuse-window %path%' },
+  { id: 'zed', label: 'Zed', command: 'zed %path%' },
+  { id: 'sublime-text', label: 'Sublime Text', command: 'subl %path%' },
+  { id: 'kate', label: 'Kate', command: 'kate %path%' },
+  { id: 'gnome-text-editor', label: 'GNOME Text Editor', command: 'gnome-text-editor %path%' },
+  { id: 'neovim', label: 'Neovim', command: 'x-terminal-emulator -e nvim %path%' },
 ];
 
 const activeSection = computed(() =>
@@ -146,6 +159,12 @@ const updateActionIcon = computed(() => (updateState.value === 'available' ? 'do
 const updateActionDisabled = computed(() =>
   ['checking', 'downloading', 'installed'].includes(updateState.value),
 );
+const selectedEditorTemplate = computed(() => {
+  const currentCommand = String(store.appSettings.editorCommand || '').trim();
+  const template = editorTemplates.find((option) => option.command === currentCommand);
+
+  return template?.id || 'custom';
+});
 
 const visibleSections = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
@@ -186,6 +205,27 @@ function setDateFormat(event) {
 
 function setBooleanSetting(key, event) {
   store.setAppSetting(key, event.target.checked);
+}
+
+function setEditorTemplate(template) {
+  store.setAppSetting('editorCommand', template.command);
+  editorTemplatesVisible.value = false;
+}
+
+function toggleEditorTemplates() {
+  editorTemplatesVisible.value = !editorTemplatesVisible.value;
+}
+
+function closeEditorTemplates() {
+  editorTemplatesVisible.value = false;
+}
+
+function handleDocumentPointerDown(event) {
+  if (!editorTemplatesVisible.value || editorTemplateControl.value?.contains(event.target)) {
+    return;
+  }
+
+  closeEditorTemplates();
 }
 
 function formatBytes(value) {
@@ -353,7 +393,13 @@ function close() {
 }
 
 function onKeydown(event) {
-  if (event.key === 'Escape' && store.settingsVisible) {
+  if (event.key !== 'Escape' || !store.settingsVisible) {
+    return;
+  }
+
+  if (editorTemplatesVisible.value) {
+    closeEditorTemplates();
+  } else {
     close();
   }
 }
@@ -369,12 +415,26 @@ watch(
   (visible) => {
     if (visible) {
       activeSectionId.value = activeSectionId.value || 'appearance';
+    } else {
+      closeEditorTemplates();
     }
   },
 );
 
-onMounted(() => window.addEventListener('keydown', onKeydown));
-onUnmounted(() => window.removeEventListener('keydown', onKeydown));
+watch(
+  () => activeSectionId.value,
+  () => closeEditorTemplates(),
+);
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown);
+  document.addEventListener('pointerdown', handleDocumentPointerDown, true);
+});
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown);
+  document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
+});
 </script>
 
 <template>
@@ -635,10 +695,73 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
               <section v-else-if="activeSectionId === 'tools'" class="settings-page">
                 <div class="settings-section-heading">
                   <h3>Tools</h3>
-                  <p>Add commands to the file context menu for files and folders.</p>
+                  <p>Choose your editor and add commands to the file context menu.</p>
                 </div>
 
-                <div class="settings-group">
+                <div class="settings-group settings-group--tools">
+                  <div class="setting-row setting-row--stacked">
+                    <div class="setting-copy">
+                      <strong>Editor command</strong>
+                      <span>Used for file editing. Leave empty to use the system default app.</span>
+                    </div>
+
+                    <div class="editor-command-field">
+                      <label class="editor-command-input">
+                        <span>Command</span>
+                        <input
+                          type="text"
+                          :value="store.appSettings.editorCommand"
+                          placeholder="code --reuse-window %path%"
+                          spellcheck="false"
+                          @input="store.setAppSetting('editorCommand', $event.target.value)"
+                        />
+                      </label>
+
+                      <div ref="editorTemplateControl" class="editor-template-control">
+                        <button
+                          type="button"
+                          class="editor-template-link"
+                          :class="{ 'editor-template-link--open': editorTemplatesVisible }"
+                          aria-haspopup="menu"
+                          :aria-expanded="editorTemplatesVisible"
+                          @click="toggleEditorTemplates"
+                        >
+                          Choose from common editors
+                        </button>
+
+                        <Transition name="editor-template-popover">
+                          <div
+                            v-if="editorTemplatesVisible"
+                            class="editor-template-popover"
+                            role="menu"
+                            aria-label="Common editor commands"
+                          >
+                            <button
+                              v-for="template in editorTemplates"
+                              :key="template.id"
+                              type="button"
+                              role="menuitem"
+                              class="editor-template-option"
+                              :class="{ 'editor-template-option--active': selectedEditorTemplate === template.id }"
+                              @click="setEditorTemplate(template)"
+                            >
+                              <span>
+                                <strong>{{ template.label }}</strong>
+                                <small>{{ template.command || 'Use the system default app' }}</small>
+                              </span>
+                              <AppIcon
+                                v-if="selectedEditorTemplate === template.id"
+                                name="check"
+                                :size="14"
+                                :stroke-width="2.2"
+                              />
+                            </button>
+                          </div>
+                        </Transition>
+                      </div>
+                    </div>
+                  </div>
+
                   <div class="setting-row setting-row--stacked">
                     <div class="setting-copy">
                       <strong>Context menu tools</strong>
@@ -947,8 +1070,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
 
 .settings-main {
   display: flex;
+  min-height: 0;
   min-width: 0;
   flex-direction: column;
+  overflow: hidden;
   background: color-mix(in srgb, var(--pane-glass) 86%, transparent);
 }
 
@@ -1049,6 +1174,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   border: 1px solid var(--hairline);
   border-radius: 12px;
   background: color-mix(in srgb, var(--text) 3.5%, transparent);
+}
+
+.settings-group--tools {
+  overflow: visible;
 }
 
 .setting-row {
@@ -1403,6 +1532,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   gap: 10px;
 }
 
+.editor-command-field,
 .custom-tool-card {
   display: grid;
   gap: 10px;
@@ -1411,6 +1541,10 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   border: 1px solid var(--hairline);
   border-radius: 10px;
   background: color-mix(in srgb, var(--text) 2.5%, transparent);
+}
+
+.editor-command-field {
+  padding: 10px 12px;
 }
 
 .custom-tool-card--disabled {
@@ -1424,12 +1558,14 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   gap: 10px;
 }
 
+.editor-command-input,
 .custom-tool-field {
   display: grid;
   min-width: 0;
   gap: 5px;
 }
 
+.editor-command-input span,
 .custom-tool-field span {
   color: var(--text-muted);
   font-size: 10px;
@@ -1438,6 +1574,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   text-transform: uppercase;
 }
 
+.editor-command-input input,
 .custom-tool-field input {
   width: 100%;
   min-width: 0;
@@ -1454,10 +1591,145 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   outline: 0;
 }
 
+.editor-template-control {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.editor-template-link {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 590;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  transition: color 100ms ease, text-decoration-color 100ms ease;
+}
+
+.editor-template-link:hover,
+.editor-template-link:focus-visible,
+.editor-template-link--open {
+  color: var(--text-muted);
+  text-decoration-color: currentColor;
+}
+
+.editor-template-popover {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  z-index: 5300;
+  width: min(310px, calc(100vw - 72px));
+  max-height: min(340px, 48vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--control-border);
+  border-radius: 13px;
+  padding: 5px;
+  background: var(--popover-bg);
+  box-shadow: var(--shadow-overlay);
+  color: var(--text);
+  transform-origin: top left;
+  scrollbar-width: thin;
+  scrollbar-color: var(--control-border) transparent;
+}
+
+.editor-template-popover::-webkit-scrollbar {
+  width: 9px;
+}
+
+.editor-template-popover::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.editor-template-popover::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--control-border);
+  background-clip: padding-box;
+}
+
+.editor-template-option {
+  display: grid;
+  width: 100%;
+  min-height: 38px;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 9px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: none;
+}
+
+.editor-template-option span {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.editor-template-option strong,
+.editor-template-option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-template-option strong {
+  font-size: 13px;
+  font-weight: 540;
+}
+
+.editor-template-option small {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 520;
+}
+
+.editor-template-option:hover,
+.editor-template-option:focus-visible {
+  background: var(--btn-primary-bg);
+  color: #fff;
+  outline: 0;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
+}
+
+.editor-template-option:hover small,
+.editor-template-option:focus-visible small {
+  color: rgb(255 255 255 / 0.78);
+}
+
+.editor-template-option--active {
+  background: var(--btn-active-bg);
+  box-shadow: var(--btn-active-shadow);
+}
+
+.editor-template-popover-enter-active,
+.editor-template-popover-leave-active {
+  transition: opacity 130ms cubic-bezier(0.2, 0, 0, 1), transform 130ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.editor-template-popover-enter-from,
+.editor-template-popover-leave-to {
+  opacity: 0;
+  transform: scale(0.96);
+}
+
+.editor-command-input input::placeholder,
 .custom-tool-field input::placeholder {
   color: var(--text-faint);
 }
 
+.editor-command-input input:focus-visible,
 .custom-tool-field input:focus-visible {
   border-color: var(--accent-border);
   box-shadow:

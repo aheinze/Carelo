@@ -85,6 +85,7 @@ pub fn run() {
             commands::fs::state::cancel_file_operation,
             commands::fs::state::pause_file_operation,
             commands::fs::state::resume_file_operation,
+            commands::fs::tools::edit_file,
             commands::fs::tools::open_with_default_app,
             commands::fs::tools::list_open_with_apps,
             commands::fs::tools::open_with_app,
