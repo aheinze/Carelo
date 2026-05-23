@@ -280,9 +280,7 @@ function canCompareChecksums(entry, existingEntry) {
     entry?.kind === 'file' &&
     existingEntry?.kind === 'file' &&
     !isArchivePath(entry.path) &&
-    !isArchivePath(existingEntry.path) &&
-    !isRemotePath(entry.path) &&
-    !isRemotePath(existingEntry.path)
+    !isArchivePath(existingEntry.path)
   );
 }
 
@@ -552,7 +550,9 @@ export function useFileTransferGuards() {
     const invalid = [];
     const skipped = [];
     const items = [];
-    const resolvedSymlinkMode = await chooseSymlinkMode(sourceEntries, mode, symlinkMode);
+    const targetIsRemote = isRemotePath(targetDirectory);
+    const effectiveSymlinkMode = targetIsRemote && !symlinkMode ? 'follow' : symlinkMode;
+    const resolvedSymlinkMode = await chooseSymlinkMode(sourceEntries, mode, effectiveSymlinkMode);
     const conflictPolicies = {
       file: null,
       folder: null,

@@ -7,15 +7,7 @@ pub mod store;
 pub mod window_state;
 
 use commands::app::quit_app;
-use commands::fs::{
-    add_remote_volume, archive_items, cancel_file_operation, compare_file_checksums, copy_items,
-    create_folder, create_media_stream_url, delete_items, get_file_metadata, get_home_directory,
-    list_directory, list_open_with_apps, list_remote_volumes, list_volumes, measure_items_size,
-    mount_volume, move_items, open_with_app, open_with_default_app, pause_file_operation,
-    read_media_preview, read_text_preview, remove_remote_volume, rename_item,
-    resume_file_operation, reveal_in_file_manager, run_custom_tool, same_volume, search_content,
-    search_files, unarchive_items, FileOperationState, MediaStreamState,
-};
+use commands::fs::{FileOperationState, MediaStreamState};
 use commands::oauth::create_oauth_tokens;
 use commands::store::{
     add_favorite, add_favorite_group, app_store_path, get_app_settings, get_window_dimensions,
@@ -48,42 +40,53 @@ pub fn run() {
         .setup(|app| {
             let store = AppStoreState::initialize()
                 .map_err(|error| std::io::Error::other(error.message))?;
+            let remotes = app.state::<RemoteVolumeState>();
+
+            for config in store
+                .list_remote_volume_configs()
+                .map_err(|error| std::io::Error::other(error.message))?
+            {
+                remotes
+                    .add(config)
+                    .map_err(|error| std::io::Error::other(error.message))?;
+            }
+
             app.manage(store);
             restore_main_window_state(app);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            list_directory,
-            search_files,
-            search_content,
-            get_file_metadata,
-            compare_file_checksums,
-            read_text_preview,
-            read_media_preview,
-            create_media_stream_url,
-            get_home_directory,
-            list_volumes,
-            mount_volume,
-            same_volume,
-            add_remote_volume,
-            remove_remote_volume,
-            list_remote_volumes,
-            create_folder,
-            rename_item,
-            delete_items,
-            copy_items,
-            move_items,
-            measure_items_size,
-            archive_items,
-            unarchive_items,
-            cancel_file_operation,
-            pause_file_operation,
-            resume_file_operation,
-            open_with_default_app,
-            list_open_with_apps,
-            open_with_app,
-            run_custom_tool,
-            reveal_in_file_manager,
+            commands::fs::transfer::list_directory,
+            commands::fs::search::search_files,
+            commands::fs::search::search_content,
+            commands::fs::transfer::get_file_metadata,
+            commands::fs::preview::compare_file_checksums,
+            commands::fs::preview::read_text_preview,
+            commands::fs::preview::read_media_preview,
+            commands::fs::preview::create_media_stream_url,
+            commands::fs::transfer::get_home_directory,
+            commands::fs::volumes::list_volumes,
+            commands::fs::volumes::mount_volume,
+            commands::fs::transfer::same_volume,
+            commands::fs::remotes::add_remote_volume,
+            commands::fs::remotes::remove_remote_volume,
+            commands::fs::remotes::list_remote_volumes,
+            commands::fs::transfer::create_folder,
+            commands::fs::transfer::rename_item,
+            commands::fs::transfer::delete_items,
+            commands::fs::transfer::copy_items,
+            commands::fs::transfer::move_items,
+            commands::fs::size::measure_items_size,
+            commands::fs::archives::archive_items,
+            commands::fs::archives::unarchive_items,
+            commands::fs::state::cancel_file_operation,
+            commands::fs::state::pause_file_operation,
+            commands::fs::state::resume_file_operation,
+            commands::fs::tools::open_with_default_app,
+            commands::fs::tools::list_open_with_apps,
+            commands::fs::tools::open_with_app,
+            commands::fs::tools::run_custom_tool,
+            commands::fs::tools::reveal_in_file_manager,
             list_favorite_groups,
             add_favorite_group,
             remove_favorite_group,

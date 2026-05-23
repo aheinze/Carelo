@@ -1,4 +1,5 @@
 use crate::fs::models::{FsError, FsResult};
+use crate::fs::remote::RemoteVolumeConfig;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +17,7 @@ const DEFAULT_FAVORITE_GROUP_ID: &str = "favorites";
 const DEFAULT_FAVORITE_GROUP_NAME: &str = "Favorites";
 const WINDOW_DIMENSIONS_KEY: &str = "window.dimensions.v1";
 const APP_SETTINGS_KEY: &str = "app.settings.v1";
+const REMOTE_VOLUMES_KEY: &str = "remote.volumes.v1";
 const MIN_WINDOW_WIDTH: f64 = 960.0;
 const MIN_WINDOW_HEIGHT: f64 = 640.0;
 const MAX_WINDOW_DIMENSION: f64 = 10000.0;
@@ -79,8 +81,10 @@ pub struct AppStoreState {
 
 impl AppStoreState {
     pub fn initialize() -> FsResult<Self> {
-        let path = store_path()?;
+        Self::initialize_at(store_path()?)
+    }
 
+    fn initialize_at(path: PathBuf) -> FsResult<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 store_io_error("Unable to create app store directory", parent, error)
@@ -454,6 +458,56 @@ impl AppStoreState {
         Ok(())
     }
 
+    pub fn list_remote_volume_configs(&self) -> FsResult<Vec<RemoteVolumeConfig>> {
+        let connection = self.connection()?;
+        let value: Option<String> = connection
+            .query_row(
+                "SELECT value FROM store_metadata WHERE key = ?1",
+                params![REMOTE_VOLUMES_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| store_sql_error("Unable to read remote volumes", &self.path, error))?;
+
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+
+        serde_json::from_str(&value).map_err(|error| {
+            FsError::new(
+                "store_parse_error",
+                format!("Unable to parse saved remote volumes: {error}"),
+                Some(self.path.to_string_lossy().into_owned()),
+            )
+        })
+    }
+
+    pub fn save_remote_volume_config(&self, config: RemoteVolumeConfig) -> FsResult<()> {
+        let mut configs = self.list_remote_volume_configs()?;
+
+        if let Some(existing) = configs.iter_mut().find(|existing| existing.id == config.id) {
+            *existing = config;
+        } else {
+            configs.push(config);
+        }
+
+        configs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.write_remote_volume_configs(&configs)
+    }
+
+    pub fn remove_remote_volume_config(&self, id: &str) -> FsResult<bool> {
+        let mut configs = self.list_remote_volume_configs()?;
+        let original_len = configs.len();
+        configs.retain(|config| config.id != id);
+        let removed = configs.len() != original_len;
+
+        if removed {
+            self.write_remote_volume_configs(&configs)?;
+        }
+
+        Ok(removed)
+    }
+
     pub fn open_with_default(&self, file_type_key: &str) -> FsResult<Option<OpenWithDefaultEntry>> {
         let connection = self.connection()?;
 
@@ -518,6 +572,26 @@ impl AppStoreState {
             .map_err(|error| {
                 store_sql_error("Unable to clear open-with default", &self.path, error)
             })?;
+
+        Ok(())
+    }
+
+    fn write_remote_volume_configs(&self, configs: &[RemoteVolumeConfig]) -> FsResult<()> {
+        let value = serde_json::to_string(configs).map_err(|error| {
+            FsError::new(
+                "store_serialize_error",
+                format!("Unable to serialize remote volumes: {error}"),
+                Some(self.path.to_string_lossy().into_owned()),
+            )
+        })?;
+        let connection = self.connection()?;
+
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO store_metadata (key, value) VALUES (?1, ?2)",
+                params![REMOTE_VOLUMES_KEY, value],
+            )
+            .map_err(|error| store_sql_error("Unable to save remote volumes", &self.path, error))?;
 
         Ok(())
     }
@@ -1087,4 +1161,79 @@ fn store_sql_error(action: &str, path: &Path, error: rusqlite::Error) -> FsError
         format!("{action}: {error}"),
         Some(path.to_string_lossy().into_owned()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    struct TestStorePath {
+        directory: PathBuf,
+        store: PathBuf,
+    }
+
+    impl TestStorePath {
+        fn new(name: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after UNIX epoch")
+                .as_nanos();
+            let directory =
+                std::env::temp_dir().join(format!("carelo-store-test-{}-{unique}", name));
+            let store = directory.join("carelo.store");
+            Self { directory, store }
+        }
+    }
+
+    impl Drop for TestStorePath {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[test]
+    fn persists_remote_volume_configs() {
+        let path = TestStorePath::new("remote-volumes");
+        let config = RemoteVolumeConfig {
+            id: "remote_one".to_string(),
+            name: "Remote One".to_string(),
+            scheme: "fs".to_string(),
+            root: Some("/tmp/remote-one".to_string()),
+            options: HashMap::from([("custom".to_string(), "value".to_string())]),
+        };
+
+        {
+            let store =
+                AppStoreState::initialize_at(path.store.clone()).expect("store should initialize");
+            store
+                .save_remote_volume_config(config.clone())
+                .expect("remote config should save");
+            let configs = store
+                .list_remote_volume_configs()
+                .expect("remote configs should list");
+            assert_eq!(configs.len(), 1);
+            assert_eq!(configs[0].id, config.id);
+            assert_eq!(configs[0].name, config.name);
+            assert_eq!(configs[0].scheme, config.scheme);
+            assert_eq!(configs[0].root, config.root);
+            assert_eq!(configs[0].options, config.options);
+        }
+
+        let store = AppStoreState::initialize_at(path.store.clone()).expect("store should reopen");
+        assert_eq!(
+            store
+                .list_remote_volume_configs()
+                .expect("remote configs should reload")
+                .len(),
+            1
+        );
+        assert!(store
+            .remove_remote_volume_config(&config.id)
+            .expect("remote config should remove"));
+        assert!(store
+            .list_remote_volume_configs()
+            .expect("remote configs should list after removal")
+            .is_empty());
+    }
 }

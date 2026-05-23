@@ -7,7 +7,6 @@ import TabContextMenu from './TabContextMenu.vue';
 import {
   archiveItems,
   deleteItems,
-  isRemotePath,
   listOpenWithApps,
   listDirectory,
   openWithApp,
@@ -1162,7 +1161,7 @@ async function copyPathToClipboard(path) {
 }
 
 function isLocalEntry(entry) {
-  return Boolean(entry?.path) && !isRemotePath(entry.path) && !isArchivePath(entry.path);
+  return Boolean(entry?.path) && !isArchivePath(entry.path);
 }
 
 function isZipEntry(entry) {
@@ -1298,7 +1297,7 @@ async function createArchive(menu) {
   if (!currentPath || operationEntries.length === 0 || operationEntries.some((item) => !isLocalEntry(item))) {
     await dialog.alert({
       title: 'Archive Not Available',
-      message: 'Archives can only be created from local files and folders.',
+      message: 'Archives can only be created from normal files and folders.',
       variant: 'warning',
     });
     return;
@@ -1379,7 +1378,7 @@ async function extractZipArchive(menu) {
   if (!currentPath || operationEntries.length === 0 || operationEntries.some((item) => !isLocalEntry(item) || !isZipEntry(item))) {
     await dialog.alert({
       title: 'Extract Not Available',
-      message: 'Only local .zip archives can be extracted.',
+      message: 'Only .zip archives in file panels can be extracted.',
       variant: 'warning',
     });
     return;
@@ -1465,7 +1464,7 @@ async function showOpenWithDialog(menu) {
   if (operationEntries.length !== 1 || !entry || entry.kind !== 'file' || !isLocalEntry(entry)) {
     await dialog.alert({
       title: 'Open With Not Available',
-      message: 'Choose one local file to open with another app.',
+      message: 'Choose one file to open with another app.',
       variant: 'warning',
     });
     return;

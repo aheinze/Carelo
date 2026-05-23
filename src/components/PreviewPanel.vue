@@ -173,6 +173,7 @@ const selectionCommonLocation = computed(() => {
   return parents.length === 1 ? parents[0] : 'Multiple locations';
 });
 const imageFailed = ref(false);
+const imagePreviewUrl = ref('');
 const audioFailed = ref(false);
 const audioLoading = ref(false);
 const audioReady = ref(false);
@@ -197,6 +198,7 @@ const videoHaveMetadataReadyState = 1;
 const videoReadyPollIntervalMs = 350;
 const videoReadyPollMaxAttempts = 20;
 let metadataLoadVersion = 0;
+let imagePreviewLoadVersion = 0;
 let audioPreviewLoadVersion = 0;
 let videoPreviewLoadVersion = 0;
 let audioPreviewFallbackTimer = null;
@@ -296,7 +298,7 @@ watch(
 
 watch(
   () => [inspectedEntry.value?.path, inspectedEntry.value?.size, inspectedEntry.value?.name],
-  () => {
+  async () => {
     audioPreviewLoadVersion += 1;
     const loadVersion = audioPreviewLoadVersion;
     revokeAudioPreviewUrl();
@@ -309,15 +311,7 @@ watch(
       return;
     }
 
-    if (!canPreviewLocalMedia(entry)) {
-      audioFailed.value = true;
-      audioLoading.value = false;
-      return;
-    }
-
-    const assetUrl = localFileAssetUrl(entry.path);
-
-    if (!assetUrl) {
+    if (!canPreviewMedia(entry)) {
       audioFailed.value = true;
       audioLoading.value = false;
       return;
@@ -325,8 +319,69 @@ watch(
 
     audioLoading.value = true;
     audioPreviewMimeType.value = audioMimeType(entry.name) || 'application/octet-stream';
-    audioPreviewUrl.value = assetUrl;
+
+    try {
+      const streamUrl = await createMediaStreamUrl(entry.path);
+
+      if (audioPreviewLoadVersion !== loadVersion) {
+        return;
+      }
+
+      audioPreviewUrl.value = streamUrl || localFileAssetUrl(entry.path);
+    } catch {
+      if (audioPreviewLoadVersion !== loadVersion) {
+        return;
+      }
+
+      audioPreviewUrl.value = localFileAssetUrl(entry.path);
+    }
+
+    if (!audioPreviewUrl.value) {
+      audioFailed.value = true;
+      audioLoading.value = false;
+      return;
+    }
+
     scheduleAudioBlobFallback(loadVersion);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [inspectedEntry.value?.path, inspectedEntry.value?.size, inspectedEntry.value?.name],
+  async () => {
+    imagePreviewLoadVersion += 1;
+    const loadVersion = imagePreviewLoadVersion;
+    revokeImagePreviewUrl();
+    imageFailed.value = false;
+    const entry = inspectedEntry.value;
+
+    if (!entry || !isImageEntry(entry) || isArchivePath(entry.path)) {
+      return;
+    }
+
+    if (!isRemotePath(entry.path)) {
+      imagePreviewUrl.value = localFileAssetUrl(entry.path);
+      return;
+    }
+
+    try {
+      const payload = await readMediaPreview(entry.path, mediaPreviewFallbackMaxBytes);
+      const bytes = mediaPreviewPayloadToBytes(payload);
+      const blob = new Blob([bytes], { type: imageMimeType(entry.name) || 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+
+      if (imagePreviewLoadVersion !== loadVersion) {
+        revokeObjectUrl(url);
+        return;
+      }
+
+      imagePreviewUrl.value = url;
+    } catch {
+      if (imagePreviewLoadVersion === loadVersion) {
+        imageFailed.value = true;
+      }
+    }
   },
   { immediate: true },
 );
@@ -374,7 +429,7 @@ watch(
       return;
     }
 
-    if (!canPreviewLocalMedia(entry)) {
+    if (!canPreviewMedia(entry)) {
       videoFailed.value = true;
       videoLoading.value = false;
       return;
@@ -412,6 +467,7 @@ watch(
 
 onBeforeUnmount(() => {
   cancelActiveFolderSizeMeasurement();
+  revokeImagePreviewUrl();
   revokeAudioPreviewUrl();
   revokeVideoPreviewUrl();
 });
@@ -432,8 +488,7 @@ function isMeasurableFolderEntry(entry) {
   return (
     entry?.kind === 'directory' &&
     Boolean(entry.path) &&
-    !isArchivePath(entry.path) &&
-    !isRemotePath(entry.path)
+    !isArchivePath(entry.path)
   );
 }
 
@@ -566,26 +621,41 @@ function previewFallbackClass(entry) {
 }
 
 function shouldShowImage(entry) {
-  return isImageEntry(entry) && !isArchivePath(entry.path) && !imageFailed.value;
+  return isImageEntry(entry) && !isArchivePath(entry.path) && !imageFailed.value && Boolean(imagePreviewUrl.value);
 }
 
 function shouldShowPdfPreview(entry) {
-  return isPdfEntry(entry) && !isArchivePath(entry.path) && !isRemotePath(entry.path);
+  return isPdfEntry(entry) && !isArchivePath(entry.path);
 }
 
 function shouldShowTextPreview(entry) {
-  return isTextEntry(entry) && !isArchivePath(entry.path) && !isRemotePath(entry.path);
+  return isTextEntry(entry) && !isArchivePath(entry.path);
 }
 
-function canPreviewLocalMedia(entry) {
-  return entry?.path && !isArchivePath(entry.path) && !isRemotePath(entry.path);
+function canPreviewMedia(entry) {
+  return entry?.path && !isArchivePath(entry.path);
 }
 
 function canUseMediaBlobFallback(entry) {
   return (
-    canPreviewLocalMedia(entry) &&
+    canPreviewMedia(entry) &&
     (!hasKnownSize(entry) || Number(entry.size) <= mediaPreviewFallbackMaxBytes)
   );
+}
+
+function imageMimeType(name) {
+  const extension = extensionFor(name);
+
+  if (extension === 'jpg' || extension === 'jpeg' || extension === 'jfif') return 'image/jpeg';
+  if (extension === 'png') return 'image/png';
+  if (extension === 'gif') return 'image/gif';
+  if (extension === 'webp') return 'image/webp';
+  if (extension === 'svg') return 'image/svg+xml';
+  if (extension === 'bmp') return 'image/bmp';
+  if (extension === 'avif') return 'image/avif';
+  if (extension === 'ico') return 'image/x-icon';
+  if (extension === 'tif' || extension === 'tiff') return 'image/tiff';
+  return '';
 }
 
 async function createMediaPreviewObjectUrl(entry, mimeType) {
@@ -616,6 +686,11 @@ function revokeObjectUrl(url) {
   if (typeof url === 'string' && url.startsWith('blob:')) {
     URL.revokeObjectURL(url);
   }
+}
+
+function revokeImagePreviewUrl() {
+  revokeObjectUrl(imagePreviewUrl.value);
+  imagePreviewUrl.value = '';
 }
 
 function clearAudioPreviewFallbackTimer() {
@@ -1149,7 +1224,7 @@ function logDetail(entry) {
           <img
             v-else-if="shouldShowImage(inspectedEntry)"
             class="preview-image"
-            :src="localFileAssetUrl(inspectedEntry.path)"
+            :src="imagePreviewUrl"
             :alt="inspectedEntry.name"
             decoding="async"
             @error="imageFailed = true"

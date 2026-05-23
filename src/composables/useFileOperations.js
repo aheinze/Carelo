@@ -179,7 +179,7 @@ export async function readMediaPreview(path, maxBytes = 128 * 1024 * 1024) {
 }
 
 export async function createMediaStreamUrl(path) {
-  if (!hasTauriBridge() || !path || isRemotePath(path) || isArchivePath(path)) {
+  if (!hasTauriBridge() || !path || isArchivePath(path)) {
     return '';
   }
 

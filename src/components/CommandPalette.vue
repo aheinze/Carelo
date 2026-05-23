@@ -34,12 +34,11 @@ const canSearchRoot = computed(() => {
   const root = activeRoot.value;
   return canUseLocalFileAssets()
     && root
-    && !root.startsWith('remote://')
     && !isArchivePath(root);
 });
 const statusText = computed(() => {
   if (!canSearchRoot.value) {
-    return 'Local folders only';
+    return 'Search unavailable';
   }
 
   if (!query.value.trim()) {
