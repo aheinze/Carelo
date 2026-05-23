@@ -563,6 +563,8 @@ dependencies = [
  "libc",
  "nucleo-matcher",
  "opendal",
+ "openssh",
+ "openssh-sftp-client",
  "pdf-extract",
  "quick-xml 0.39.4",
  "rand",

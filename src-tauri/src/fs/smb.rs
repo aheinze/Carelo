@@ -1,6 +1,10 @@
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -10,6 +14,8 @@ use crate::fs::models::{FsError, FsResult};
 use crate::fs::remote::RemoteVolumeConfig;
 
 const SMB_SCHEMES: [&str; 2] = ["smb", "cifs"];
+#[cfg(target_os = "linux")]
+static OWNED_SMB_MOUNTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SmbShare {
@@ -32,6 +38,11 @@ pub fn smb_fs_operator_options(config: &RemoteVolumeConfig) -> FsResult<Vec<(Str
         "root".to_string(),
         root.to_string_lossy().into_owned(),
     )])
+}
+
+pub fn unmount_smb(config: &RemoteVolumeConfig) -> FsResult<bool> {
+    let share = parse_smb_share(config)?;
+    unmount_smb_for_platform(config, &share)
 }
 
 fn ensure_smb_mount(config: &RemoteVolumeConfig) -> FsResult<PathBuf> {
@@ -68,6 +79,110 @@ fn ensure_smb_mount_for_platform(
 }
 
 #[cfg(target_os = "linux")]
+fn unmount_smb_for_platform(config: &RemoteVolumeConfig, share: &SmbShare) -> FsResult<bool> {
+    if !is_owned_smb_mount(&config.id) {
+        return Ok(false);
+    }
+
+    if find_linux_gvfs_mount(share).is_none() {
+        forget_owned_smb_mount(&config.id);
+        return Ok(false);
+    }
+
+    let uri = smb_uri(share, "smb", false, true)?;
+    let output = Command::new("gio")
+        .arg("mount")
+        .arg("-u")
+        .arg(&uri)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| {
+            FsError::new(
+                "smb_unmount_spawn_failed",
+                format!("Unable to start gio to unmount the SMB share: {error}"),
+                Some(remote_config_path(config)),
+            )
+        })?;
+
+    for _ in 0..20 {
+        if find_linux_gvfs_mount(share).is_none() {
+            forget_owned_smb_mount(&config.id);
+            return Ok(true);
+        }
+
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    if output.status.success() && find_linux_gvfs_mount(share).is_none() {
+        forget_owned_smb_mount(&config.id);
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+
+    Err(FsError::new(
+        "smb_unmount_failed",
+        if detail.is_empty() {
+            "Unable to unmount SMB share.".to_string()
+        } else {
+            format!("Unable to unmount SMB share: {detail}")
+        },
+        Some(remote_config_path(config)),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn unmount_smb_for_platform(config: &RemoteVolumeConfig, _share: &SmbShare) -> FsResult<bool> {
+    let mount_point = macos_mount_point(config)?;
+
+    if !is_mounted_at(&mount_point)? {
+        return Ok(false);
+    }
+
+    let output = Command::new("umount")
+        .arg(&mount_point)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| {
+            FsError::new(
+                "smb_unmount_spawn_failed",
+                format!("Unable to start umount for the SMB share: {error}"),
+                Some(remote_config_path(config)),
+            )
+        })?;
+
+    if output.status.success() || !is_mounted_at(&mount_point)? {
+        let _ = std::fs::remove_dir(&mount_point);
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+
+    Err(FsError::new(
+        "smb_unmount_failed",
+        if detail.is_empty() {
+            "Unable to unmount SMB share.".to_string()
+        } else {
+            format!("Unable to unmount SMB share: {detail}")
+        },
+        Some(remote_config_path(config)),
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn unmount_smb_for_platform(_config: &RemoteVolumeConfig, _share: &SmbShare) -> FsResult<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
 fn ensure_linux_gvfs_mount(config: &RemoteVolumeConfig, share: &SmbShare) -> FsResult<PathBuf> {
     if let Some(path) = find_linux_gvfs_mount(share) {
         return Ok(join_smb_root(path, &share.root));
@@ -92,6 +207,7 @@ fn ensure_linux_gvfs_mount(config: &RemoteVolumeConfig, share: &SmbShare) -> FsR
 
     for _ in 0..20 {
         if let Some(path) = find_linux_gvfs_mount(share) {
+            mark_owned_smb_mount(&config.id);
             return Ok(join_smb_root(path, &share.root));
         }
 
@@ -166,6 +282,33 @@ fn gvfs_root() -> PathBuf {
     }
 
     PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() })).join("gvfs")
+}
+
+#[cfg(target_os = "linux")]
+fn owned_smb_mounts() -> &'static Mutex<HashSet<String>> {
+    OWNED_SMB_MOUNTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(target_os = "linux")]
+fn mark_owned_smb_mount(id: &str) {
+    if let Ok(mut mounts) = owned_smb_mounts().lock() {
+        mounts.insert(id.to_string());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn forget_owned_smb_mount(id: &str) {
+    if let Ok(mut mounts) = owned_smb_mounts().lock() {
+        mounts.remove(id);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_owned_smb_mount(id: &str) -> bool {
+    owned_smb_mounts()
+        .lock()
+        .map(|mounts| mounts.contains(id))
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]

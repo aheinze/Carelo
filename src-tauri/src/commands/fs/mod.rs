@@ -2,12 +2,13 @@ use crate::fs::local::LocalFileProvider;
 use crate::fs::models::{FileEntry, FileEntryKind, FileMetadata, FsError, FsResult, VolumeEntry};
 use crate::fs::provider::FileProvider;
 use crate::fs::remote::{
-    check_remote, copy_local_to_remote_item, copy_remote_item, copy_remote_to_local_item,
-    create_remote_folder, delete_remote_item, list_remote_directory, materialize_remote_file,
-    measure_remote_items_size as measure_remote_paths_size, move_local_to_remote_item,
-    move_remote_item, move_remote_to_local_item, parse_remote_path, read_remote_file_prefix,
-    rename_remote_item, stat_remote_item, RemotePath, RemoteSizeMeasure, RemoteVolumeConfig,
-    RemoteVolumeInfo, RemoteVolumeState,
+    check_registered_remote, check_remote, copy_local_to_remote_item, copy_remote_item,
+    copy_remote_to_local_item, create_remote_folder, delete_remote_item, list_remote_directory,
+    materialize_remote_file, measure_remote_items_size as measure_remote_paths_size,
+    move_local_to_remote_item, move_remote_item, move_remote_to_local_item, parse_remote_path,
+    read_remote_file_prefix, release_remote_volume_resources, rename_remote_item, stat_remote_item,
+    RemotePath, RemoteReleaseResult, RemoteSizeMeasure, RemoteVolumeConfig, RemoteVolumeInfo,
+    RemoteVolumeState,
 };
 use crate::fs::sudo;
 use crate::fs::{archive, operations};

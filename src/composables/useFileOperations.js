@@ -17,6 +17,74 @@ function bridgeUnavailableError() {
   };
 }
 
+const REMOTE_PREVIEW_CACHE_TTL_MS = 60_000;
+const REMOTE_PREVIEW_CACHE_MAX_ENTRIES = 32;
+const REMOTE_MEDIA_PREVIEW_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const remotePreviewCache = new Map();
+
+function remotePreviewCacheKey(kind, path, maxBytes) {
+  return `${kind}\0${maxBytes}\0${path}`;
+}
+
+function cachedRemotePreview(kind, path, maxBytes) {
+  const key = remotePreviewCacheKey(kind, path, maxBytes);
+  const entry = remotePreviewCache.get(key);
+
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.expiresAt <= Date.now()) {
+    remotePreviewCache.delete(key);
+    return null;
+  }
+
+  remotePreviewCache.delete(key);
+  remotePreviewCache.set(key, entry);
+  return entry.value;
+}
+
+function cacheRemotePreview(kind, path, maxBytes, value, byteLength = 0) {
+  if (byteLength > REMOTE_MEDIA_PREVIEW_CACHE_MAX_BYTES) {
+    return;
+  }
+
+  const key = remotePreviewCacheKey(kind, path, maxBytes);
+  remotePreviewCache.set(key, {
+    value,
+    expiresAt: Date.now() + REMOTE_PREVIEW_CACHE_TTL_MS,
+  });
+
+  while (remotePreviewCache.size > REMOTE_PREVIEW_CACHE_MAX_ENTRIES) {
+    const oldestKey = remotePreviewCache.keys().next().value;
+    remotePreviewCache.delete(oldestKey);
+  }
+}
+
+function previewPayloadByteLength(payload) {
+  if (!payload) {
+    return 0;
+  }
+
+  if (payload instanceof ArrayBuffer) {
+    return payload.byteLength;
+  }
+
+  if (ArrayBuffer.isView(payload)) {
+    return payload.byteLength;
+  }
+
+  if (Array.isArray(payload)) {
+    return payload.length;
+  }
+
+  if (typeof payload.text === 'string') {
+    return new TextEncoder().encode(payload.text).byteLength;
+  }
+
+  return 0;
+}
+
 export function canUseLocalFileAssets() {
   return hasTauriBridge();
 }
@@ -171,10 +239,34 @@ export async function compareFileChecksums(leftPath, rightPath) {
 }
 
 export async function readTextPreview(path, maxBytes = 96 * 1024) {
+  if (isRemotePath(path)) {
+    const cached = cachedRemotePreview('text', path, maxBytes);
+
+    if (cached) {
+      return cached;
+    }
+
+    const preview = await invokeCommand('read_text_preview', { path, maxBytes });
+    cacheRemotePreview('text', path, maxBytes, preview, previewPayloadByteLength(preview));
+    return preview;
+  }
+
   return invokeCommand('read_text_preview', { path, maxBytes });
 }
 
 export async function readMediaPreview(path, maxBytes = 128 * 1024 * 1024) {
+  if (isRemotePath(path)) {
+    const cached = cachedRemotePreview('media', path, maxBytes);
+
+    if (cached) {
+      return cached;
+    }
+
+    const preview = await invokeCommand('read_media_preview', { path, maxBytes });
+    cacheRemotePreview('media', path, maxBytes, preview, previewPayloadByteLength(preview));
+    return preview;
+  }
+
   return invokeCommand('read_media_preview', { path, maxBytes });
 }
 
@@ -212,6 +304,14 @@ export async function removeRemoteVolume(id) {
 
 export async function listRemoteVolumes() {
   return invokeCommand('list_remote_volumes');
+}
+
+export async function checkRemoteVolume(id) {
+  return invokeCommand('check_remote_volume', { id });
+}
+
+export async function setActiveRemoteVolumes(ids) {
+  return invokeCommand('set_active_remote_volumes', { ids });
 }
 
 export async function listFavorites() {
@@ -364,6 +464,7 @@ export function useFileOperations() {
     addFavoriteGroup,
     addRemoteVolume,
     appStorePath,
+    checkRemoteVolume,
     isRemotePath,
     listFavoriteGroups,
     listFavorites,

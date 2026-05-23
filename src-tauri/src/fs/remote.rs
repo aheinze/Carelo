@@ -2,17 +2,26 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use opendal::{Entry, EntryMode, ErrorKind, Metadata, Operator};
+use openssh::{KnownHosts, SessionBuilder};
+use openssh_sftp_client::metadata::{MetaData as SftpMetadata, Permissions as SftpPermissions};
+use openssh_sftp_client::{Sftp, SftpOptions};
 use serde::{Deserialize, Serialize};
 
-use crate::fs::models::{FileEntry, FileEntryKind, FileMetadata, FsError, FsResult, VolumeEntry};
+use crate::fs::local::{file_permissions_from_unix_mode, permissions_for_metadata};
+use crate::fs::models::{
+    FileEntry, FileEntryKind, FileMetadata, FilePermissions, FsError, FsResult,
+    RemoteVolumeCapabilities, RemoteVolumeHealth, VolumeEntry,
+};
 use crate::fs::operations::SymlinkMode;
-use crate::fs::sftp_mount::{is_password_sftp_config, sftp_password_fs_operator_options};
-use crate::fs::smb::{is_smb_scheme, smb_fs_operator_options};
+use crate::fs::sftp_mount::{
+    is_password_sftp_config, sftp_password_fs_operator_options, unmount_sftp_password,
+};
+use crate::fs::smb::{is_smb_scheme, smb_fs_operator_options, unmount_smb};
 
 const REMOTE_PATH_PREFIX: &str = "remote://";
 const TRANSFER_BUFFER_BYTES: usize = 256 * 1024;
@@ -20,6 +29,8 @@ const TRANSFER_BUFFER_BYTES: usize = 256 * 1024;
 #[derive(Debug, Default)]
 pub struct RemoteVolumeState {
     volumes: Mutex<HashMap<String, RemoteVolumeConfig>>,
+    health: Mutex<HashMap<String, RemoteVolumeHealth>>,
+    active_ids: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -42,6 +53,16 @@ pub struct RemoteVolumeInfo {
     pub scheme: String,
     pub path: String,
     pub root: Option<String>,
+    pub capabilities: RemoteVolumeCapabilities,
+    pub health: RemoteVolumeHealth,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteReleaseResult {
+    pub id: String,
+    pub released: bool,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +79,14 @@ pub struct RemoteFileRead {
 }
 
 #[derive(Debug, Clone, Default)]
+struct RemoteMetadataDetails {
+    created_at: Option<u64>,
+    accessed_at: Option<u64>,
+    is_readonly: Option<bool>,
+    permissions: Option<FilePermissions>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct RemoteSizeMeasure {
     pub logical_bytes: u64,
     pub disk_bytes: u64,
@@ -71,7 +100,7 @@ pub struct RemoteSizeMeasure {
 impl RemoteVolumeState {
     pub fn add(&self, config: RemoteVolumeConfig) -> FsResult<RemoteVolumeInfo> {
         config.validate()?;
-        let info = config.info();
+        let info = config.info(self.health_for(&config.id)?);
         let mut volumes = self.volumes.lock().map_err(lock_error)?;
         volumes.insert(config.id.clone(), config);
         Ok(info)
@@ -79,12 +108,20 @@ impl RemoteVolumeState {
 
     pub fn remove(&self, id: &str) -> FsResult<bool> {
         let mut volumes = self.volumes.lock().map_err(lock_error)?;
-        Ok(volumes.remove(id).is_some())
+        let removed = volumes.remove(id).is_some();
+        drop(volumes);
+        self.health.lock().map_err(lock_error)?.remove(id);
+        self.active_ids.lock().map_err(lock_error)?.remove(id);
+        Ok(removed)
     }
 
     pub fn list(&self) -> FsResult<Vec<RemoteVolumeInfo>> {
         let volumes = self.volumes.lock().map_err(lock_error)?;
-        let mut entries: Vec<_> = volumes.values().map(RemoteVolumeConfig::info).collect();
+        let health = self.health.lock().map_err(lock_error)?;
+        let mut entries: Vec<_> = volumes
+            .values()
+            .map(|config| config.info(health_for_id(&health, &config.id)))
+            .collect();
         entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         Ok(entries)
     }
@@ -104,15 +141,65 @@ impl RemoteVolumeState {
         Ok(self
             .list()?
             .into_iter()
-            .map(|remote| VolumeEntry {
-                name: remote.name,
-                path: remote.path,
-                device_path: None,
-                detail: Some(remote.scheme.to_uppercase()),
-                is_removable: false,
-                is_mounted: true,
+            .map(|remote| {
+                let detail = remote_sidebar_detail(&remote);
+
+                VolumeEntry {
+                    name: remote.name,
+                    path: remote.path,
+                    device_path: None,
+                    detail: Some(detail),
+                    is_removable: false,
+                    is_mounted: true,
+                    capabilities: Some(remote.capabilities),
+                    health: Some(remote.health),
+                }
             })
             .collect())
+    }
+
+    pub fn health_for(&self, id: &str) -> FsResult<RemoteVolumeHealth> {
+        let health = self.health.lock().map_err(lock_error)?;
+        Ok(health_for_id(&health, id))
+    }
+
+    pub fn set_health(&self, id: &str, health: RemoteVolumeHealth) -> FsResult<()> {
+        self.health
+            .lock()
+            .map_err(lock_error)?
+            .insert(id.to_string(), health);
+        Ok(())
+    }
+
+    pub fn set_active_ids(&self, ids: HashSet<String>) -> FsResult<Vec<RemoteVolumeConfig>> {
+        let volumes = self.volumes.lock().map_err(lock_error)?;
+        let next_active: HashSet<String> = ids
+            .into_iter()
+            .filter(|id| volumes.contains_key(id))
+            .collect();
+        let mut active_ids = self.active_ids.lock().map_err(lock_error)?;
+        let released = active_ids
+            .difference(&next_active)
+            .filter_map(|id| volumes.get(id).cloned())
+            .collect::<Vec<_>>();
+
+        *active_ids = next_active;
+        Ok(released)
+    }
+
+    pub fn is_active(&self, id: &str) -> FsResult<bool> {
+        Ok(self.active_ids.lock().map_err(lock_error)?.contains(id))
+    }
+
+    pub fn mark_idle(&self, id: &str, message: impl Into<String>) -> FsResult<()> {
+        self.set_health(
+            id,
+            RemoteVolumeHealth {
+                status: "idle".to_string(),
+                message: Some(message.into()),
+                checked_at: Some(current_unix_seconds()),
+            },
+        )
     }
 }
 
@@ -150,23 +237,73 @@ impl RemoteVolumeConfig {
         Ok(())
     }
 
-    fn info(&self) -> RemoteVolumeInfo {
+    fn info(&self, health: RemoteVolumeHealth) -> RemoteVolumeInfo {
         RemoteVolumeInfo {
             id: self.id.clone(),
             name: self.name.clone(),
             scheme: self.scheme.to_ascii_lowercase(),
             path: remote_root_uri(&self.id),
             root: self.root.clone(),
+            capabilities: self.capabilities(),
+            health,
+        }
+    }
+
+    pub fn capabilities(&self) -> RemoteVolumeCapabilities {
+        let scheme = self.scheme.to_ascii_lowercase();
+        let is_mount_backed =
+            scheme == "fs" || is_smb_scheme(&scheme) || is_password_sftp_config(self);
+        let is_object_store = matches!(
+            scheme.as_str(),
+            "b2" | "dropbox" | "gdrive" | "memory" | "onedrive" | "s3" | "swift"
+        );
+        let is_webdav = scheme == "webdav";
+        let is_sftp = scheme == "sftp";
+
+        RemoteVolumeCapabilities {
+            can_read: true,
+            can_write: true,
+            can_create_folders: !is_object_store || matches!(scheme.as_str(), "memory" | "s3"),
+            can_rename: !is_object_store,
+            can_delete: true,
+            can_recursive_delete: true,
+            can_server_side_copy: is_mount_backed
+                || scheme == "s3"
+                || (is_sftp
+                    && self
+                        .options
+                        .get("enable_copy")
+                        .map(|value| value.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false))
+                || (is_webdav
+                    && !self
+                        .options
+                        .get("disable_copy")
+                        .map(|value| value.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false)),
+            can_stream_media: true,
+            can_search_filenames: true,
+            can_search_content: true,
+            has_posix_permissions: is_mount_backed || is_sftp,
+            has_owner_group: is_mount_backed || is_sftp,
+            has_symlinks: is_mount_backed,
+            is_mount_backed,
+            needs_mount: is_smb_scheme(&scheme) || is_password_sftp_config(self),
         }
     }
 
     fn operator(&self) -> FsResult<Operator> {
+        self.operator_with_local_root()
+            .map(|(operator, _)| operator)
+    }
+
+    fn operator_with_local_root(&self) -> FsResult<(Operator, Option<PathBuf>)> {
         self.validate()?;
         let scheme = self.scheme.to_ascii_lowercase();
 
-        if is_smb_scheme(&scheme) {
-            let options = smb_fs_operator_options(self)?;
-            return Operator::via_iter("fs", options).map_err(|error| {
+        if let Some(options) = self.fs_operator_options(&scheme)? {
+            let local_root = fs_root_from_options(&options);
+            let operator = Operator::via_iter("fs", options).map_err(|error| {
                 FsError::new(
                     "remote_operator_error",
                     format!(
@@ -175,23 +312,43 @@ impl RemoteVolumeConfig {
                     ),
                     Some(remote_root_uri(&self.id)),
                 )
-            });
+            })?;
+            return Ok((operator, local_root));
+        }
+
+        let options = self.generic_operator_options();
+
+        let operator = Operator::via_iter(scheme, options).map_err(|error| {
+            FsError::new(
+                "remote_operator_error",
+                format!(
+                    "Unable to initialize remote volume '{}': {error}",
+                    self.name
+                ),
+                Some(remote_root_uri(&self.id)),
+            )
+        })?;
+
+        Ok((operator, None))
+    }
+
+    fn fs_operator_options(&self, scheme: &str) -> FsResult<Option<Vec<(String, String)>>> {
+        if is_smb_scheme(scheme) {
+            return smb_fs_operator_options(self).map(Some);
         }
 
         if is_password_sftp_config(self) {
-            let options = sftp_password_fs_operator_options(self)?;
-            return Operator::via_iter("fs", options).map_err(|error| {
-                FsError::new(
-                    "remote_operator_error",
-                    format!(
-                        "Unable to initialize remote volume '{}': {error}",
-                        self.name
-                    ),
-                    Some(remote_root_uri(&self.id)),
-                )
-            });
+            return sftp_password_fs_operator_options(self).map(Some);
         }
 
+        if scheme == "fs" {
+            return Ok(Some(self.generic_operator_options()));
+        }
+
+        Ok(None)
+    }
+
+    fn generic_operator_options(&self) -> Vec<(String, String)> {
         let mut options: Vec<(String, String)> = self
             .options
             .iter()
@@ -208,17 +365,83 @@ impl RemoteVolumeConfig {
             options.push(("root".to_string(), root.clone()));
         }
 
-        Operator::via_iter(scheme, options).map_err(|error| {
-            FsError::new(
-                "remote_operator_error",
-                format!(
-                    "Unable to initialize remote volume '{}': {error}",
-                    self.name
-                ),
-                Some(remote_root_uri(&self.id)),
-            )
-        })
+        options
     }
+}
+
+fn fs_root_from_options(options: &[(String, String)]) -> Option<PathBuf> {
+    options
+        .iter()
+        .rev()
+        .find(|(key, value)| key.eq_ignore_ascii_case("root") && !value.trim().is_empty())
+        .map(|(_, value)| PathBuf::from(value))
+}
+
+fn health_for_id(health: &HashMap<String, RemoteVolumeHealth>, id: &str) -> RemoteVolumeHealth {
+    health
+        .get(id)
+        .cloned()
+        .unwrap_or_else(remote_health_unknown)
+}
+
+fn remote_health_unknown() -> RemoteVolumeHealth {
+    RemoteVolumeHealth {
+        status: "unknown".to_string(),
+        message: None,
+        checked_at: None,
+    }
+}
+
+fn remote_health_connected() -> RemoteVolumeHealth {
+    RemoteVolumeHealth {
+        status: "connected".to_string(),
+        message: None,
+        checked_at: Some(current_unix_seconds()),
+    }
+}
+
+fn remote_health_error(error: &FsError) -> RemoteVolumeHealth {
+    RemoteVolumeHealth {
+        status: remote_error_health_status(error).to_string(),
+        message: Some(error.message.clone()),
+        checked_at: Some(current_unix_seconds()),
+    }
+}
+
+fn remote_error_health_status(error: &FsError) -> &'static str {
+    let text = format!("{} {}", error.code, error.message).to_ascii_lowercase();
+
+    if text.contains("auth")
+        || text.contains("credential")
+        || text.contains("password")
+        || text.contains("permission denied")
+        || text.contains("denied")
+    {
+        "authRequired"
+    } else {
+        "error"
+    }
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn remote_sidebar_detail(remote: &RemoteVolumeInfo) -> String {
+    let protocol = remote.scheme.to_uppercase();
+    let status = match remote.health.status.as_str() {
+        "connected" => "Connected",
+        "idle" => "Idle",
+        "checking" => "Checking",
+        "authRequired" => "Auth required",
+        "error" => "Offline",
+        _ => "Not checked",
+    };
+
+    format!("{protocol} • {status}")
 }
 
 pub fn parse_remote_path(path: &str) -> Option<RemotePath> {
@@ -251,6 +474,52 @@ pub async fn check_remote(config: &RemoteVolumeConfig) -> FsResult<()> {
             Some(remote_root_uri(&config.id)),
         )
     })
+}
+
+pub async fn check_registered_remote(
+    state: &RemoteVolumeState,
+    id: String,
+) -> FsResult<RemoteVolumeInfo> {
+    let config = state.config(&id)?;
+    state.set_health(
+        &id,
+        RemoteVolumeHealth {
+            status: "checking".to_string(),
+            message: None,
+            checked_at: None,
+        },
+    )?;
+
+    let health = match check_remote(&config).await {
+        Ok(()) => remote_health_connected(),
+        Err(error) => remote_health_error(&error),
+    };
+
+    state.set_health(&id, health.clone())?;
+    Ok(config.info(health))
+}
+
+pub fn release_remote_volume_resources(config: &RemoteVolumeConfig) -> RemoteReleaseResult {
+    let result = if is_smb_scheme(&config.scheme) {
+        unmount_smb(config)
+    } else if is_password_sftp_config(config) {
+        unmount_sftp_password(config)
+    } else {
+        Ok(false)
+    };
+
+    match result {
+        Ok(released) => RemoteReleaseResult {
+            id: config.id.clone(),
+            released,
+            message: None,
+        },
+        Err(error) => RemoteReleaseResult {
+            id: config.id.clone(),
+            released: false,
+            message: Some(error.message),
+        },
+    }
 }
 
 pub async fn list_remote_directory(
@@ -472,17 +741,27 @@ pub async fn stat_remote_item(
     path: RemotePath,
 ) -> FsResult<FileMetadata> {
     let config = state.config(&path.volume_id)?;
-    let op = config.operator()?;
+    let (op, local_root) = config.operator_with_local_root()?;
     let object_path = normalize_remote_object_path(&path.path);
     let metadata = op
         .stat(&object_path)
         .await
         .map_err(|error| remote_error("remote_stat_failed", &path, error))?;
+    let details = if let Some(details) = local_root
+        .as_deref()
+        .and_then(|root| local_metadata_for_remote_object(root, &object_path))
+        .map(remote_metadata_details_from_local)
+    {
+        Some(details)
+    } else {
+        direct_sftp_metadata_details(&config, &object_path).await
+    };
 
     Ok(metadata_to_file_metadata(
         &format_remote_uri(&path.volume_id, &object_path),
         &object_path,
         &metadata,
+        details.as_ref(),
     ))
 }
 
@@ -1261,6 +1540,192 @@ fn normalize_remote_directory_path(path: &str) -> String {
     }
 }
 
+fn local_metadata_for_remote_object(root: &Path, object_path: &str) -> Option<fs::Metadata> {
+    let path = local_path_for_remote_object(root, object_path)?;
+    fs::metadata(path).ok()
+}
+
+fn remote_metadata_details_from_local(metadata: fs::Metadata) -> RemoteMetadataDetails {
+    RemoteMetadataDetails {
+        created_at: metadata.created().ok().and_then(system_time_seconds),
+        accessed_at: metadata.accessed().ok().and_then(system_time_seconds),
+        is_readonly: Some(metadata.permissions().readonly()),
+        permissions: permissions_for_metadata(&metadata),
+    }
+}
+
+async fn direct_sftp_metadata_details(
+    config: &RemoteVolumeConfig,
+    object_path: &str,
+) -> Option<RemoteMetadataDetails> {
+    if !config.scheme.eq_ignore_ascii_case("sftp") || is_password_sftp_config(config) {
+        return None;
+    }
+
+    direct_sftp_metadata(config, object_path)
+        .await
+        .ok()
+        .map(remote_metadata_details_from_sftp)
+}
+
+async fn direct_sftp_metadata(
+    config: &RemoteVolumeConfig,
+    object_path: &str,
+) -> Result<SftpMetadata, String> {
+    let endpoint = config
+        .options
+        .get("endpoint")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "SFTP endpoint is not configured.".to_string())?;
+    let mut session = SessionBuilder::default();
+
+    if let Some(user) = config
+        .options
+        .get("user")
+        .or_else(|| config.options.get("username"))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        session.user(user.to_string());
+    }
+
+    if let Some(key) = config
+        .options
+        .get("key")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        session.keyfile(key);
+    }
+
+    session.known_hosts_check(known_hosts_strategy_for_config(config)?);
+
+    let session = session
+        .connect(endpoint)
+        .await
+        .map_err(|error| error.to_string())?;
+    let sftp = Sftp::from_session(session, SftpOptions::default())
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut fs = sftp.fs();
+    fs.metadata(sftp_metadata_path(config, object_path)?)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn known_hosts_strategy_for_config(config: &RemoteVolumeConfig) -> Result<KnownHosts, String> {
+    match config
+        .options
+        .get("known_hosts_strategy")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("") | Some("strict") => Ok(KnownHosts::Strict),
+        Some("accept") => Ok(KnownHosts::Accept),
+        Some("add") => Ok(KnownHosts::Add),
+        Some(value) => Err(format!("Unknown SFTP known hosts strategy: {value}")),
+    }
+}
+
+fn sftp_metadata_path(config: &RemoteVolumeConfig, object_path: &str) -> Result<PathBuf, String> {
+    let root = config.root.as_deref().unwrap_or("").trim();
+    let mut path = if root.is_empty() {
+        PathBuf::from(".")
+    } else {
+        PathBuf::from(root)
+    };
+
+    for component in Path::new(object_path).components() {
+        match component {
+            Component::Normal(segment) => path.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("Remote path escapes its root.".to_string());
+            }
+        }
+    }
+
+    Ok(path)
+}
+
+fn remote_metadata_details_from_sftp(metadata: SftpMetadata) -> RemoteMetadataDetails {
+    let permissions = metadata.permissions();
+
+    RemoteMetadataDetails {
+        created_at: None,
+        accessed_at: metadata
+            .accessed()
+            .and_then(|time| system_time_seconds(time.as_system_time())),
+        is_readonly: permissions.map(|permissions| permissions.readonly()),
+        permissions: permissions.map(|permissions| {
+            file_permissions_from_unix_mode(
+                mode_from_sftp_permissions(permissions),
+                metadata.uid(),
+                metadata.gid(),
+                false,
+            )
+        }),
+    }
+}
+
+fn mode_from_sftp_permissions(permissions: SftpPermissions) -> u32 {
+    let mut mode = 0;
+
+    if permissions.suid() {
+        mode |= 0o4000;
+    }
+    if permissions.sgid() {
+        mode |= 0o2000;
+    }
+    if permissions.svtx() {
+        mode |= 0o1000;
+    }
+    if permissions.read_by_owner() {
+        mode |= 0o400;
+    }
+    if permissions.write_by_owner() {
+        mode |= 0o200;
+    }
+    if permissions.execute_by_owner() {
+        mode |= 0o100;
+    }
+    if permissions.read_by_group() {
+        mode |= 0o040;
+    }
+    if permissions.write_by_group() {
+        mode |= 0o020;
+    }
+    if permissions.execute_by_group() {
+        mode |= 0o010;
+    }
+    if permissions.read_by_other() {
+        mode |= 0o004;
+    }
+    if permissions.write_by_other() {
+        mode |= 0o002;
+    }
+    if permissions.execute_by_other() {
+        mode |= 0o001;
+    }
+
+    mode
+}
+
+fn local_path_for_remote_object(root: &Path, object_path: &str) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+
+    for component in Path::new(object_path).components() {
+        match component {
+            Component::Normal(segment) => path.push(segment),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    Some(path)
+}
+
 pub(crate) fn format_remote_uri(volume_id: &str, path: &str) -> String {
     let path = normalize_remote_object_path(path);
 
@@ -1292,18 +1757,25 @@ fn entry_to_file_entry(volume_id: &str, entry: Entry) -> FileEntry {
     }
 }
 
-fn metadata_to_file_metadata(path: &str, object_path: &str, metadata: &Metadata) -> FileMetadata {
+fn metadata_to_file_metadata(
+    path: &str,
+    object_path: &str,
+    metadata: &Metadata,
+    details: Option<&RemoteMetadataDetails>,
+) -> FileMetadata {
     FileMetadata {
         path: path.to_string(),
         kind: entry_kind(metadata),
         size: metadata.is_file().then_some(metadata.content_length()),
         modified_at: modified_seconds(metadata),
-        created_at: None,
-        accessed_at: None,
+        created_at: details.and_then(|details| details.created_at),
+        accessed_at: details.and_then(|details| details.accessed_at),
         is_hidden: remote_entry_name(object_path).starts_with('.'),
         is_symlink: false,
-        is_readonly: false,
-        permissions: None,
+        is_readonly: details
+            .and_then(|details| details.is_readonly)
+            .unwrap_or(false),
+        permissions: details.and_then(|details| details.permissions.clone()),
     }
 }
 
@@ -1326,11 +1798,14 @@ fn remote_entry_name(path: &str) -> String {
 fn modified_seconds(metadata: &Metadata) -> Option<u64> {
     metadata.last_modified().and_then(|modified| {
         let modified: std::time::SystemTime = modified.into();
-        modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|duration| duration.as_secs())
+        system_time_seconds(modified)
     })
+}
+
+fn system_time_seconds(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 fn same_remote_path(left: &str, right: &str) -> bool {
@@ -1468,12 +1943,31 @@ mod tests {
             vec!["Alpha", "Zeta"]
         );
         assert_eq!(volumes[0].path, "remote://alpha/");
+        assert_eq!(volumes[0].health.status, "unknown");
+        assert!(volumes[0].capabilities.can_read);
+        assert!(volumes[0].capabilities.has_posix_permissions);
+        assert!(volumes[0].capabilities.is_mount_backed);
         let volume_entries = state
             .volume_entries()
             .expect("remote volumes should convert to sidebar entries");
         assert_eq!(volume_entries[0].name, "Alpha");
-        assert_eq!(volume_entries[0].detail.as_deref(), Some("FS"));
+        assert_eq!(
+            volume_entries[0].detail.as_deref(),
+            Some("FS • Not checked")
+        );
         assert!(volume_entries[0].is_mounted);
+        assert_eq!(
+            volume_entries[0]
+                .health
+                .as_ref()
+                .map(|health| health.status.as_str()),
+            Some("unknown")
+        );
+        assert!(volume_entries[0]
+            .capabilities
+            .as_ref()
+            .map(|capabilities| capabilities.can_search_content)
+            .unwrap_or(false));
 
         let invalid = state
             .add(RemoteVolumeConfig {
@@ -1517,6 +2011,46 @@ mod tests {
     }
 
     #[test]
+    fn tracks_remote_volumes_released_from_active_set() {
+        let state = RemoteVolumeState::default();
+        let root = TestDir::new();
+
+        state
+            .add(fs_config("alpha", "Alpha", root.path()))
+            .expect("alpha remote should be added");
+        state
+            .add(fs_config("beta", "Beta", root.path()))
+            .expect("beta remote should be added");
+
+        let released = state
+            .set_active_ids(HashSet::from(["alpha".to_string(), "beta".to_string()]))
+            .expect("initial active set should be accepted");
+        assert!(released.is_empty());
+
+        let released = state
+            .set_active_ids(HashSet::from(["beta".to_string(), "missing".to_string()]))
+            .expect("updated active set should be accepted");
+        assert_eq!(
+            released
+                .iter()
+                .map(|config| config.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"]
+        );
+
+        let released = state
+            .set_active_ids(HashSet::new())
+            .expect("empty active set should be accepted");
+        assert_eq!(
+            released
+                .iter()
+                .map(|config| config.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["beta"]
+        );
+    }
+
+    #[test]
     fn lists_and_stats_fs_backed_remote_entries() {
         let state = RemoteVolumeState::default();
         let root = TestDir::new();
@@ -1524,6 +2058,21 @@ mod tests {
         fs::write(root.path().join("Folder").join("nested.md"), b"nested")
             .expect("nested file should be created");
         fs::write(root.path().join("alpha.txt"), b"hello").expect("file should be created");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(
+                root.path().join("Folder"),
+                fs::Permissions::from_mode(0o750),
+            )
+            .expect("folder permissions should be set");
+            fs::set_permissions(
+                root.path().join("alpha.txt"),
+                fs::Permissions::from_mode(0o640),
+            )
+            .expect("file permissions should be set");
+        }
         add_fs_remote(&state, root.path());
 
         let entries =
@@ -1550,6 +2099,28 @@ mod tests {
         assert_eq!(metadata.kind, FileEntryKind::File);
         assert_eq!(metadata.size, Some(5));
         assert_eq!(metadata.path, "remote://test/alpha.txt");
+        #[cfg(unix)]
+        {
+            let permissions = metadata
+                .permissions
+                .expect("remote fs permissions should be exposed");
+            assert_eq!(permissions.octal, "640");
+            assert!(permissions.owner.read);
+            assert!(permissions.owner.write);
+            assert!(!permissions.others.read);
+
+            let folder_metadata = tauri::async_runtime::block_on(stat_remote_item(
+                &state,
+                remote("remote://test/Folder"),
+            ))
+            .expect("remote folder should stat");
+            let folder_permissions = folder_metadata
+                .permissions
+                .expect("remote folder permissions should be exposed");
+            assert_eq!(folder_permissions.octal, "750");
+        }
+        #[cfg(not(unix))]
+        assert!(metadata.permissions.is_none());
     }
 
     #[test]

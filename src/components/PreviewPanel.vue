@@ -173,6 +173,7 @@ const selectionCommonLocation = computed(() => {
   return parents.length === 1 ? parents[0] : 'Multiple locations';
 });
 const imageFailed = ref(false);
+const imageLoading = ref(false);
 const imagePreviewUrl = ref('');
 const audioFailed = ref(false);
 const audioLoading = ref(false);
@@ -201,6 +202,7 @@ let metadataLoadVersion = 0;
 let imagePreviewLoadVersion = 0;
 let audioPreviewLoadVersion = 0;
 let videoPreviewLoadVersion = 0;
+let textPreviewLoadVersion = 0;
 let audioPreviewFallbackTimer = null;
 let videoPreviewFallbackTimer = null;
 let videoReadyPollTimer = null;
@@ -354,6 +356,7 @@ watch(
     const loadVersion = imagePreviewLoadVersion;
     revokeImagePreviewUrl();
     imageFailed.value = false;
+    imageLoading.value = false;
     const entry = inspectedEntry.value;
 
     if (!entry || !isImageEntry(entry) || isArchivePath(entry.path)) {
@@ -364,6 +367,8 @@ watch(
       imagePreviewUrl.value = localFileAssetUrl(entry.path);
       return;
     }
+
+    imageLoading.value = true;
 
     try {
       const payload = await readMediaPreview(entry.path, mediaPreviewFallbackMaxBytes);
@@ -381,6 +386,10 @@ watch(
       if (imagePreviewLoadVersion === loadVersion) {
         imageFailed.value = true;
       }
+    } finally {
+      if (imagePreviewLoadVersion === loadVersion) {
+        imageLoading.value = false;
+      }
     }
   },
   { immediate: true },
@@ -389,6 +398,8 @@ watch(
 watch(
   () => [inspectedEntry.value?.path, inspectedEntry.value?.size, inspectedEntry.value?.name],
   async () => {
+    textPreviewLoadVersion += 1;
+    const loadVersion = textPreviewLoadVersion;
     textPreview.value = '';
     textPreviewError.value = '';
     textPreviewTruncated.value = false;
@@ -403,12 +414,20 @@ watch(
 
     try {
       const preview = await readTextPreview(entry.path, 96 * 1024);
+      if (textPreviewLoadVersion !== loadVersion) {
+        return;
+      }
+
       textPreview.value = preview?.text || '';
       textPreviewTruncated.value = Boolean(preview?.truncated);
     } catch (error) {
-      textPreviewError.value = error?.message || 'Text preview unavailable.';
+      if (textPreviewLoadVersion === loadVersion) {
+        textPreviewError.value = error?.message || 'Text preview unavailable.';
+      }
     } finally {
-      textPreviewLoading.value = false;
+      if (textPreviewLoadVersion === loadVersion) {
+        textPreviewLoading.value = false;
+      }
     }
   },
   { immediate: true },
@@ -622,6 +641,10 @@ function previewFallbackClass(entry) {
 
 function shouldShowImage(entry) {
   return isImageEntry(entry) && !isArchivePath(entry.path) && !imageFailed.value && Boolean(imagePreviewUrl.value);
+}
+
+function shouldShowImageLoading(entry) {
+  return isImageEntry(entry) && !isArchivePath(entry.path) && imageLoading.value && !imageFailed.value;
 }
 
 function shouldShowPdfPreview(entry) {
@@ -1221,6 +1244,17 @@ function logDetail(entry) {
           >
             <AppIcon name="folder" :size="80" :stroke-width="1.3" />
           </span>
+          <span
+            v-else-if="shouldShowImageLoading(inspectedEntry)"
+            class="preview-loading-shell preview-card--loading"
+          >
+            <span class="preview-loading-icon" aria-hidden="true">
+              <AppIcon name="image" :size="52" :stroke-width="1.4" />
+            </span>
+            <span class="preview-media-status">
+              Loading preview...
+            </span>
+          </span>
           <img
             v-else-if="shouldShowImage(inspectedEntry)"
             class="preview-image"
@@ -1232,6 +1266,7 @@ function logDetail(entry) {
           <span
             v-else-if="isVideoEntry(inspectedEntry)"
             class="preview-video-shell"
+            :class="{ 'preview-card--loading': videoLoading && !videoReady && !videoFailed }"
           >
             <video
               v-if="videoPreviewUrl"
@@ -1265,6 +1300,7 @@ function logDetail(entry) {
           <span
             v-else-if="isAudioEntry(inspectedEntry)"
             class="preview-audio-shell"
+            :class="{ 'preview-card--loading': audioLoading && !audioReady && !audioFailed }"
           >
             <span class="preview-audio-art">
               <AppIcon name="music" :size="52" :stroke-width="1.5" />
@@ -1298,6 +1334,7 @@ function logDetail(entry) {
           <span
             v-else-if="shouldShowTextPreview(inspectedEntry)"
             class="preview-text-shell"
+            :class="{ 'preview-card--loading': textPreviewLoading }"
           >
             <span v-if="textPreviewLoading" class="preview-media-status">
               Loading text...
@@ -1697,6 +1734,7 @@ function logDetail(entry) {
   overflow: hidden;
 }
 
+.preview-loading-shell,
 .preview-video-shell,
 .preview-audio-shell,
 .preview-text-shell {
@@ -1709,9 +1747,60 @@ function logDetail(entry) {
   background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
+.preview-loading-shell {
+  overflow: hidden;
+  color: var(--text-muted);
+}
+
+.preview-card--loading {
+  isolation: isolate;
+}
+
+.preview-card--loading::before,
+.preview-card--loading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.preview-card--loading::before {
+  background: linear-gradient(
+    110deg,
+    transparent 0%,
+    transparent 34%,
+    color-mix(in srgb, var(--text) 9%, transparent) 48%,
+    transparent 62%,
+    transparent 100%
+  );
+  transform: translateX(-100%);
+  animation: preview-loading-sheen 1.45s ease-in-out infinite;
+}
+
+.preview-card--loading::after {
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  border-radius: inherit;
+  opacity: 0.35;
+  transform: scale(0.992);
+  animation: preview-loading-card 1.8s cubic-bezier(0.25, 1, 0.5, 1) infinite;
+}
+
+.preview-loading-icon {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 78px;
+  height: 78px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
 .preview-text-shell {
   display: block;
   aspect-ratio: auto;
+  min-height: 220px;
   max-height: min(420px, 52vh);
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
@@ -1781,6 +1870,7 @@ function logDetail(entry) {
 
 .preview-media-status {
   position: absolute;
+  z-index: 1;
   inset: auto 12px 12px;
   border-radius: 6px;
   padding: 7px 9px;
@@ -1790,6 +1880,30 @@ function logDetail(entry) {
   font-size: 11.5px;
   font-weight: 650;
   text-align: center;
+}
+
+@keyframes preview-loading-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes preview-loading-card {
+  50% {
+    opacity: 0.62;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-card--loading::before,
+  .preview-card--loading::after {
+    animation: none;
+  }
+
+  .preview-card--loading::before {
+    transform: none;
+  }
 }
 
 .preview-folder,

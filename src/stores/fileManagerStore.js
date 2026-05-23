@@ -6,6 +6,7 @@ import {
   addFavoriteGroup as addStoredFavoriteGroup,
   cancelFileOperation,
   canUseLocalFileAssets,
+  checkRemoteVolume,
   getAppSettings as getStoredAppSettings,
   getHomeDirectory,
   listDirectory,
@@ -18,6 +19,7 @@ import {
   removeFavorite as removeStoredFavorite,
   resumeFileOperation,
   saveAppSettings as saveStoredAppSettings,
+  setActiveRemoteVolumes,
 } from '../composables/useFileOperations';
 import { loadUiSettings, saveUiSettings } from '../composables/useSettings';
 import {
@@ -34,6 +36,9 @@ let nextTabId = 1;
 let nextTabActivityId = 1;
 let nextQueueJobId = 1;
 let nextOperationLogId = 1;
+let remoteHealthRefreshInFlight = false;
+let activeRemoteSyncTimer = null;
+let lastReportedRemoteVolumeIds = '';
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
 const SORT_DIRECTIONS = ['asc', 'desc'];
 const VIEW_MODES = ['list', 'grid', 'columns'];
@@ -41,9 +46,11 @@ const APPEARANCE_MODES = ['system', 'light', 'dark'];
 const CUSTOM_TOOL_TARGETS = ['both', 'files', 'folders'];
 const DEFAULT_FAVORITE_GROUP_ID = 'favorites';
 const NAV_HISTORY_LIMIT = 80;
+const REMOTE_HEALTH_REFRESH_INTERVAL_MS = 60_000;
 const INACTIVE_TAB_ENTRY_CACHE_LIMIT = 2;
 const LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT = 1500;
 const OPERATION_LOG_LIMIT = 120;
+const ACTIVE_QUEUE_STATUSES = new Set(['running', 'paused', 'cancelling']);
 const DEFAULT_APP_SETTINGS = Object.freeze({
   appearanceMode: 'system',
   colorScheme: 'carelo',
@@ -145,6 +152,55 @@ function normalizeAppSettings(settings = {}) {
     terminalStartsInActiveFolder: value.terminalStartsInActiveFolder !== false,
     customTools: normalizeCustomTools(value.customTools),
   };
+}
+
+function remoteVolumeIdFromPath(path) {
+  const cleanPath = String(path || '').trim();
+
+  if (!cleanPath.startsWith('remote://')) {
+    return '';
+  }
+
+  return cleanPath.slice('remote://'.length).split('/')[0] || '';
+}
+
+function remoteVolumeIdsFromPaths(paths = []) {
+  return [...new Set(
+    (Array.isArray(paths) ? paths : [paths])
+      .map(remoteVolumeIdFromPath)
+      .filter(Boolean),
+  )];
+}
+
+function remoteHealthColor(health) {
+  switch (health?.status) {
+    case 'connected':
+      return '#34c759';
+    case 'idle':
+      return '#8E8E93';
+    case 'checking':
+      return '#5ca8ff';
+    case 'authRequired':
+      return '#ff9f0a';
+    case 'error':
+      return '#ff453a';
+    default:
+      return '#8E8E93';
+  }
+}
+
+function isRemoteHealthStale(health) {
+  if (!health || health.status === 'unknown') {
+    return true;
+  }
+
+  if (health.status === 'checking' || health.status === 'idle') {
+    return false;
+  }
+
+  const checkedAtMs = Number(health.checkedAt || 0) * 1000;
+
+  return !checkedAtMs || Date.now() - checkedAtMs >= REMOTE_HEALTH_REFRESH_INTERVAL_MS;
 }
 
 function applyAppearanceMode(mode) {
@@ -588,26 +644,35 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       });
     }
 
-    sections.splice(1, 0, {
-      title: 'Devices',
-      items: volumes.value.map((volume) => {
-        const isRemote = volume.path?.startsWith('remote://');
-        const isMountable = !volume.isMounted && Boolean(volume.devicePath);
+    const volumeItems = volumes.value.map((volume) => {
+      const isRemote = volume.path?.startsWith('remote://');
+      const isMountable = !volume.isMounted && Boolean(volume.devicePath);
 
-        return {
-          name: volume.name,
-          path: volume.path,
-          devicePath: volume.devicePath,
-          detail: volume.detail || (isRemote ? 'Remote' : 'Mounted'),
-          icon: isRemote ? 'network' : 'drive',
-          color: isRemote ? '#5e5ce6' : volume.isRemovable ? '#5ca8ff' : '#8E8E93',
-          disabled: !volume.isMounted && !isMountable,
-          isMountable,
-          isRemote,
-          matchPrefix: true,
-        };
-      }),
+      return {
+        name: volume.name,
+        path: volume.path,
+        devicePath: volume.devicePath,
+        detail: isRemote ? '' : volume.detail || 'Mounted',
+        icon: isRemote ? 'network' : 'drive',
+        color: isRemote ? remoteHealthColor(volume.health) : volume.isRemovable ? '#5ca8ff' : '#8E8E93',
+        disabled: !volume.isMounted && !isMountable,
+        isMountable,
+        isRemote,
+        remoteId: isRemote ? remoteVolumeIdFromPath(volume.path) : '',
+        remoteHealth: volume.health || null,
+        remoteCapabilities: volume.capabilities || null,
+        matchPrefix: true,
+      };
     });
+
+    sections.splice(
+      1,
+      0,
+      {
+        title: 'Devices',
+        items: volumeItems.filter((item) => !item.isRemote),
+      },
+    );
 
     return [
       ...sections,
@@ -619,6 +684,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         isDefaultFavoriteGroup: group.id === DEFAULT_FAVORITE_GROUP_ID,
         items: groupedFavorites.get(group.id) || [],
       })),
+      {
+        title: 'Remote Storage',
+        items: volumeItems.filter((item) => item.isRemote),
+      },
     ];
   });
 
@@ -642,6 +711,35 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     left: serializePane(panes.value.left),
     right: serializePane(panes.value.right),
   }));
+
+  const activeRemoteVolumeIds = computed(() => {
+    const ids = new Set();
+
+    Object.values(panes.value).forEach((pane) => {
+      (pane?.tabs || []).forEach((tab) => {
+        remoteVolumeIdsFromPaths(tab.currentPath).forEach((id) => ids.add(id));
+      });
+    });
+
+    Object.values(columnTargetDirectories.value || {}).forEach((path) => {
+      remoteVolumeIdsFromPaths(path).forEach((id) => ids.add(id));
+    });
+
+    queue.value
+      .filter((job) => ACTIVE_QUEUE_STATUSES.has(job.status))
+      .forEach((job) => {
+        remoteVolumeIdsFromPaths([
+          ...(Array.isArray(job.remotePaths) ? job.remotePaths : []),
+          job.currentPath,
+        ]).forEach((id) => ids.add(id));
+
+        (Array.isArray(job.remoteIds) ? job.remoteIds : [])
+          .filter(Boolean)
+          .forEach((id) => ids.add(id));
+      });
+
+    return [...ids].sort();
+  });
 
   async function initialize() {
     if (initializePromise) {
@@ -724,10 +822,196 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
   async function refreshVolumes() {
     try {
-      volumes.value = await listVolumes();
+      const previous = new Map(volumes.value.map((volume) => [volume.path, volume]));
+      volumes.value = (await listVolumes()).map((volume) => {
+        const previousVolume = previous.get(volume.path);
+
+        if (
+          volume.path?.startsWith('remote://') &&
+          previousVolume?.health &&
+          (!volume.health || volume.health.status === 'unknown')
+        ) {
+          return {
+            ...volume,
+            health: previousVolume.health,
+          };
+        }
+
+        return volume;
+      });
+      refreshRemoteHealth();
     } catch {
       volumes.value = [];
     }
+  }
+
+  async function refreshRemoteHealth(remoteId = '') {
+    if (remoteHealthRefreshInFlight && !remoteId) {
+      return;
+    }
+
+    const remotes = volumes.value
+      .filter((volume) => volume.path?.startsWith('remote://'))
+      .filter((volume) => {
+        if (remoteId) {
+          return remoteVolumeIdFromPath(volume.path) === remoteId;
+        }
+
+        return isRemoteHealthStale(volume.health);
+      });
+
+    if (remotes.length === 0) {
+      return;
+    }
+
+    if (!remoteId) {
+      remoteHealthRefreshInFlight = true;
+    }
+
+    const markChecking = (id) => {
+      volumes.value = volumes.value.map((volume) => (
+        remoteVolumeIdFromPath(volume.path) === id
+          ? {
+            ...volume,
+            health: {
+              status: 'checking',
+              message: null,
+              checkedAt: null,
+            },
+          }
+          : volume
+      ));
+    };
+
+    const markHealthError = (id, error) => {
+      volumes.value = volumes.value.map((volume) => (
+        remoteVolumeIdFromPath(volume.path) === id
+          ? {
+            ...volume,
+            health: {
+              status: 'error',
+              message: error?.message || 'Unable to check remote connection.',
+              checkedAt: Math.floor(Date.now() / 1000),
+            },
+          }
+          : volume
+      ));
+    };
+
+    try {
+      await Promise.allSettled(remotes.map(async (volume) => {
+        const id = remoteVolumeIdFromPath(volume.path);
+
+        if (!id) {
+          return;
+        }
+
+        markChecking(id);
+        let remote;
+
+        try {
+          remote = await checkRemoteVolume(id);
+        } catch (error) {
+          markHealthError(id, error);
+          return;
+        }
+
+        volumes.value = volumes.value.map((candidate) => (
+          remoteVolumeIdFromPath(candidate.path) === id
+            ? {
+              ...candidate,
+              capabilities: remote.capabilities || candidate.capabilities,
+              health: remote.health || candidate.health,
+            }
+            : candidate
+        ));
+      }));
+    } finally {
+      if (!remoteId) {
+        remoteHealthRefreshInFlight = false;
+      }
+    }
+  }
+
+  function applyRemoteLifecycleState(activeIds = [], released = []) {
+    const activeSet = new Set(activeIds);
+    const releasedById = new Map(
+      (Array.isArray(released) ? released : [])
+        .filter((item) => item?.id)
+        .map((item) => [item.id, item]),
+    );
+
+    if (activeSet.size === 0 && releasedById.size === 0) {
+      return;
+    }
+
+    const checkedAt = Math.floor(Date.now() / 1000);
+
+    volumes.value = volumes.value.map((volume) => {
+      const id = remoteVolumeIdFromPath(volume.path);
+
+      if (!id) {
+        return volume;
+      }
+
+      if (activeSet.has(id) && volume.health?.status === 'idle') {
+        const health = {
+          status: 'connected',
+          message: null,
+          checkedAt,
+        };
+
+        return {
+          ...volume,
+          health,
+        };
+      }
+
+      if (releasedById.has(id)) {
+        const result = releasedById.get(id);
+        const status = result.message ? 'connected' : 'idle';
+        const health = {
+          status,
+          message: result.message || 'No open tabs are using this remote volume.',
+          checkedAt,
+        };
+
+        return {
+          ...volume,
+          health,
+        };
+      }
+
+      return volume;
+    });
+  }
+
+  function scheduleActiveRemoteVolumeSync(ids = activeRemoteVolumeIds.value) {
+    const normalizedIds = [...new Set(ids)].filter(Boolean).sort();
+    const key = normalizedIds.join('\0');
+
+    applyRemoteLifecycleState(normalizedIds);
+
+    if (key === lastReportedRemoteVolumeIds) {
+      return;
+    }
+
+    lastReportedRemoteVolumeIds = key;
+
+    if (activeRemoteSyncTimer) {
+      globalThis.clearTimeout(activeRemoteSyncTimer);
+    }
+
+    activeRemoteSyncTimer = globalThis.setTimeout(async () => {
+      activeRemoteSyncTimer = null;
+
+      try {
+        const released = await setActiveRemoteVolumes(normalizedIds);
+        applyRemoteLifecycleState(normalizedIds, released);
+      } catch {
+        lastReportedRemoteVolumeIds = '';
+      }
+    }, 80);
   }
 
   async function loadFavorites() {
@@ -1036,6 +1320,13 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       currentBytes: 0,
       currentTotalBytes: 0,
       currentPath: '',
+      remoteIds: remoteVolumeIdsFromPaths([
+        ...(Array.isArray(options.remotePaths) ? options.remotePaths : []),
+        ...(Array.isArray(options.remoteIds) ? options.remoteIds.map((id) => `remote://${id}/`) : []),
+      ]),
+      remotePaths: Array.isArray(options.remotePaths)
+        ? options.remotePaths.filter((path) => remoteVolumeIdFromPath(path))
+        : [],
       progress: null,
       currentProgress: null,
       bytesPerSecond: 0,
@@ -1433,6 +1724,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     if (wasActive) {
       const nextTab = pane.tabs[Math.max(0, index - 1)] || pane.tabs[0];
       pane.activeTabId = nextTab.id;
+      clearColumnPreviewEntry(paneId);
+      clearColumnSelectionState(paneId);
+      clearColumnTargetDirectory(paneId);
       touchTabActivity(nextTab);
       setActivePane(paneId);
 
@@ -2304,6 +2598,14 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     { deep: true },
   );
 
+  watch(
+    activeRemoteVolumeIds,
+    (ids) => {
+      scheduleActiveRemoteVolumeSync(ids);
+    },
+    { immediate: true },
+  );
+
   return {
     panes,
     activePaneId,
@@ -2334,6 +2636,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     sidebarSections,
     initialize,
     refreshVolumes,
+    refreshRemoteHealth,
     activeTabFor,
     parentDirectoryFor,
     effectiveDirectoryFor,

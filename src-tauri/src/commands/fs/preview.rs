@@ -6,23 +6,48 @@ struct MediaStreamServer {
     token: String,
 }
 
+#[derive(Clone)]
+struct MediaStreamEntry {
+    path: PathBuf,
+    remote_id: Option<String>,
+    cleanup_root: Option<PathBuf>,
+}
+
 #[derive(Clone, Default)]
 pub struct MediaStreamState {
     server: Arc<Mutex<Option<MediaStreamServer>>>,
-    entries: Arc<Mutex<HashMap<String, PathBuf>>>,
+    entries: Arc<Mutex<HashMap<String, MediaStreamEntry>>>,
     entry_order: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl MediaStreamState {
     fn stream_url_for(&self, path: PathBuf) -> FsResult<String> {
-        let metadata = fs::metadata(&path)
-            .map_err(|error| FsError::io("Unable to read media metadata", &path, error))?;
+        self.stream_url_for_entry(MediaStreamEntry {
+            path,
+            remote_id: None,
+            cleanup_root: None,
+        })
+    }
+
+    fn stream_url_for_remote(&self, remote_id: String, path: PathBuf) -> FsResult<String> {
+        let cleanup_root = path.parent().map(Path::to_path_buf);
+
+        self.stream_url_for_entry(MediaStreamEntry {
+            path,
+            remote_id: Some(remote_id),
+            cleanup_root,
+        })
+    }
+
+    fn stream_url_for_entry(&self, entry: MediaStreamEntry) -> FsResult<String> {
+        let metadata = fs::metadata(&entry.path)
+            .map_err(|error| FsError::io("Unable to read media metadata", &entry.path, error))?;
 
         if !metadata.is_file() {
             return Err(FsError::new(
                 "media_stream_not_file",
                 "Media preview is available for files only.",
-                Some(path.to_string_lossy().into_owned()),
+                Some(entry.path.to_string_lossy().into_owned()),
             ));
         }
 
@@ -32,7 +57,7 @@ impl MediaStreamState {
         self.entries
             .lock()
             .map_err(|_| media_stream_error("Unable to register media stream."))?
-            .insert(id.clone(), path.clone());
+            .insert(id.clone(), entry.clone());
         self.prune_entries(&id)?;
 
         Ok(format!(
@@ -40,7 +65,7 @@ impl MediaStreamState {
             server.port,
             server.token,
             id,
-            media_url_extension(&path),
+            media_url_extension(&entry.path),
         ))
     }
 
@@ -102,12 +127,60 @@ impl MediaStreamState {
         while order.len() > MEDIA_STREAM_MAX_ENTRIES {
             if let Some(expired_id) = order.pop_front() {
                 if let Ok(mut entries) = self.entries.lock() {
-                    entries.remove(&expired_id);
+                    if let Some(entry) = entries.remove(&expired_id) {
+                        cleanup_media_stream_entry(entry);
+                    }
                 }
             }
         }
 
         Ok(())
+    }
+
+    pub(crate) fn release_remote_entries(&self, remote_ids: &HashSet<String>) -> FsResult<usize> {
+        if remote_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let (expired_ids, removed) = {
+            let mut entries = self
+                .entries
+                .lock()
+                .map_err(|_| media_stream_error("Unable to release media stream entries."))?;
+            let expired_ids = entries
+                .iter()
+                .filter_map(|(id, entry)| {
+                    entry
+                        .remote_id
+                        .as_ref()
+                        .filter(|remote_id| remote_ids.contains(*remote_id))
+                        .map(|_| id.clone())
+                })
+                .collect::<Vec<_>>();
+            let removed = expired_ids
+                .iter()
+                .filter_map(|id| entries.remove(id))
+                .collect::<Vec<_>>();
+
+            (expired_ids, removed)
+        };
+
+        if !expired_ids.is_empty() {
+            let mut order = self
+                .entry_order
+                .lock()
+                .map_err(|_| media_stream_error("Unable to release media stream entries."))?;
+            let expired = expired_ids.into_iter().collect::<HashSet<_>>();
+            order.retain(|id| !expired.contains(id));
+        }
+
+        let removed_count = removed.len();
+
+        for entry in removed {
+            cleanup_media_stream_entry(entry);
+        }
+
+        Ok(removed_count)
     }
 }
 
@@ -177,8 +250,9 @@ pub async fn create_media_stream_url(
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<String, FsError> {
     if let Some(remote_path) = parse_remote_path(&path) {
+        let remote_id = remote_path.volume_id.clone();
         let materialized_path = materialize_remote_file(&remotes, remote_path).await?;
-        return media_state.stream_url_for(materialized_path);
+        return media_state.stream_url_for_remote(remote_id, materialized_path);
     }
 
     let path = expand_local_path(&path)?;
@@ -358,7 +432,7 @@ struct MediaStreamRequest {
 
 fn handle_media_stream_request(
     mut stream: TcpStream,
-    entries: Arc<Mutex<HashMap<String, PathBuf>>>,
+    entries: Arc<Mutex<HashMap<String, MediaStreamEntry>>>,
     token: String,
 ) {
     let request = match read_media_stream_request(&mut stream) {
@@ -392,17 +466,18 @@ fn handle_media_stream_request(
         return;
     }
 
-    let path = match entries
+    let entry = match entries
         .lock()
         .ok()
         .and_then(|entries| entries.get(id).cloned())
     {
-        Some(path) => path,
+        Some(entry) => entry,
         None => {
             let _ = write_media_stream_error(&mut stream, "404 Not Found", "Not found");
             return;
         }
     };
+    let path = entry.path;
 
     if let Err(error) = write_media_stream_file(&mut stream, &request, &path) {
         eprintln!("Unable to stream media preview {}: {error}", path.display());
@@ -697,6 +772,26 @@ fn media_url_extension(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+fn cleanup_media_stream_entry(entry: MediaStreamEntry) {
+    let Some(cleanup_root) = entry.cleanup_root else {
+        return;
+    };
+
+    if !is_remote_media_cleanup_root(&cleanup_root) {
+        return;
+    }
+
+    let _ = fs::remove_dir_all(cleanup_root);
+}
+
+fn is_remote_media_cleanup_root(path: &Path) -> bool {
+    path.starts_with(remote_media_temp_base())
+}
+
+fn remote_media_temp_base() -> PathBuf {
+    std::env::temp_dir().join("carelo-remote-open")
+}
+
 fn media_stream_error(message: &str) -> FsError {
     FsError::new("media_stream_error", message, None)
 }
@@ -754,6 +849,41 @@ mod tests {
         assert!(headers.contains("\r\nContent-Range: bytes 0-1023/2048\r\n"));
         assert!(!headers.contains("\r\n Content-Type"));
         assert!(headers.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn releasing_remote_media_entries_removes_cached_files() {
+        let root = remote_media_temp_base().join(format!("test-{}", random_token(10)));
+        let file = root.join("movie.mp4");
+        fs::create_dir_all(&root).expect("create remote media cache root");
+        fs::write(&file, b"media").expect("write cached media");
+
+        let state = MediaStreamState::default();
+        state.entries.lock().expect("entries lock").insert(
+            "entry".to_string(),
+            MediaStreamEntry {
+                path: file,
+                remote_id: Some("server".to_string()),
+                cleanup_root: Some(root.clone()),
+            },
+        );
+        state
+            .entry_order
+            .lock()
+            .expect("order lock")
+            .push_back("entry".to_string());
+
+        let remote_ids = HashSet::from(["server".to_string()]);
+
+        assert_eq!(
+            state
+                .release_remote_entries(&remote_ids)
+                .expect("release entries"),
+            1
+        );
+        assert!(!root.exists());
+        assert!(state.entries.lock().expect("entries lock").is_empty());
+        assert!(state.entry_order.lock().expect("order lock").is_empty());
     }
 
     #[test]

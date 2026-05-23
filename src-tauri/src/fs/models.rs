@@ -83,6 +83,36 @@ pub struct VolumeEntry {
     pub detail: Option<String>,
     pub is_removable: bool,
     pub is_mounted: bool,
+    pub capabilities: Option<RemoteVolumeCapabilities>,
+    pub health: Option<RemoteVolumeHealth>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteVolumeCapabilities {
+    pub can_read: bool,
+    pub can_write: bool,
+    pub can_create_folders: bool,
+    pub can_rename: bool,
+    pub can_delete: bool,
+    pub can_recursive_delete: bool,
+    pub can_server_side_copy: bool,
+    pub can_stream_media: bool,
+    pub can_search_filenames: bool,
+    pub can_search_content: bool,
+    pub has_posix_permissions: bool,
+    pub has_owner_group: bool,
+    pub has_symlinks: bool,
+    pub is_mount_backed: bool,
+    pub needs_mount: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteVolumeHealth {
+    pub status: String,
+    pub message: Option<String>,
+    pub checked_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

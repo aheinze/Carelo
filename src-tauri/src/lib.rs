@@ -71,6 +71,8 @@ pub fn run() {
             commands::fs::remotes::add_remote_volume,
             commands::fs::remotes::remove_remote_volume,
             commands::fs::remotes::list_remote_volumes,
+            commands::fs::remotes::check_remote_volume,
+            commands::fs::remotes::set_active_remote_volumes,
             commands::fs::transfer::create_folder,
             commands::fs::transfer::rename_item,
             commands::fs::transfer::delete_items,

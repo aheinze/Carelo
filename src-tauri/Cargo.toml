@@ -27,6 +27,8 @@ opendal = { version = "0.56", features = [
     "services-swift",
     "services-webdav",
 ] }
+openssh = "0.11.6"
+openssh-sftp-client = "0.15.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["protocol-asset"] }

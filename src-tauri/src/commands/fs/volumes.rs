@@ -174,6 +174,8 @@ fn list_macos_volumes() -> FsResult<Vec<VolumeEntry>> {
             detail: capacity_detail(&path),
             is_removable: true,
             is_mounted: true,
+            capabilities: None,
+            health: None,
         });
     }
 
@@ -248,6 +250,8 @@ fn volume_from_mountinfo_line(line: &str) -> Option<VolumeEntry> {
         detail: capacity_detail(&path),
         is_removable: true,
         is_mounted: true,
+        capabilities: None,
+        health: None,
     })
 }
 
@@ -340,6 +344,8 @@ fn attached_linux_block_volumes(
             detail,
             is_removable: true,
             is_mounted: mount_path.is_some(),
+            capabilities: None,
+            health: None,
         });
     }
 

@@ -760,6 +760,11 @@ export function useFileTransferGuards() {
       operation: mode,
       label: `${operationLabel} ${itemText}`,
       detail: targetDirectory ? `To ${targetDirectory}` : '',
+      remotePaths: [
+        targetDirectory,
+        ...sourceEntries.map((entry) => entry.path),
+        ...runItems.flatMap((item) => [item.from, item.to]),
+      ],
       retryAction,
     });
 

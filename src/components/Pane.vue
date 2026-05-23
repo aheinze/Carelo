@@ -101,11 +101,45 @@ function totalKnownSize(targetEntries) {
   return sizes.reduce((total, size) => total + size, 0);
 }
 
+function remoteBreadcrumbs(path) {
+  const rest = String(path || '').replace(/\/+$/, '').slice('remote://'.length);
+  const parts = rest.split('/').filter(Boolean);
+  const volumeId = parts[0] || '';
+
+  if (!volumeId) {
+    return [{ label: 'Remote', path: 'remote://' }];
+  }
+
+  const rootPath = `remote://${volumeId}/`;
+  const volumes = Array.isArray(store.volumes) ? store.volumes : [];
+  const volume = volumes.find((candidate) => candidate.path === rootPath);
+  const crumbs = [{
+    label: volume?.name || volumeId,
+    path: rootPath,
+  }];
+
+  let objectPath = '';
+
+  for (const part of parts.slice(1)) {
+    objectPath = objectPath ? `${objectPath}/${part}` : part;
+    crumbs.push({
+      label: part,
+      path: `remote://${volumeId}/${objectPath}`,
+    });
+  }
+
+  return crumbs;
+}
+
 const breadcrumbs = computed(() => {
   const rawPath = String(activeTab.value?.currentPath || '~');
 
   if (isArchivePath(rawPath)) {
     return archiveBreadcrumbs(rawPath);
+  }
+
+  if (rawPath.startsWith('remote://')) {
+    return remoteBreadcrumbs(rawPath);
   }
 
   const currentPath = rawPath.replace(/\/+$/, '') || '/';
@@ -1234,6 +1268,7 @@ async function runQueuedArchive({ paths, destination, options, overwrite, label,
   const jobId = store.startQueueJob({
     operation: 'archive',
     label,
+    remotePaths: [destination, ...paths],
     retryAction,
   });
 
@@ -1267,6 +1302,7 @@ async function runQueuedUnarchive({ paths, destinationDirectory, label, refreshP
   const jobId = store.startQueueJob({
     operation: 'unarchive',
     label,
+    remotePaths: [destinationDirectory, ...paths],
     retryAction,
   });
 

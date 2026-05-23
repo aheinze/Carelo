@@ -442,31 +442,41 @@ fn time_seconds(time: Option<SystemTime>) -> Option<u64> {
 }
 
 #[cfg(unix)]
-fn permissions_for_metadata(metadata: &fs::Metadata) -> Option<FilePermissions> {
+pub(crate) fn permissions_for_metadata(metadata: &fs::Metadata) -> Option<FilePermissions> {
     let mode = metadata.mode() & 0o7777;
-    let uid = metadata.uid();
-    let gid = metadata.gid();
+    Some(file_permissions_from_unix_mode(
+        mode,
+        Some(metadata.uid()),
+        Some(metadata.gid()),
+        true,
+    ))
+}
 
-    Some(FilePermissions {
+pub(crate) fn file_permissions_from_unix_mode(
+    mode: u32,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    resolve_names: bool,
+) -> FilePermissions {
+    FilePermissions {
         owner: permission_set(mode, 0o400, 0o200, 0o100),
         group: permission_set(mode, 0o040, 0o020, 0o010),
         others: permission_set(mode, 0o004, 0o002, 0o001),
         symbolic: symbolic_mode(mode),
         octal: format!("{:03o}", mode & 0o777),
         mode,
-        owner_name: user_name(uid),
-        group_name: group_name(gid),
-        uid: Some(uid),
-        gid: Some(gid),
-    })
+        owner_name: uid.and_then(|uid| resolve_names.then(|| user_name_for_id(uid)).flatten()),
+        group_name: gid.and_then(|gid| resolve_names.then(|| group_name_for_id(gid)).flatten()),
+        uid,
+        gid,
+    }
 }
 
 #[cfg(not(unix))]
-fn permissions_for_metadata(_metadata: &fs::Metadata) -> Option<FilePermissions> {
+pub(crate) fn permissions_for_metadata(_metadata: &fs::Metadata) -> Option<FilePermissions> {
     None
 }
 
-#[cfg(unix)]
 fn permission_set(mode: u32, read: u32, write: u32, execute: u32) -> PermissionSet {
     PermissionSet {
         read: mode & read != 0,
@@ -475,7 +485,6 @@ fn permission_set(mode: u32, read: u32, write: u32, execute: u32) -> PermissionS
     }
 }
 
-#[cfg(unix)]
 fn symbolic_mode(mode: u32) -> String {
     let bits = [
         (0o400, 'r'),
@@ -492,6 +501,26 @@ fn symbolic_mode(mode: u32) -> String {
     bits.into_iter()
         .map(|(bit, character)| if mode & bit != 0 { character } else { '-' })
         .collect()
+}
+
+#[cfg(unix)]
+fn user_name_for_id(uid: u32) -> Option<String> {
+    user_name(uid)
+}
+
+#[cfg(not(unix))]
+fn user_name_for_id(_uid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn group_name_for_id(gid: u32) -> Option<String> {
+    group_name(gid)
+}
+
+#[cfg(not(unix))]
+fn group_name_for_id(_gid: u32) -> Option<String> {
+    None
 }
 
 #[cfg(unix)]

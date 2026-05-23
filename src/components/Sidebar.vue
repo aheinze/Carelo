@@ -592,6 +592,16 @@ async function disconnectRemoteItem(item, event) {
   }
 }
 
+async function refreshRemoteItem(item, event) {
+  event.stopPropagation();
+
+  if (!item.remoteId) {
+    return;
+  }
+
+  await store.refreshRemoteHealth(item.remoteId);
+}
+
 function closeSidebarAddMenu() {
   sidebarAddMenuOpen.value = false;
 }
@@ -811,13 +821,33 @@ onUnmounted(() => {
               {{ mountingDevicePath === item.devicePath ? 'Mounting…' : item.detail }}
             </small>
           </button>
+          <span v-if="item.isRemote" class="sidebar-item-actions">
+            <button
+              type="button"
+              class="sidebar-item-action"
+              aria-label="Check remote connection"
+              title="Check remote connection"
+              @click="refreshRemoteItem(item, $event)"
+            >
+              <AppIcon name="refresh" :size="13" :stroke-width="2.2" />
+            </button>
+            <button
+              type="button"
+              class="sidebar-item-action"
+              aria-label="Disconnect remote volume"
+              title="Disconnect remote volume"
+              @click="disconnectRemoteItem(item, $event)"
+            >
+              <AppIcon name="x" :size="13" :stroke-width="2.2" />
+            </button>
+          </span>
           <button
-            v-if="item.isRemote || item.isFavorite"
+            v-else-if="item.isFavorite"
             type="button"
             class="sidebar-item-action"
-            :aria-label="item.isRemote ? 'Disconnect remote volume' : 'Remove favorite'"
-            :title="item.isRemote ? 'Disconnect remote volume' : 'Remove favorite'"
-            @click="item.isRemote ? disconnectRemoteItem(item, $event) : removeFavoriteItem(item, $event)"
+            aria-label="Remove favorite"
+            title="Remove favorite"
+            @click="removeFavoriteItem(item, $event)"
           >
             <AppIcon name="x" :size="13" :stroke-width="2.2" />
           </button>
@@ -1113,10 +1143,10 @@ h2 {
 }
 
 .sidebar-item--remote {
-  padding-right: 34px;
+  padding-right: 58px;
 }
 
-.sidebar-item--actionable {
+.sidebar-item--actionable:not(.sidebar-item--remote) {
   padding-right: 34px;
 }
 
@@ -1167,8 +1197,29 @@ h2 {
     opacity 100ms ease;
 }
 
+.sidebar-item-actions {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity 100ms ease;
+}
+
+.sidebar-item-actions .sidebar-item-action {
+  position: static;
+  transform: none;
+}
+
 .sidebar-item-shell:hover .sidebar-item-action,
+.sidebar-item-shell:hover .sidebar-item-actions,
 .sidebar-item-shell:focus-within .sidebar-item-action,
+.sidebar-item-shell:focus-within .sidebar-item-actions,
+.sidebar-item-actions:focus-within,
 .sidebar-item-action:focus-visible {
   opacity: 1;
   pointer-events: auto;

@@ -1,6 +1,10 @@
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -8,6 +12,9 @@ use url::Url;
 
 use crate::fs::models::{FsError, FsResult};
 use crate::fs::remote::RemoteVolumeConfig;
+
+#[cfg(target_os = "linux")]
+static OWNED_SFTP_MOUNTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SftpShare {
@@ -37,6 +44,11 @@ pub fn sftp_password_fs_operator_options(
     )])
 }
 
+pub fn unmount_sftp_password(config: &RemoteVolumeConfig) -> FsResult<bool> {
+    let share = parse_sftp_share(config)?;
+    unmount_sftp_for_platform(config, &share)
+}
+
 fn ensure_sftp_mount(config: &RemoteVolumeConfig) -> FsResult<PathBuf> {
     let share = parse_sftp_share(config)?;
     ensure_sftp_mount_for_platform(config, &share)
@@ -60,6 +72,68 @@ fn ensure_sftp_mount_for_platform(
         "SFTP password authentication is currently supported on Linux through GVFS only. Use SSH keys or an SSH agent on this platform.",
         Some(remote_config_path(config)),
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn unmount_sftp_for_platform(config: &RemoteVolumeConfig, share: &SftpShare) -> FsResult<bool> {
+    if !is_owned_sftp_mount(&config.id) {
+        return Ok(false);
+    }
+
+    if find_linux_gvfs_sftp_mount(share).is_none() {
+        forget_owned_sftp_mount(&config.id);
+        return Ok(false);
+    }
+
+    let uri = sftp_mount_uri(share, false)?;
+    let output = Command::new("gio")
+        .arg("mount")
+        .arg("-u")
+        .arg(&uri)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| {
+            FsError::new(
+                "sftp_unmount_spawn_failed",
+                format!("Unable to start gio to unmount the SFTP server: {error}"),
+                Some(remote_config_path(config)),
+            )
+        })?;
+
+    for _ in 0..20 {
+        if find_linux_gvfs_sftp_mount(share).is_none() {
+            forget_owned_sftp_mount(&config.id);
+            return Ok(true);
+        }
+
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    if output.status.success() && find_linux_gvfs_sftp_mount(share).is_none() {
+        forget_owned_sftp_mount(&config.id);
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+
+    Err(FsError::new(
+        "sftp_unmount_failed",
+        if detail.is_empty() {
+            "Unable to unmount SFTP server.".to_string()
+        } else {
+            format!("Unable to unmount SFTP server: {detail}")
+        },
+        Some(remote_config_path(config)),
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unmount_sftp_for_platform(_config: &RemoteVolumeConfig, _share: &SftpShare) -> FsResult<bool> {
+    Ok(false)
 }
 
 #[cfg(target_os = "linux")]
@@ -89,6 +163,7 @@ fn ensure_linux_gvfs_sftp_mount(
 
     for _ in 0..20 {
         if let Some(path) = find_linux_gvfs_sftp_mount(share) {
+            mark_owned_sftp_mount(&config.id);
             return Ok(join_sftp_root(path, &share.root));
         }
 
@@ -181,6 +256,33 @@ fn gvfs_root() -> PathBuf {
     }
 
     PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() })).join("gvfs")
+}
+
+#[cfg(target_os = "linux")]
+fn owned_sftp_mounts() -> &'static Mutex<HashSet<String>> {
+    OWNED_SFTP_MOUNTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[cfg(target_os = "linux")]
+fn mark_owned_sftp_mount(id: &str) {
+    if let Ok(mut mounts) = owned_sftp_mounts().lock() {
+        mounts.insert(id.to_string());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn forget_owned_sftp_mount(id: &str) {
+    if let Ok(mut mounts) = owned_sftp_mounts().lock() {
+        mounts.remove(id);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_owned_sftp_mount(id: &str) -> bool {
+    owned_sftp_mounts()
+        .lock()
+        .map(|mounts| mounts.contains(id))
+        .unwrap_or(false)
 }
 
 fn parse_sftp_share(config: &RemoteVolumeConfig) -> FsResult<SftpShare> {
