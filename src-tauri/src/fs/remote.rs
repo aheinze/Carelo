@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use opendal::{Entry, EntryMode, ErrorKind, Metadata, Operator};
 use openssh::{KnownHosts, SessionBuilder};
@@ -25,12 +25,15 @@ use crate::fs::smb::{is_smb_scheme, smb_fs_operator_options, unmount_smb};
 
 const REMOTE_PATH_PREFIX: &str = "remote://";
 const TRANSFER_BUFFER_BYTES: usize = 256 * 1024;
+const REMOTE_METADATA_CACHE_TTL: Duration = Duration::from_secs(2);
+const REMOTE_METADATA_CACHE_MAX_ENTRIES: usize = 512;
 
 #[derive(Debug, Default)]
 pub struct RemoteVolumeState {
     volumes: Mutex<HashMap<String, RemoteVolumeConfig>>,
     health: Mutex<HashMap<String, RemoteVolumeHealth>>,
     active_ids: Mutex<HashSet<String>>,
+    cache: Mutex<RemoteMetadataCache>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -86,6 +89,18 @@ struct RemoteMetadataDetails {
     permissions: Option<FilePermissions>,
 }
 
+#[derive(Debug, Default)]
+struct RemoteMetadataCache {
+    directories: HashMap<String, CachedRemoteValue<Vec<FileEntry>>>,
+    metadata: HashMap<String, CachedRemoteValue<FileMetadata>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedRemoteValue<T> {
+    value: T,
+    created_at: Instant,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RemoteSizeMeasure {
     pub logical_bytes: u64,
@@ -101,8 +116,11 @@ impl RemoteVolumeState {
     pub fn add(&self, config: RemoteVolumeConfig) -> FsResult<RemoteVolumeInfo> {
         config.validate()?;
         let info = config.info(self.health_for(&config.id)?);
+        let id = config.id.clone();
         let mut volumes = self.volumes.lock().map_err(lock_error)?;
         volumes.insert(config.id.clone(), config);
+        drop(volumes);
+        self.invalidate_cache_for_volume(&id)?;
         Ok(info)
     }
 
@@ -112,6 +130,7 @@ impl RemoteVolumeState {
         drop(volumes);
         self.health.lock().map_err(lock_error)?.remove(id);
         self.active_ids.lock().map_err(lock_error)?.remove(id);
+        self.invalidate_cache_for_volume(id)?;
         Ok(removed)
     }
 
@@ -200,6 +219,133 @@ impl RemoteVolumeState {
                 checked_at: Some(current_unix_seconds()),
             },
         )
+    }
+
+    fn cached_directory(&self, path: &RemotePath) -> FsResult<Option<Vec<FileEntry>>> {
+        let key = remote_cache_key(path);
+        let cache = self.cache.lock().map_err(lock_error)?;
+        Ok(cache
+            .directories
+            .get(&key)
+            .filter(|entry| entry.created_at.elapsed() < REMOTE_METADATA_CACHE_TTL)
+            .map(|entry| entry.value.clone()))
+    }
+
+    fn cache_directory(&self, path: &RemotePath, entries: Vec<FileEntry>) -> FsResult<()> {
+        let key = remote_cache_key(path);
+        let mut cache = self.cache.lock().map_err(lock_error)?;
+        cache.directories.insert(
+            key,
+            CachedRemoteValue {
+                value: entries,
+                created_at: Instant::now(),
+            },
+        );
+        trim_remote_cache(&mut cache);
+        Ok(())
+    }
+
+    fn cached_metadata(&self, path: &RemotePath) -> FsResult<Option<FileMetadata>> {
+        let key = remote_cache_key(path);
+        let cache = self.cache.lock().map_err(lock_error)?;
+        Ok(cache
+            .metadata
+            .get(&key)
+            .filter(|entry| entry.created_at.elapsed() < REMOTE_METADATA_CACHE_TTL)
+            .map(|entry| entry.value.clone()))
+    }
+
+    fn cache_metadata(&self, path: &RemotePath, metadata: FileMetadata) -> FsResult<()> {
+        let key = remote_cache_key(path);
+        let mut cache = self.cache.lock().map_err(lock_error)?;
+        cache.metadata.insert(
+            key,
+            CachedRemoteValue {
+                value: metadata,
+                created_at: Instant::now(),
+            },
+        );
+        trim_remote_cache(&mut cache);
+        Ok(())
+    }
+
+    fn invalidate_cache_for_path(&self, path: &RemotePath) -> FsResult<()> {
+        let object_path = normalize_remote_object_path(&path.path);
+        let path_key = remote_cache_key_parts(&path.volume_id, &object_path);
+        let subtree_prefix = if object_path.is_empty() {
+            format!("{}\0", path.volume_id)
+        } else {
+            format!("{}\0{object_path}/", path.volume_id)
+        };
+        let mut keys = vec![path_key];
+
+        if let Some(parent) = remote_parent_object_path(&object_path) {
+            keys.push(remote_cache_key_parts(&path.volume_id, &parent));
+        }
+
+        let mut cache = self.cache.lock().map_err(lock_error)?;
+        for key in keys {
+            cache.directories.remove(&key);
+            cache.metadata.remove(&key);
+        }
+        cache
+            .directories
+            .retain(|key, _| !key.starts_with(&subtree_prefix));
+        cache
+            .metadata
+            .retain(|key, _| !key.starts_with(&subtree_prefix));
+
+        Ok(())
+    }
+
+    fn invalidate_cache_for_volume(&self, volume_id: &str) -> FsResult<()> {
+        let prefix = format!("{volume_id}\0");
+        let mut cache = self.cache.lock().map_err(lock_error)?;
+        cache.directories.retain(|key, _| !key.starts_with(&prefix));
+        cache.metadata.retain(|key, _| !key.starts_with(&prefix));
+        Ok(())
+    }
+}
+
+fn remote_cache_key(path: &RemotePath) -> String {
+    remote_cache_key_parts(&path.volume_id, &path.path)
+}
+
+fn remote_cache_key_parts(volume_id: &str, path: &str) -> String {
+    format!("{volume_id}\0{}", normalize_remote_object_path(path))
+}
+
+fn remote_parent_object_path(path: &str) -> Option<String> {
+    let path = normalize_remote_object_path(path);
+
+    if path.is_empty() {
+        return None;
+    }
+
+    Path::new(&path)
+        .parent()
+        .map(|parent| normalize_remote_object_path(&parent.to_string_lossy()))
+}
+
+fn trim_remote_cache(cache: &mut RemoteMetadataCache) {
+    trim_remote_cache_map(&mut cache.directories);
+    trim_remote_cache_map(&mut cache.metadata);
+}
+
+fn trim_remote_cache_map<T>(map: &mut HashMap<String, CachedRemoteValue<T>>) {
+    if map.len() <= REMOTE_METADATA_CACHE_MAX_ENTRIES {
+        return;
+    }
+
+    let mut entries = map
+        .iter()
+        .map(|(key, value)| (key.clone(), value.created_at))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(_, created_at)| *created_at);
+
+    let remove_count = map.len().saturating_sub(REMOTE_METADATA_CACHE_MAX_ENTRIES);
+    for (key, _) in entries.into_iter().take(remove_count) {
+        map.remove(&key);
     }
 }
 
@@ -526,6 +672,10 @@ pub async fn list_remote_directory(
     state: &RemoteVolumeState,
     remote_path: RemotePath,
 ) -> FsResult<Vec<FileEntry>> {
+    if let Some(entries) = state.cached_directory(&remote_path)? {
+        return Ok(entries);
+    }
+
     let config = state.config(&remote_path.volume_id)?;
     let op = config.operator()?;
     let path = normalize_remote_directory_path(&remote_path.path);
@@ -544,6 +694,7 @@ pub async fn list_remote_directory(
     }
 
     sort_remote_entries(&mut result);
+    state.cache_directory(&remote_path, result.clone())?;
     Ok(result)
 }
 
@@ -551,9 +702,16 @@ pub async fn create_remote_folder(state: &RemoteVolumeState, path: RemotePath) -
     let config = state.config(&path.volume_id)?;
     let op = config.operator()?;
     let object_path = normalize_remote_directory_path(&path.path);
-    op.create_dir(&object_path)
+    let result = op
+        .create_dir(&object_path)
         .await
-        .map_err(|error| remote_error("remote_create_dir_failed", &path, error))
+        .map_err(|error| remote_error("remote_create_dir_failed", &path, error));
+
+    if result.is_ok() {
+        state.invalidate_cache_for_path(&path)?;
+    }
+
+    result
 }
 
 pub async fn rename_remote_item(
@@ -564,12 +722,20 @@ pub async fn rename_remote_item(
     ensure_same_remote(&from, &to)?;
     let config = state.config(&from.volume_id)?;
     let op = config.operator()?;
-    op.rename(
-        &normalize_remote_object_path(&from.path),
-        &normalize_remote_object_path(&to.path),
-    )
-    .await
-    .map_err(|error| remote_error("remote_rename_failed", &from, error))
+    let result = op
+        .rename(
+            &normalize_remote_object_path(&from.path),
+            &normalize_remote_object_path(&to.path),
+        )
+        .await
+        .map_err(|error| remote_error("remote_rename_failed", &from, error));
+
+    if result.is_ok() {
+        state.invalidate_cache_for_path(&from)?;
+        state.invalidate_cache_for_path(&to)?;
+    }
+
+    result
 }
 
 pub async fn delete_remote_item(state: &RemoteVolumeState, path: RemotePath) -> FsResult<()> {
@@ -581,7 +747,7 @@ pub async fn delete_remote_item(state: &RemoteVolumeState, path: RemotePath) -> 
         .await
         .map_err(|error| remote_error("remote_stat_failed", &path, error))?;
 
-    if stat.is_dir() {
+    let result = if stat.is_dir() {
         op.delete_with(&normalize_remote_directory_path(&path.path))
             .recursive(true)
             .await
@@ -590,7 +756,13 @@ pub async fn delete_remote_item(state: &RemoteVolumeState, path: RemotePath) -> 
         op.delete(&object_path)
             .await
             .map_err(|error| remote_error("remote_delete_failed", &path, error))
+    };
+
+    if result.is_ok() {
+        state.invalidate_cache_for_path(&path)?;
     }
+
+    result
 }
 
 pub async fn copy_remote_item(
@@ -610,20 +782,26 @@ pub async fn copy_remote_item(
     if from.volume_id == to.volume_id {
         ensure_remote_destination_available(&source_op, &from, &to, overwrite).await?;
 
-        if source.is_dir() {
-            return copy_remote_directory(&source_op, &from, &to).await;
+        let result = if source.is_dir() {
+            copy_remote_directory(&source_op, &from, &to).await
+        } else {
+            let target_path = normalize_remote_object_path(&to.path);
+
+            match source_op.copy(&source_path, &target_path).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == ErrorKind::Unsupported => {
+                    copy_remote_file_path_between(&source_op, &source_op, &from, &source_path, &to)
+                        .await
+                }
+                Err(error) => Err(remote_error("remote_copy_failed", &from, error)),
+            }
+        };
+
+        if result.is_ok() {
+            state.invalidate_cache_for_path(&to)?;
         }
 
-        let target_path = normalize_remote_object_path(&to.path);
-
-        return match source_op.copy(&source_path, &target_path).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == ErrorKind::Unsupported => {
-                copy_remote_file_path_between(&source_op, &source_op, &from, &source_path, &to)
-                    .await
-            }
-            Err(error) => Err(remote_error("remote_copy_failed", &from, error)),
-        };
+        return result;
     }
 
     let target_config = state.config(&to.volume_id)?;
@@ -638,7 +816,9 @@ pub async fn copy_remote_item(
         copy_remote_file_path_between(&source_op, &target_op, &from, &source_path, &to).await
     };
 
-    if result.is_err() && !overwrite && !existed_before {
+    if result.is_ok() {
+        state.invalidate_cache_for_path(&to)?;
+    } else if !overwrite && !existed_before {
         cleanup_remote_partial_copy(&target_op, &to).await;
     }
 
@@ -657,7 +837,9 @@ pub async fn copy_local_to_remote_item(
     let existed_before = remote_path_exists(&op, &to).await?;
     let result = copy_local_path_to_remote(&op, from, &to, overwrite, symlink_mode).await;
 
-    if result.is_err() && !overwrite && !existed_before {
+    if result.is_ok() {
+        state.invalidate_cache_for_path(&to)?;
+    } else if !overwrite && !existed_before {
         cleanup_remote_partial_copy(&op, &to).await;
     }
 
@@ -707,12 +889,20 @@ pub async fn move_remote_item(
     let config = state.config(&from.volume_id)?;
     let op = config.operator()?;
     ensure_remote_destination_available(&op, &from, &to, overwrite).await?;
-    op.rename(
-        &normalize_remote_object_path(&from.path),
-        &normalize_remote_object_path(&to.path),
-    )
-    .await
-    .map_err(|error| remote_error("remote_rename_failed", &from, error))
+    let result = op
+        .rename(
+            &normalize_remote_object_path(&from.path),
+            &normalize_remote_object_path(&to.path),
+        )
+        .await
+        .map_err(|error| remote_error("remote_rename_failed", &from, error));
+
+    if result.is_ok() {
+        state.invalidate_cache_for_path(&from)?;
+        state.invalidate_cache_for_path(&to)?;
+    }
+
+    result
 }
 
 pub async fn move_local_to_remote_item(
@@ -740,6 +930,10 @@ pub async fn stat_remote_item(
     state: &RemoteVolumeState,
     path: RemotePath,
 ) -> FsResult<FileMetadata> {
+    if let Some(metadata) = state.cached_metadata(&path)? {
+        return Ok(metadata);
+    }
+
     let config = state.config(&path.volume_id)?;
     let (op, local_root) = config.operator_with_local_root()?;
     let object_path = normalize_remote_object_path(&path.path);
@@ -757,12 +951,14 @@ pub async fn stat_remote_item(
         direct_sftp_metadata_details(&config, &object_path).await
     };
 
-    Ok(metadata_to_file_metadata(
+    let result = metadata_to_file_metadata(
         &format_remote_uri(&path.volume_id, &object_path),
         &object_path,
         &metadata,
         details.as_ref(),
-    ))
+    );
+    state.cache_metadata(&path, result.clone())?;
+    Ok(result)
 }
 
 pub async fn read_remote_file_prefix(
@@ -2121,6 +2317,96 @@ mod tests {
         }
         #[cfg(not(unix))]
         assert!(metadata.permissions.is_none());
+    }
+
+    #[test]
+    fn invalidates_remote_directory_and_metadata_cache_after_writes() {
+        let state = RemoteVolumeState::default();
+        let root = TestDir::new();
+        let local_root = TestDir::new();
+        fs::write(root.path().join("cached.txt"), b"old").expect("remote file should be created");
+        add_fs_remote(&state, root.path());
+
+        let initial_entries =
+            tauri::async_runtime::block_on(list_remote_directory(&state, remote("remote://test/")))
+                .expect("remote root should list");
+        assert_eq!(initial_entries.len(), 1);
+
+        tauri::async_runtime::block_on(create_remote_folder(
+            &state,
+            remote("remote://test/New Folder"),
+        ))
+        .expect("remote folder should be created");
+        let refreshed_entries =
+            tauri::async_runtime::block_on(list_remote_directory(&state, remote("remote://test/")))
+                .expect("remote root should refresh after create");
+        assert_eq!(
+            refreshed_entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["New Folder", "cached.txt"]
+        );
+
+        let initial_metadata = tauri::async_runtime::block_on(stat_remote_item(
+            &state,
+            remote("remote://test/cached.txt"),
+        ))
+        .expect("remote file should stat");
+        assert_eq!(initial_metadata.size, Some(3));
+
+        let local_file = local_root.path().join("cached.txt");
+        fs::write(&local_file, b"new content").expect("local replacement should be created");
+        tauri::async_runtime::block_on(copy_local_to_remote_item(
+            &state,
+            &local_file,
+            remote("remote://test/cached.txt"),
+            true,
+            SymlinkMode::Preserve,
+        ))
+        .expect("remote file should overwrite");
+
+        let refreshed_metadata = tauri::async_runtime::block_on(stat_remote_item(
+            &state,
+            remote("remote://test/cached.txt"),
+        ))
+        .expect("remote file metadata should refresh after overwrite");
+        assert_eq!(refreshed_metadata.size, Some(11));
+    }
+
+    #[test]
+    fn invalidates_remote_cache_when_config_is_replaced() {
+        let state = RemoteVolumeState::default();
+        let first_root = TestDir::new();
+        let second_root = TestDir::new();
+        fs::write(first_root.path().join("first.txt"), b"first")
+            .expect("first remote file should be created");
+        fs::write(second_root.path().join("second.txt"), b"second")
+            .expect("second remote file should be created");
+
+        add_fs_remote(&state, first_root.path());
+        let initial_entries =
+            tauri::async_runtime::block_on(list_remote_directory(&state, remote("remote://test/")))
+                .expect("first remote root should list");
+        assert_eq!(
+            initial_entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first.txt"]
+        );
+
+        add_fs_remote(&state, second_root.path());
+        let replaced_entries =
+            tauri::async_runtime::block_on(list_remote_directory(&state, remote("remote://test/")))
+                .expect("replaced remote root should list");
+        assert_eq!(
+            replaced_entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second.txt"]
+        );
     }
 
     #[test]

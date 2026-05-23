@@ -41,6 +41,9 @@ let remoteHealthRefreshInFlight = false;
 let activeRemoteSyncTimer = null;
 let lastReportedRemoteVolumeIds = '';
 let stopRemoteEditSyncListener = null;
+let scheduledDirectoryReloadTimer = null;
+let scheduledDirectoryReloadPaths = new Set();
+let remoteHealthBackoff = new Map();
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
 const SORT_DIRECTIONS = ['asc', 'desc'];
 const VIEW_MODES = ['list', 'grid', 'columns'];
@@ -48,7 +51,11 @@ const APPEARANCE_MODES = ['system', 'light', 'dark'];
 const CUSTOM_TOOL_TARGETS = ['both', 'files', 'folders'];
 const DEFAULT_FAVORITE_GROUP_ID = 'favorites';
 const NAV_HISTORY_LIMIT = 80;
-const REMOTE_HEALTH_REFRESH_INTERVAL_MS = 60_000;
+const REMOTE_HEALTH_ACTIVE_REFRESH_INTERVAL_MS = 60_000;
+const REMOTE_HEALTH_IDLE_REFRESH_INTERVAL_MS = 5 * 60_000;
+const REMOTE_HEALTH_ERROR_BASE_INTERVAL_MS = 2 * 60_000;
+const REMOTE_HEALTH_ERROR_MAX_INTERVAL_MS = 15 * 60_000;
+const DIRECTORY_RELOAD_BATCH_DELAY_MS = 120;
 const INACTIVE_TAB_ENTRY_CACHE_LIMIT = 2;
 const LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT = 1500;
 const OPERATION_LOG_LIMIT = 120;
@@ -191,7 +198,23 @@ function remoteHealthColor(health) {
   }
 }
 
-function isRemoteHealthStale(health) {
+function remoteHealthRefreshInterval(id, health, isActive) {
+  if (isActive) {
+    return REMOTE_HEALTH_ACTIVE_REFRESH_INTERVAL_MS;
+  }
+
+  if (health?.status === 'error' || health?.status === 'authRequired') {
+    const failures = Math.max(1, Number(remoteHealthBackoff.get(id)?.failures || 1));
+    return Math.min(
+      REMOTE_HEALTH_ERROR_MAX_INTERVAL_MS,
+      REMOTE_HEALTH_ERROR_BASE_INTERVAL_MS * (2 ** (failures - 1)),
+    );
+  }
+
+  return REMOTE_HEALTH_IDLE_REFRESH_INTERVAL_MS;
+}
+
+function isRemoteHealthStale(id, health, isActive = false) {
   if (!health || health.status === 'unknown') {
     return true;
   }
@@ -201,8 +224,25 @@ function isRemoteHealthStale(health) {
   }
 
   const checkedAtMs = Number(health.checkedAt || 0) * 1000;
+  const backoff = remoteHealthBackoff.get(id);
 
-  return !checkedAtMs || Date.now() - checkedAtMs >= REMOTE_HEALTH_REFRESH_INTERVAL_MS;
+  if (!isActive && backoff?.nextCheckAt && Date.now() < backoff.nextCheckAt) {
+    return false;
+  }
+
+  return !checkedAtMs || Date.now() - checkedAtMs >= remoteHealthRefreshInterval(id, health, isActive);
+}
+
+function registerRemoteHealthFailure(id) {
+  const failures = Math.max(1, Number(remoteHealthBackoff.get(id)?.failures || 0) + 1);
+  const interval = Math.min(
+    REMOTE_HEALTH_ERROR_MAX_INTERVAL_MS,
+    REMOTE_HEALTH_ERROR_BASE_INTERVAL_MS * (2 ** (failures - 1)),
+  );
+  remoteHealthBackoff.set(id, {
+    failures,
+    nextCheckAt: Date.now() + interval,
+  });
 }
 
 function applyAppearanceMode(mode) {
@@ -852,7 +892,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         }
 
         clearRemotePreviewCache(path);
-        reloadDirectoryInPanes(parentPathFor(path)).catch(() => {});
+        scheduleDirectoryReloadInPanes(parentPathFor(path));
         addOperationLog({
           operation: 'remote-edit',
           label: 'Remote edit synced',
@@ -915,14 +955,17 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       return;
     }
 
+    const activeRemoteIds = new Set(activeRemoteVolumeIds.value);
     const remotes = volumes.value
       .filter((volume) => volume.path?.startsWith('remote://'))
       .filter((volume) => {
+        const id = remoteVolumeIdFromPath(volume.path);
+
         if (remoteId) {
-          return remoteVolumeIdFromPath(volume.path) === remoteId;
+          return id === remoteId;
         }
 
-        return isRemoteHealthStale(volume.health);
+        return isRemoteHealthStale(id, volume.health, activeRemoteIds.has(id));
       });
 
     if (remotes.length === 0) {
@@ -949,6 +992,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     };
 
     const markHealthError = (id, error) => {
+      registerRemoteHealthFailure(id);
+
       volumes.value = volumes.value.map((volume) => (
         remoteVolumeIdFromPath(volume.path) === id
           ? {
@@ -981,12 +1026,20 @@ export const useFileManagerStore = defineStore('file-manager', () => {
           return;
         }
 
+        const nextHealth = remote.health || null;
+
+        if (nextHealth?.status === 'error' || nextHealth?.status === 'authRequired') {
+          registerRemoteHealthFailure(id);
+        } else {
+          remoteHealthBackoff.delete(id);
+        }
+
         volumes.value = volumes.value.map((candidate) => (
           remoteVolumeIdFromPath(candidate.path) === id
             ? {
               ...candidate,
               capabilities: remote.capabilities || candidate.capabilities,
-              health: remote.health || candidate.health,
+              health: nextHealth || candidate.health,
             }
             : candidate
         ));
@@ -1326,6 +1379,28 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     }
 
     await Promise.all(reloads);
+  }
+
+  function scheduleDirectoryReloadInPanes(path) {
+    const normalizedPath = normalizeComparablePath(path);
+
+    if (!normalizedPath) {
+      return;
+    }
+
+    scheduledDirectoryReloadPaths.add(normalizedPath);
+
+    if (scheduledDirectoryReloadTimer) {
+      return;
+    }
+
+    scheduledDirectoryReloadTimer = globalThis.setTimeout(async () => {
+      const paths = [...scheduledDirectoryReloadPaths];
+      scheduledDirectoryReloadPaths = new Set();
+      scheduledDirectoryReloadTimer = null;
+
+      await Promise.all(paths.map((reloadPath) => reloadDirectoryInPanes(reloadPath).catch(() => {})));
+    }, DIRECTORY_RELOAD_BATCH_DELAY_MS);
   }
 
   function addOperationLog(entry = {}) {

@@ -1,4 +1,6 @@
 use super::*;
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::sync::mpsc::{self, RecvTimeoutError};
 
 #[tauri::command]
 pub async fn open_with_default_app(
@@ -6,21 +8,24 @@ pub async fn open_with_default_app(
     path: String,
     store: tauri::State<'_, AppStoreState>,
     remotes: tauri::State<'_, RemoteVolumeState>,
+    remote_edit_sync: tauri::State<'_, RemoteEditSyncState>,
 ) -> Result<(), FsError> {
-    let file_type = open_with::file_type_for_path(Path::new(&path));
-    let remembered = store.open_with_default(&file_type.key)?;
-
     if let Some(archive_path) = archive::parse_archive_uri(&path) {
+        let file_type = open_with::file_type_for_path(Path::new(&path));
+        let remembered = store.open_with_default(&file_type.key)?;
         let materialized_path =
             run_local(move |_| archive::materialize_archive_file(&archive_path)).await?;
         return open_with::open_with_default(&materialized_path, remembered);
     }
 
     if let Some(remote_path) = parse_remote_path(&path) {
+        let file_type = open_with::file_type_for_virtual_path(&remote_path.path);
+        let remembered = store.open_with_default(&file_type.key)?;
         let materialized_path = materialize_remote_file(&remotes, remote_path.clone()).await?;
         open_with::open_with_default(&materialized_path, remembered)?;
         start_remote_edit_sync(
             app,
+            &remote_edit_sync,
             vec![RemoteEditTarget {
                 local_path: materialized_path,
                 remote_path,
@@ -29,6 +34,8 @@ pub async fn open_with_default_app(
         return Ok(());
     }
 
+    let file_type = open_with::file_type_for_path(Path::new(&path));
+    let remembered = store.open_with_default(&file_type.key)?;
     open_with::open_with_default(&PathBuf::from(path), remembered)
 }
 
@@ -36,22 +43,25 @@ pub async fn open_with_default_app(
 pub async fn list_open_with_apps(
     path: String,
     store: tauri::State<'_, AppStoreState>,
-    remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<OpenWithContext, FsError> {
-    let file_type = open_with::file_type_for_path(Path::new(&path));
-    let remembered = store.open_with_default(&file_type.key)?;
-
     if let Some(archive_path) = archive::parse_archive_uri(&path) {
+        let file_type = open_with::file_type_for_path(Path::new(&path));
+        let remembered = store.open_with_default(&file_type.key)?;
         let materialized_path =
             run_local(move |_| archive::materialize_archive_file(&archive_path)).await?;
         return open_with::open_with_context(&materialized_path, remembered);
     }
 
     if let Some(remote_path) = parse_remote_path(&path) {
-        let materialized_path = materialize_remote_file(&remotes, remote_path).await?;
-        return open_with::open_with_context(&materialized_path, remembered);
+        let file_type = open_with::file_type_for_virtual_path(&remote_path.path);
+        let remembered = store.open_with_default(&file_type.key)?;
+        return Ok(open_with::open_with_context_for_file_type(
+            file_type, remembered,
+        ));
     }
 
+    let file_type = open_with::file_type_for_path(Path::new(&path));
+    let remembered = store.open_with_default(&file_type.key)?;
     open_with::open_with_context(&PathBuf::from(path), remembered)
 }
 
@@ -63,13 +73,18 @@ pub async fn open_with_app(
     remember: bool,
     store: tauri::State<'_, AppStoreState>,
     remotes: tauri::State<'_, RemoteVolumeState>,
+    remote_edit_sync: tauri::State<'_, RemoteEditSyncState>,
 ) -> Result<(), FsError> {
-    let file_type = open_with::file_type_for_path(Path::new(&path));
+    let remote_path_for_type = parse_remote_path(&path);
+    let file_type = remote_path_for_type
+        .as_ref()
+        .map(|remote_path| open_with::file_type_for_virtual_path(&remote_path.path))
+        .unwrap_or_else(|| open_with::file_type_for_path(Path::new(&path)));
     let remembered = store.open_with_default(&file_type.key)?;
     let mut remote_edit_target = None;
     let materialized_path = if let Some(archive_path) = archive::parse_archive_uri(&path) {
         run_local(move |_| archive::materialize_archive_file(&archive_path)).await?
-    } else if let Some(remote_path) = parse_remote_path(&path) {
+    } else if let Some(remote_path) = remote_path_for_type {
         let materialized_path = materialize_remote_file(&remotes, remote_path.clone()).await?;
         remote_edit_target = Some(RemoteEditTarget {
             local_path: materialized_path.clone(),
@@ -79,7 +94,11 @@ pub async fn open_with_app(
     } else {
         PathBuf::from(&path)
     };
-    let context = open_with::open_with_context(&materialized_path, remembered)?;
+    let context = if remote_edit_target.is_some() {
+        open_with::open_with_context_for_file_type(file_type.clone(), remembered.clone())
+    } else {
+        open_with::open_with_context(&materialized_path, remembered)?
+    };
     let Some(selected_app) = context.apps.iter().find(|app| app.id == app_id) else {
         return Err(FsError::new(
             "open_with_app_not_found",
@@ -98,7 +117,7 @@ pub async fn open_with_app(
     }
 
     if let Some(target) = remote_edit_target {
-        start_remote_edit_sync(app, vec![target]);
+        start_remote_edit_sync(app, &remote_edit_sync, vec![target]);
     }
 
     Ok(())
@@ -111,6 +130,7 @@ pub async fn run_custom_tool(
     paths: Vec<String>,
     cwd: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
+    remote_edit_sync: tauri::State<'_, RemoteEditSyncState>,
 ) -> Result<(), FsError> {
     if paths.iter().any(|path| parse_remote_path(path).is_some())
         || cwd.as_deref().and_then(parse_remote_path).is_some()
@@ -157,7 +177,7 @@ pub async fn run_custom_tool(
         .await;
 
         if result.is_ok() && !remote_edit_targets.is_empty() {
-            start_remote_edit_sync(app, remote_edit_targets);
+            start_remote_edit_sync(app, &remote_edit_sync, remote_edit_targets);
         }
 
         return result;
@@ -181,10 +201,16 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), FsError> {
     })
 }
 
-const REMOTE_EDIT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const REMOTE_EDIT_SYNC_SETTLE: Duration = Duration::from_secs(2);
 const REMOTE_EDIT_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const REMOTE_EDIT_SESSION_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
+const REMOTE_EDIT_WAKE_INTERVAL: Duration = Duration::from_millis(500);
+const REMOTE_EDIT_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+pub struct RemoteEditSyncState {
+    sender: Mutex<Option<mpsc::Sender<RemoteEditCommand>>>,
+}
 
 #[derive(Clone)]
 struct RemoteEditTarget {
@@ -199,7 +225,9 @@ struct RemoteEditWatch {
     last_synced: Option<LocalFileSignature>,
     last_failure: Option<LocalFileSignature>,
     last_sync_attempt: Option<Instant>,
-    stable_since: Instant,
+    next_sync_attempt_at: Option<Instant>,
+    dirty_since: Option<Instant>,
+    expires_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,71 +245,327 @@ struct RemoteEditSyncEvent {
     message: Option<String>,
 }
 
-fn start_remote_edit_sync(app: AppHandle, targets: Vec<RemoteEditTarget>) {
-    let mut watches = targets
-        .into_iter()
-        .filter_map(|target| {
-            let signature = local_file_signature(&target.local_path)?;
-            Some(RemoteEditWatch {
+enum RemoteEditCommand {
+    Watch(Vec<RemoteEditTarget>),
+    LocalEvent(Vec<PathBuf>),
+    ScanAll,
+}
+
+impl RemoteEditSyncState {
+    fn watch(&self, app: AppHandle, mut targets: Vec<RemoteEditTarget>) {
+        if targets.is_empty() {
+            return;
+        }
+
+        for _ in 0..2 {
+            let Ok(sender) = self.sender(app.clone()) else {
+                return;
+            };
+
+            match sender.send(RemoteEditCommand::Watch(targets)) {
+                Ok(()) => return,
+                Err(error) => {
+                    let RemoteEditCommand::Watch(returned_targets) = error.0 else {
+                        return;
+                    };
+                    targets = returned_targets;
+                }
+            }
+
+            if let Ok(mut stored_sender) = self.sender.lock() {
+                *stored_sender = None;
+            }
+        }
+
+        if let Ok(mut stored_sender) = self.sender.lock() {
+            *stored_sender = None;
+        }
+    }
+
+    fn sender(&self, app: AppHandle) -> FsResult<mpsc::Sender<RemoteEditCommand>> {
+        let mut stored_sender = self.sender.lock().map_err(|error| {
+            FsError::new(
+                "remote_edit_sync_lock_failed",
+                format!("Remote edit sync is unavailable: {error}"),
+                None,
+            )
+        })?;
+
+        if let Some(sender) = stored_sender.as_ref() {
+            return Ok(sender.clone());
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let worker_sender = sender.clone();
+        thread::spawn(move || run_remote_edit_sync_worker(app, receiver, worker_sender));
+        *stored_sender = Some(sender.clone());
+        Ok(sender)
+    }
+}
+
+fn start_remote_edit_sync(
+    app: AppHandle,
+    state: &RemoteEditSyncState,
+    targets: Vec<RemoteEditTarget>,
+) {
+    state.watch(app, targets);
+}
+
+fn run_remote_edit_sync_worker(
+    app: AppHandle,
+    receiver: mpsc::Receiver<RemoteEditCommand>,
+    sender: mpsc::Sender<RemoteEditCommand>,
+) {
+    let watcher_sender = sender.clone();
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
+        if let Ok(event) = result {
+            if is_remote_edit_notify_event(&event) {
+                let paths = if event.paths.is_empty() {
+                    Vec::new()
+                } else {
+                    event.paths
+                };
+                let command = if paths.is_empty() {
+                    RemoteEditCommand::ScanAll
+                } else {
+                    RemoteEditCommand::LocalEvent(paths)
+                };
+                let _ = watcher_sender.send(command);
+            }
+        }
+    })
+    .ok();
+    let mut watches = HashMap::<PathBuf, RemoteEditWatch>::new();
+    let mut watched_directories = HashSet::<PathBuf>::new();
+    let mut next_fallback_scan = Instant::now() + REMOTE_EDIT_FALLBACK_SCAN_INTERVAL;
+
+    loop {
+        let command = if watches.is_empty() {
+            match receiver.recv() {
+                Ok(command) => Some(command),
+                Err(_) => break,
+            }
+        } else {
+            match receiver.recv_timeout(REMOTE_EDIT_WAKE_INTERVAL) {
+                Ok(command) => Some(command),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        };
+
+        if let Some(command) = command {
+            handle_remote_edit_command(
+                command,
+                &mut watches,
+                watcher.as_mut(),
+                &mut watched_directories,
+            );
+        }
+
+        let now = Instant::now();
+
+        if now >= next_fallback_scan {
+            mark_changed_remote_edit_watches_dirty(&mut watches, now);
+            next_fallback_scan = now + REMOTE_EDIT_FALLBACK_SCAN_INTERVAL;
+        }
+
+        prune_remote_edit_watches(
+            &mut watches,
+            watcher.as_mut(),
+            &mut watched_directories,
+            now,
+        );
+
+        for watch in watches.values_mut() {
+            let Some(dirty_since) = watch.dirty_since else {
+                continue;
+            };
+
+            if let Some(next_sync_attempt_at) = watch.next_sync_attempt_at {
+                if now < next_sync_attempt_at {
+                    continue;
+                }
+            }
+
+            if now.duration_since(dirty_since) < REMOTE_EDIT_SYNC_SETTLE {
+                continue;
+            }
+
+            tauri::async_runtime::block_on(sync_remote_edit_watch_if_needed(&app, watch, now));
+        }
+    }
+}
+
+fn handle_remote_edit_command(
+    command: RemoteEditCommand,
+    watches: &mut HashMap<PathBuf, RemoteEditWatch>,
+    watcher: Option<&mut RecommendedWatcher>,
+    watched_directories: &mut HashSet<PathBuf>,
+) {
+    match command {
+        RemoteEditCommand::Watch(targets) => {
+            add_remote_edit_watches(targets, watches, watcher, watched_directories);
+        }
+        RemoteEditCommand::LocalEvent(paths) => {
+            mark_remote_edit_paths_dirty(&paths, watches);
+        }
+        RemoteEditCommand::ScanAll => {
+            mark_all_remote_edit_watches_dirty(watches);
+        }
+    }
+}
+
+fn add_remote_edit_watches(
+    targets: Vec<RemoteEditTarget>,
+    watches: &mut HashMap<PathBuf, RemoteEditWatch>,
+    watcher: Option<&mut RecommendedWatcher>,
+    watched_directories: &mut HashSet<PathBuf>,
+) {
+    let now = Instant::now();
+    let mut watcher = watcher;
+
+    for target in targets {
+        let Some(signature) = local_file_signature(&target.local_path) else {
+            continue;
+        };
+
+        if let Some(parent) = target.local_path.parent().map(Path::to_path_buf) {
+            if watched_directories.insert(parent.clone()) {
+                if let Some(watcher) = watcher.as_deref_mut() {
+                    let _ = watcher.watch(&parent, RecursiveMode::NonRecursive);
+                }
+            }
+        }
+
+        watches.insert(
+            target.local_path.clone(),
+            RemoteEditWatch {
                 target,
                 last_seen: Some(signature),
                 last_synced: Some(signature),
                 last_failure: None,
                 last_sync_attempt: None,
-                stable_since: Instant::now(),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    if watches.is_empty() {
-        return;
+                next_sync_attempt_at: None,
+                dirty_since: None,
+                expires_at: now + REMOTE_EDIT_SESSION_TIMEOUT,
+            },
+        );
     }
-
-    thread::spawn(move || {
-        let deadline = Instant::now() + REMOTE_EDIT_SESSION_TIMEOUT;
-
-        while Instant::now() < deadline {
-            thread::sleep(REMOTE_EDIT_POLL_INTERVAL);
-            let now = Instant::now();
-
-            for watch in &mut watches {
-                tauri::async_runtime::block_on(update_remote_edit_watch(&app, watch, now));
-            }
-        }
-    });
 }
 
-async fn update_remote_edit_watch(app: &AppHandle, watch: &mut RemoteEditWatch, now: Instant) {
+fn prune_remote_edit_watches(
+    watches: &mut HashMap<PathBuf, RemoteEditWatch>,
+    watcher: Option<&mut RecommendedWatcher>,
+    watched_directories: &mut HashSet<PathBuf>,
+    now: Instant,
+) {
+    watches.retain(|_, watch| watch.expires_at > now);
+
+    let needed_directories = watches
+        .keys()
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .collect::<HashSet<_>>();
+
+    if let Some(watcher) = watcher {
+        for directory in watched_directories
+            .difference(&needed_directories)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            let _ = watcher.unwatch(&directory);
+        }
+    }
+
+    *watched_directories = needed_directories;
+}
+
+fn mark_remote_edit_paths_dirty(
+    paths: &[PathBuf],
+    watches: &mut HashMap<PathBuf, RemoteEditWatch>,
+) {
+    let now = Instant::now();
+
+    for path in paths {
+        if let Some(watch) = watches.get_mut(path) {
+            mark_remote_edit_watch_dirty(watch, now);
+            continue;
+        }
+
+        for (local_path, watch) in watches.iter_mut() {
+            if path == local_path || path.starts_with(local_path) || local_path.starts_with(path) {
+                mark_remote_edit_watch_dirty(watch, now);
+            }
+        }
+    }
+}
+
+fn mark_all_remote_edit_watches_dirty(watches: &mut HashMap<PathBuf, RemoteEditWatch>) {
+    let now = Instant::now();
+
+    for watch in watches.values_mut() {
+        mark_remote_edit_watch_dirty(watch, now);
+    }
+}
+
+fn mark_changed_remote_edit_watches_dirty(
+    watches: &mut HashMap<PathBuf, RemoteEditWatch>,
+    now: Instant,
+) {
+    for watch in watches.values_mut() {
+        let Some(signature) = local_file_signature(&watch.target.local_path) else {
+            watch.last_seen = None;
+            continue;
+        };
+
+        if Some(signature) != watch.last_seen {
+            watch.last_seen = Some(signature);
+            mark_remote_edit_watch_dirty(watch, now);
+        }
+    }
+}
+
+fn mark_remote_edit_watch_dirty(watch: &mut RemoteEditWatch, now: Instant) {
+    watch.dirty_since = Some(now);
+    watch.next_sync_attempt_at = None;
+}
+
+fn is_remote_edit_notify_event(event: &Event) -> bool {
+    !matches!(event.kind, EventKind::Access(_))
+}
+
+async fn sync_remote_edit_watch_if_needed(
+    app: &AppHandle,
+    watch: &mut RemoteEditWatch,
+    now: Instant,
+) {
     let Some(signature) = local_file_signature(&watch.target.local_path) else {
         watch.last_seen = None;
-        watch.stable_since = now;
+        watch.dirty_since = None;
+        watch.next_sync_attempt_at = None;
         return;
     };
 
-    if Some(signature) != watch.last_seen {
-        watch.last_seen = Some(signature);
-        watch.stable_since = now;
+    watch.last_seen = Some(signature);
+
+    if Some(signature) == watch.last_synced {
+        watch.dirty_since = None;
+        watch.next_sync_attempt_at = None;
         return;
     }
-
-    if Some(signature) == watch.last_synced
-        || now.duration_since(watch.stable_since) < REMOTE_EDIT_SYNC_SETTLE
-    {
-        return;
-    }
-
-    let remotes = app.state::<RemoteVolumeState>();
-    let path = remote_edit_path(&watch.target);
 
     if Some(signature) == watch.last_failure {
         if let Some(last_attempt) = watch.last_sync_attempt {
             if now.duration_since(last_attempt) < REMOTE_EDIT_RETRY_INTERVAL {
+                watch.next_sync_attempt_at = Some(last_attempt + REMOTE_EDIT_RETRY_INTERVAL);
                 return;
             }
         }
     }
 
     watch.last_sync_attempt = Some(now);
+    watch.next_sync_attempt_at = None;
+    let remotes = app.state::<RemoteVolumeState>();
+    let path = remote_edit_path(&watch.target);
 
     match copy_local_to_remote_item(
         &remotes,
@@ -295,6 +579,8 @@ async fn update_remote_edit_watch(app: &AppHandle, watch: &mut RemoteEditWatch, 
         Ok(()) => {
             watch.last_synced = Some(signature);
             watch.last_failure = None;
+            watch.dirty_since = None;
+            watch.next_sync_attempt_at = None;
             let _ = app.emit(
                 "remote-edit-synced",
                 RemoteEditSyncEvent {
@@ -306,6 +592,8 @@ async fn update_remote_edit_watch(app: &AppHandle, watch: &mut RemoteEditWatch, 
         }
         Err(error) => {
             watch.last_failure = Some(signature);
+            watch.dirty_since = Some(now);
+            watch.next_sync_attempt_at = Some(now + REMOTE_EDIT_RETRY_INTERVAL);
             let _ = app.emit(
                 "remote-edit-sync-failed",
                 RemoteEditSyncEvent {

@@ -51,6 +51,13 @@ pub fn open_with_context(
     remembered: Option<OpenWithDefaultEntry>,
 ) -> FsResult<OpenWithContext> {
     let file_type = file_type_for_path(path);
+    Ok(open_with_context_for_file_type(file_type, remembered))
+}
+
+pub fn open_with_context_for_file_type(
+    file_type: FileTypeInfo,
+    remembered: Option<OpenWithDefaultEntry>,
+) -> OpenWithContext {
     let remembered_app_id = remembered.map(|entry| entry.app_id);
     let system_default_app_id = system_default_app_id(&file_type.mime_type);
     let apps = open_with_apps_for(
@@ -59,12 +66,12 @@ pub fn open_with_context(
         system_default_app_id.as_deref(),
     );
 
-    Ok(OpenWithContext {
+    OpenWithContext {
         file_type,
         apps,
         remembered_app_id,
         system_default_app_id,
-    })
+    }
 }
 
 pub fn open_with_default(path: &Path, remembered: Option<OpenWithDefaultEntry>) -> FsResult<()> {
@@ -103,12 +110,23 @@ pub fn open_with_app_id(path: &Path, app_id: &str) -> FsResult<()> {
 }
 
 pub fn file_type_for_path(path: &Path) -> FileTypeInfo {
-    let extension = path
-        .extension()
-        .and_then(OsStr::to_str)
-        .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase())
-        .filter(|value| !value.is_empty());
-    let mime_type = query_mime_type(path).unwrap_or_else(|| "application/octet-stream".to_string());
+    let extension = extension_for_path(path);
+    let mime_type = query_mime_type(path)
+        .or_else(|| extension.as_deref().and_then(mime_type_for_extension))
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    file_type_from_parts(extension, mime_type)
+}
+
+pub fn file_type_for_virtual_path(path: &str) -> FileTypeInfo {
+    let extension = extension_for_path(Path::new(path));
+    let mime_type = extension
+        .as_deref()
+        .and_then(mime_type_for_extension)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    file_type_from_parts(extension, mime_type)
+}
+
+fn file_type_from_parts(extension: Option<String>, mime_type: String) -> FileTypeInfo {
     let key = extension
         .as_ref()
         .map(|extension| format!("ext:{extension}"))
@@ -124,6 +142,57 @@ pub fn file_type_for_path(path: &Path) -> FileTypeInfo {
         mime_type,
         extension,
     }
+}
+
+fn extension_for_path(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .map(|value| value.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+}
+
+fn mime_type_for_extension(extension: &str) -> Option<String> {
+    let mime_type = match extension {
+        "txt" | "text" | "log" | "md" | "markdown" | "csv" | "tsv" => "text/plain",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" | "cjs" => "text/javascript",
+        "json" | "map" => "application/json",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "ogg" => "audio/ogg",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "7z" => "application/x-7z-compressed",
+        "rar" => "application/vnd.rar",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "rs" | "go" | "py" | "rb" | "php" | "java" | "kt" | "swift" | "c" | "h" | "cpp" | "hpp"
+        | "ts" | "tsx" | "jsx" | "vue" | "svelte" | "sql" | "sh" | "zsh" | "bash" | "toml"
+        | "yaml" | "yml" => "text/plain",
+        _ => return None,
+    };
+
+    Some(mime_type.to_string())
 }
 
 fn open_with_system_default(path: &Path) -> FsResult<()> {
@@ -561,5 +630,14 @@ mod tests {
                 "/tmp/image.png".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn infers_virtual_file_type_from_extension() {
+        let file_type = file_type_for_virtual_path("folder/movie.mp4");
+
+        assert_eq!(file_type.key, "ext:mp4");
+        assert_eq!(file_type.mime_type, "video/mp4");
+        assert_eq!(file_type.label, ".mp4 files");
     }
 }
