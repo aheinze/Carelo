@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "release:prepare": "node scripts/prepare-release.mjs",
     "release": "tauri build --ci"
   },
   "dependencies": {

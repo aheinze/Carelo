@@ -96,6 +96,17 @@ Create release bundles:
 npm run release
 ```
 
+Prepare a new release version and tag:
+
+```sh
+npm run release:prepare -- 0.4.1
+```
+
+This updates the app version files, adds a Linux metadata release entry, creates
+a `chore: release v0.4.1` commit, and creates the annotated `v0.4.1` tag.
+Use `--dry-run` to preview the changes first. The release-prep script expects a
+clean git worktree.
+
 The release script runs:
 
 ```sh
