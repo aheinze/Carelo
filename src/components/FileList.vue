@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
+import FileEmptyState from './FileEmptyState.vue';
 import FileRow from './FileRow.vue';
 import { listDirectory } from '../composables/useFileOperations';
 import { dropEffectFromEvent, parentPath } from '../composables/useFileTransferGuards';
@@ -157,12 +158,65 @@ const hasFilteredOutEntries = computed(() =>
 const hasHiddenOnlyEntries = computed(() =>
   !isSearchFiltering.value && !props.showHiddenFiles && props.rawEntryCount > 0 && props.entries.length === 0,
 );
-const emptyDirectoryMessage = computed(() =>
-  hasFilteredOutEntries.value
-    ? 'No items match your search.'
-    : hasHiddenOnlyEntries.value
-      ? 'Only hidden items'
-      : 'No entries',
+function emptyStateKind(rawCount, visibleCount) {
+  if (isSearchFiltering.value && rawCount > 0 && visibleCount === 0) {
+    return 'search';
+  }
+
+  if (!isSearchFiltering.value && !props.showHiddenFiles && rawCount > 0 && visibleCount === 0) {
+    return 'hidden';
+  }
+
+  return 'empty';
+}
+
+function emptyStateTitleForKind(kind) {
+  if (kind === 'search') {
+    return 'No matches';
+  }
+
+  if (kind === 'hidden') {
+    return 'Only hidden items';
+  }
+
+  return 'Nothing here';
+}
+
+function emptyStateDetailForKind(kind) {
+  if (kind === 'search') {
+    return 'Try a different search term.';
+  }
+
+  if (kind === 'hidden') {
+    return 'Hidden files are available but currently hidden.';
+  }
+
+  return 'This folder does not contain any files or folders.';
+}
+
+function emptyStateIconForKind(kind) {
+  if (kind === 'search') {
+    return 'search';
+  }
+
+  if (kind === 'hidden') {
+    return 'eye-off';
+  }
+
+  return 'folder';
+}
+
+const emptyStateKindForRoot = computed(() =>
+  emptyStateKind(props.rawEntryCount, props.entries.length),
+);
+const emptyStateTitle = computed(() =>
+  emptyStateTitleForKind(emptyStateKindForRoot.value),
+);
+const emptyStateDetail = computed(() =>
+  emptyStateDetailForKind(emptyStateKindForRoot.value),
+);
+const emptyStateIcon = computed(() =>
+  emptyStateIconForKind(emptyStateKindForRoot.value),
 );
 
 const baseColumn = computed(() => ({
@@ -620,19 +674,23 @@ function visibleEntriesForColumn(column) {
     : computeVisibleEntriesForColumn(column);
 }
 
-function emptyMessageForColumn(column) {
+function emptyStateKindForColumn(column) {
   const rawCount = column.rawEntryCount ?? column.entries?.length ?? 0;
   const visibleCount = visibleEntriesForColumn(column).length;
 
-  if (isSearchFiltering.value && rawCount > 0 && visibleCount === 0) {
-    return 'No items match your search.';
-  }
+  return emptyStateKind(rawCount, visibleCount);
+}
 
-  if (!isSearchFiltering.value && !props.showHiddenFiles && rawCount > 0 && visibleCount === 0) {
-    return 'Only hidden items';
-  }
+function emptyStateTitleForColumn(column) {
+  return emptyStateTitleForKind(emptyStateKindForColumn(column));
+}
 
-  return 'No entries';
+function emptyStateDetailForColumn(column) {
+  return emptyStateDetailForKind(emptyStateKindForColumn(column));
+}
+
+function emptyStateIconForColumn(column) {
+  return emptyStateIconForKind(emptyStateKindForColumn(column));
 }
 
 function selectedEntriesForColumn(column, columnIndex) {
@@ -1702,9 +1760,13 @@ watch(
     </template>
     <div
       v-else-if="entries.length === 0 && !parentDirectory && viewMode !== 'columns'"
-      class="file-list-empty"
+      class="file-list-empty-wrap"
     >
-      {{ emptyDirectoryMessage }}
+      <FileEmptyState
+        :icon="emptyStateIcon"
+        :title="emptyStateTitle"
+        :detail="emptyStateDetail"
+      />
     </div>
 
     <div
@@ -1770,8 +1832,16 @@ watch(
         </div>
         </template>
 
-        <div v-if="entries.length === 0 && parentDirectory" class="file-grid-empty-message">
-          {{ emptyDirectoryMessage }}
+        <div
+          v-if="entries.length === 0 && parentDirectory"
+          class="file-grid-empty-message"
+        >
+          <FileEmptyState
+            :icon="emptyStateIcon"
+            :title="emptyStateTitle"
+            :detail="emptyStateDetail"
+            grid
+          />
         </div>
       </div>
     </div>
@@ -1806,9 +1876,14 @@ watch(
           </div>
 
           <p v-else-if="column.error" class="file-column-message">{{ column.error }}</p>
-          <p v-else-if="column.visibleEntries.length === 0" class="file-column-message">
-            {{ emptyMessageForColumn(column) }}
-          </p>
+          <div v-else-if="column.visibleEntries.length === 0" class="file-column-message file-column-empty">
+            <FileEmptyState
+              :icon="emptyStateIconForColumn(column)"
+              :title="emptyStateTitleForColumn(column)"
+              :detail="emptyStateDetailForColumn(column)"
+              compact
+            />
+          </div>
 
           <template v-else>
             <div
@@ -1959,8 +2034,15 @@ watch(
           </button>
         </div>
 
-        <div v-if="entries.length === 0 && parentDirectory" class="file-list-empty file-list-empty--inline">
-          {{ emptyDirectoryMessage }}
+        <div
+          v-if="entries.length === 0 && parentDirectory"
+          class="file-list-empty-wrap file-list-empty-wrap--inline"
+        >
+          <FileEmptyState
+            :icon="emptyStateIcon"
+            :title="emptyStateTitle"
+            :detail="emptyStateDetail"
+          />
         </div>
 
         <div
@@ -2192,14 +2274,8 @@ watch(
     inset 0 1px 0 rgb(255 255 255 / 0.14);
 }
 
-.file-list-empty {
-  padding: 24px 20px;
-  color: var(--text-muted);
-  font-size: 14px;
-}
-
-.file-list-empty--inline {
-  padding-left: 34px;
+.file-list-empty-wrap--inline {
+  min-height: min(260px, calc(100vh - 290px));
 }
 
 .loading-row {
@@ -2365,11 +2441,7 @@ watch(
 }
 
 .file-grid-empty-message {
-  align-self: start;
   grid-column: 1 / -1;
-  padding: 2px 8px;
-  color: var(--text-muted);
-  font-size: 14px;
 }
 
 .file-card--loading {
@@ -2545,6 +2617,10 @@ watch(
   color: var(--text-muted);
   font-size: 13px;
   font-weight: 600;
+}
+
+.file-column-empty {
+  padding: 0;
 }
 
 .file-column-loading {
