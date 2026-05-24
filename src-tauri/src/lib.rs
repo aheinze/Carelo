@@ -7,7 +7,9 @@ pub mod store;
 pub mod window_state;
 
 use commands::app::quit_app;
-use commands::fs::{FileOperationState, MediaStreamState, RemoteEditSyncState};
+use commands::fs::{
+    FileOperationState, FileSearchIndexState, MediaStreamState, RemoteEditSyncState,
+};
 use commands::oauth::create_oauth_tokens;
 use commands::store::{
     add_favorite, add_favorite_group, app_store_path, get_app_settings, get_window_dimensions,
@@ -35,6 +37,7 @@ pub fn run() {
         .manage(TerminalState::default())
         .manage(RemoteVolumeState::default())
         .manage(RemoteEditSyncState::default())
+        .manage(FileSearchIndexState::default())
         .manage(FileOperationState::default())
         .manage(MediaStreamState::default())
         .plugin(tauri_plugin_opener::init())

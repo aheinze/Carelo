@@ -82,6 +82,7 @@ pub struct FileSearchResult {
     pub parent_path: String,
     pub kind: String,
     pub score: i64,
+    pub match_indices: Vec<usize>,
     pub size: Option<u64>,
     pub modified_at: Option<u64>,
 }
@@ -116,6 +117,7 @@ pub struct ContentSearchResult {
     pub match_start: usize,
     pub match_end: usize,
     pub match_count: usize,
+    pub score: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,7 +173,7 @@ pub use preview::{
     MediaStreamState,
 };
 pub use remotes::{add_remote_volume, list_remote_volumes, remove_remote_volume};
-pub use search::{search_content, search_files};
+pub use search::{search_content, search_files, FileSearchIndexState};
 pub use size::measure_items_size;
 pub use state::{
     cancel_file_operation, pause_file_operation, resume_file_operation, FileOperationState,

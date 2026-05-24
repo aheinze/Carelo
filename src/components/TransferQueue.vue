@@ -36,6 +36,10 @@ function formatBytes(value) {
   return `${bytes} B`;
 }
 
+function countLabel(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 function operationLabel(job) {
   if (!job) {
     return 'Idle';
@@ -93,12 +97,38 @@ function metricDetail(job) {
   return metrics.join(' · ');
 }
 
+function searchProgressDetail(job, metric = '') {
+  if (!['content-search', 'file-search'].includes(job?.operation) || !['running', 'cancelling'].includes(job.status)) {
+    return '';
+  }
+
+  const scannedItems = Number(job.processedEntries || 0);
+  const matchedItems = Number(job.currentBytes || 0);
+  const scannedUnit = job.operation === 'content-search' ? 'file' : 'item';
+  const matchedUnit = job.operation === 'content-search' ? 'file' : 'match';
+
+  if (scannedItems <= 0) {
+    return '';
+  }
+
+  const progress = matchedItems > 0
+    ? `${countLabel(scannedItems, scannedUnit)} scanned · ${countLabel(matchedItems, matchedUnit)}`
+    : `${countLabel(scannedItems, scannedUnit)} scanned`;
+
+  return metric ? `${progress} · ${metric}` : progress;
+}
+
 function progressDetail(job) {
   if (!job) {
     return 'No active file operations';
   }
 
   const metric = metricDetail(job);
+  const contentProgress = searchProgressDetail(job, metric);
+
+  if (contentProgress) {
+    return contentProgress;
+  }
 
   if (job.detail) {
     return metric ? `${job.detail} · ${metric}` : job.detail;

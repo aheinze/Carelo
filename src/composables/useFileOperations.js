@@ -237,12 +237,12 @@ export async function listDirectory(path) {
   return invokeCommand('list_directory', { path }, { sudo: true });
 }
 
-export async function searchFiles(root, query, options = {}) {
-  return invokeCommand('search_files', { root, query, options });
+export async function searchFiles(root, query, options = {}, jobId = null) {
+  return invokeCommand('search_files', { root, query, options, jobId });
 }
 
-export async function searchContent(root, query, options = {}) {
-  return invokeCommand('search_content', { root, query, options });
+export async function searchContent(root, query, options = {}, jobId = null) {
+  return invokeCommand('search_content', { root, query, options, jobId });
 }
 
 export async function getFileMetadata(path) {

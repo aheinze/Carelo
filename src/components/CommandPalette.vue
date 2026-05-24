@@ -1,5 +1,6 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue';
+import { listen } from '@tauri-apps/api/event';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { canUseLocalFileAssets, searchContent, searchFiles } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
@@ -16,8 +17,10 @@ const results = ref([]);
 const selectedIndex = ref(0);
 const loading = ref(false);
 const error = ref('');
+const activeSearchJobId = ref('');
 let searchTimer = null;
 let searchVersion = 0;
+let stopFileSearchResultsListener = null;
 
 function pluralize(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
@@ -25,6 +28,11 @@ function pluralize(count, singular, plural = `${singular}s`) {
 
 const contentMatchedLineCount = computed(() => (
   results.value.reduce((total, result) => total + Math.max(Number(result.matchCount) || 1, 1), 0)
+));
+const activeSearchJob = computed(() => (
+  activeSearchJobId.value
+    ? store.queue.find((job) => job.id === activeSearchJobId.value) || null
+    : null
 ));
 const currentMode = computed(() => store.fileSearchMode || 'files');
 const activeRoot = computed(() => (
@@ -46,6 +54,19 @@ const statusText = computed(() => {
   }
 
   if (loading.value) {
+    if (currentMode.value === 'content' || currentMode.value === 'files') {
+      const scannedFiles = Number(activeSearchJob.value?.processedEntries || 0);
+      const matchedItems = Number(activeSearchJob.value?.currentBytes || 0);
+      const scannedLabel = currentMode.value === 'content' ? 'file' : 'item';
+      const matchedLabel = currentMode.value === 'content' ? 'file' : 'match';
+
+      if (scannedFiles > 0) {
+        return matchedItems > 0
+          ? `${pluralize(scannedFiles, scannedLabel)} scanned, ${pluralize(matchedItems, matchedLabel)}`
+          : `${pluralize(scannedFiles, scannedLabel)} scanned`;
+      }
+    }
+
     return 'Searching';
   }
 
@@ -74,6 +95,7 @@ const dialogLabel = computed(() => (
 ));
 
 function setMode(mode) {
+  cancelActiveSearchJob();
   store.openFileSearch(mode);
   results.value = [];
   selectedIndex.value = 0;
@@ -86,6 +108,7 @@ function close() {
 }
 
 function resetSearch() {
+  cancelActiveSearchJob();
   results.value = [];
   selectedIndex.value = 0;
   error.value = '';
@@ -94,7 +117,51 @@ function resetSearch() {
   clearTimeout(searchTimer);
 }
 
+function isOperationCancelled(searchError) {
+  return (
+    searchError?.code === 'operation_cancelled' ||
+    /cancelled/i.test(String(searchError?.message || searchError || ''))
+  );
+}
+
+function cancelActiveSearchJob() {
+  const jobId = activeSearchJobId.value;
+
+  if (!jobId) {
+    return;
+  }
+
+  activeSearchJobId.value = '';
+  store.cancelQueueJob(jobId).catch(() => {});
+}
+
+async function ensureFileSearchResultsListener() {
+  if (stopFileSearchResultsListener || !canUseLocalFileAssets()) {
+    return;
+  }
+
+  try {
+    stopFileSearchResultsListener = await listen('file-search-results', (event) => {
+      const payload = event.payload || {};
+
+      if (
+        currentMode.value !== 'files' ||
+        payload.jobId !== activeSearchJobId.value ||
+        String(payload.query || '') !== query.value.trim()
+      ) {
+        return;
+      }
+
+      results.value = Array.isArray(payload.results) ? payload.results : [];
+      selectedIndex.value = Math.min(selectedIndex.value, Math.max(results.value.length - 1, 0));
+    });
+  } catch {
+    stopFileSearchResultsListener = null;
+  }
+}
+
 async function runSearch() {
+  cancelActiveSearchJob();
   const version = ++searchVersion;
 
   if (!query.value.trim()) {
@@ -112,9 +179,26 @@ async function runSearch() {
 
   loading.value = true;
   error.value = '';
+  const isContentSearch = currentMode.value === 'content';
+  const jobId = store.startQueueJob({
+    operation: isContentSearch ? 'content-search' : 'file-search',
+    label: isContentSearch ? 'Content search' : 'File search',
+    detail: isContentSearch ? 'Scanning file contents' : 'Scanning file names',
+    remotePaths: [activeRoot.value],
+    pausable: false,
+    cancelable: true,
+  });
+
+  if (jobId) {
+    activeSearchJobId.value = jobId;
+  }
+
+  if (!isContentSearch) {
+    await ensureFileSearchResultsListener();
+  }
 
   try {
-    const nextResults = currentMode.value === 'content'
+    const nextResults = isContentSearch
       ? await searchContent(activeRoot.value, query.value, {
           limit: 120,
           includeHidden: store.showHiddenFiles,
@@ -122,7 +206,7 @@ async function runSearch() {
           caseSensitive: false,
           regex: false,
           maxFileBytes: CONTENT_SEARCH_MAX_FILE_BYTES,
-        })
+        }, jobId)
       : await searchFiles(activeRoot.value, query.value, {
           limit: SEARCH_LIMIT,
           includeHidden: store.showHiddenFiles,
@@ -130,23 +214,57 @@ async function runSearch() {
           includeFiles: true,
           includeDirectories: true,
           followSymlinks: false,
-        });
+        }, jobId);
 
     if (version !== searchVersion) {
+      if (jobId) {
+        store.cancelQueueJobDone(jobId, 'Superseded');
+      }
       return;
     }
 
     results.value = Array.isArray(nextResults) ? nextResults : [];
     selectedIndex.value = Math.min(selectedIndex.value, Math.max(results.value.length - 1, 0));
+
+    if (jobId) {
+      store.completeQueueJob(
+        jobId,
+        `${pluralize(results.value.length, isContentSearch ? 'file' : 'result')} found`,
+      );
+    }
   } catch (searchError) {
-    if (version !== searchVersion) {
+    if (isOperationCancelled(searchError)) {
+      if (jobId) {
+        store.cancelQueueJobDone(jobId, version === searchVersion ? 'Cancelled' : 'Superseded');
+      }
+
+      if (version === searchVersion) {
+        results.value = [];
+        selectedIndex.value = 0;
+      }
+
       return;
+    }
+
+    if (version !== searchVersion) {
+      if (jobId) {
+        store.cancelQueueJobDone(jobId, 'Superseded');
+      }
+      return;
+    }
+
+    if (jobId) {
+      store.failQueueJob(jobId, searchError?.message || 'Unable to search this folder.');
     }
 
     results.value = [];
     selectedIndex.value = 0;
     error.value = searchError?.message || 'Unable to search this folder.';
   } finally {
+    if (jobId && activeSearchJobId.value === jobId) {
+      activeSearchJobId.value = '';
+    }
+
     if (version === searchVersion) {
       loading.value = false;
     }
@@ -155,6 +273,7 @@ async function runSearch() {
 
 function scheduleSearch() {
   clearTimeout(searchTimer);
+  searchVersion += 1;
   searchTimer = setTimeout(runSearch, 90);
 }
 
@@ -231,6 +350,38 @@ function resultTitle(result) {
   return result.name;
 }
 
+function resultTitleSegments(result) {
+  const title = resultTitle(result);
+  const chars = Array.from(title);
+  const matched = new Set(Array.isArray(result?.matchIndices) ? result.matchIndices : []);
+
+  if (matched.size === 0) {
+    return [{ text: title, match: false }];
+  }
+
+  const segments = [];
+  let current = '';
+  let currentMatch = matched.has(0);
+
+  chars.forEach((char, index) => {
+    const charMatch = matched.has(index);
+
+    if (charMatch !== currentMatch && current) {
+      segments.push({ text: current, match: currentMatch });
+      current = '';
+    }
+
+    current += char;
+    currentMatch = charMatch;
+  });
+
+  if (current) {
+    segments.push({ text: current, match: currentMatch });
+  }
+
+  return segments;
+}
+
 function contentResultMeta(result) {
   const lineNumber = Math.max(Number(result?.lineNumber) || 1, 1);
   const matchCount = Math.max(Number(result?.matchCount) || 1, 1);
@@ -275,6 +426,14 @@ watch(results, () => {
 watch(selectedIndex, () => {
   if (store.fileSearchVisible) {
     scrollSelectedResultIntoView();
+  }
+});
+
+onBeforeUnmount(() => {
+  resetSearch();
+  if (stopFileSearchResultsListener) {
+    stopFileSearchResultsListener();
+    stopFileSearchResultsListener = null;
   }
 });
 </script>
@@ -378,7 +537,18 @@ watch(selectedIndex, () => {
               </span>
               <span class="command-palette__result-main">
                 <span class="command-palette__title-row">
-                  <span class="command-palette__name">{{ resultTitle(result) }}</span>
+                  <span class="command-palette__name">
+                    <template
+                      v-for="(segment, segmentIndex) in resultTitleSegments(result)"
+                      :key="`${resultKey(result)}-${segmentIndex}`"
+                    >
+                      <mark
+                        v-if="segment.match"
+                        class="command-palette__name-match"
+                      >{{ segment.text }}</mark>
+                      <span v-else>{{ segment.text }}</span>
+                    </template>
+                  </span>
                   <span
                     v-if="currentMode === 'content'"
                     class="command-palette__match-meta"
@@ -741,11 +911,20 @@ watch(selectedIndex, () => {
 }
 
 .command-palette__name {
+  display: block;
   min-width: 0;
   color: var(--text);
   font-size: 13px;
   font-weight: 650;
   line-height: 1.15;
+}
+
+.command-palette__name-match {
+  border-radius: 3px;
+  padding: 0 1px;
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: color-mix(in srgb, var(--accent) 78%, var(--text));
+  font-weight: 760;
 }
 
 .command-palette__match-meta {
