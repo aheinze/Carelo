@@ -1,9 +1,11 @@
 <script setup>
-import { onMounted, onUnmounted } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { useShortcutsModal } from '../composables/useShortcutsModal';
 
 const modal = useShortcutsModal();
+const filterInput = ref(null);
+const shortcutFilter = ref('');
 
 const sections = [
   {
@@ -113,11 +115,107 @@ const sections = [
   },
 ];
 
+const keyAliases = {
+  '⌘': 'command cmd meta',
+  '⇧': 'shift',
+  '⌥': 'option alt',
+  '←': 'left arrow back',
+  '→': 'right arrow forward',
+  '↑': 'up arrow',
+  '↓': 'down arrow',
+  '⌫': 'backspace parent up',
+  Del: 'delete remove',
+  Enter: 'return',
+  Space: 'spacebar',
+  Insert: 'ins',
+  Home: 'start first',
+  End: 'last',
+  PgUp: 'page up',
+  PgDn: 'page down',
+  'Num +': 'numpad plus add',
+  'Num −': 'numpad minus subtract',
+  'Num /': 'numpad slash divide',
+  'Num ×': 'numpad multiply',
+};
+
+const normalizedShortcutFilter = computed(() => normalizeShortcutText(shortcutFilter.value));
+const filteredSections = computed(() => {
+  const query = normalizedShortcutFilter.value;
+
+  if (!query) {
+    return sections;
+  }
+
+  return sections
+    .map((section) => {
+      const sectionMatches = matchesShortcutQuery(section.title, query);
+
+      return {
+        ...section,
+        shortcuts: section.shortcuts.filter((shortcut) => (
+          sectionMatches || matchesShortcutQuery(shortcutSearchText(section, shortcut), query)
+        )),
+      };
+    })
+    .filter((section) => section.shortcuts.length > 0);
+});
+const visibleShortcutCount = computed(() => (
+  filteredSections.value.reduce((total, section) => total + section.shortcuts.length, 0)
+));
+
+function normalizeShortcutText(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function matchesShortcutQuery(value, query) {
+  if (!query) {
+    return true;
+  }
+
+  const haystack = normalizeShortcutText(value);
+
+  return query.split(' ').every((term) => haystack.includes(term));
+}
+
+function shortcutSearchText(section, shortcut) {
+  const keyText = shortcut.keys.join(' ');
+  const aliasText = shortcut.keys.map((key) => keyAliases[key] || '').join(' ');
+
+  return `${section.title} ${shortcut.label} ${keyText} ${aliasText}`;
+}
+
+function focusFilter() {
+  nextTick(() => {
+    filterInput.value?.focus?.({ preventScroll: true });
+  });
+}
+
+function clearFilter() {
+  shortcutFilter.value = '';
+  focusFilter();
+}
+
+function handleFilterEscape() {
+  if (shortcutFilter.value) {
+    clearFilter();
+    return;
+  }
+
+  modal.hide();
+}
+
 function onKeydown(event) {
   if (event.key === 'Escape') {
     modal.hide();
   }
 }
+
+watch(() => modal.visible.value, (visible) => {
+  if (visible) {
+    shortcutFilter.value = '';
+    focusFilter();
+  }
+});
 
 onMounted(() => window.addEventListener('keydown', onKeydown));
 onUnmounted(() => window.removeEventListener('keydown', onKeydown));
@@ -146,8 +244,34 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
             </button>
           </header>
 
-          <div class="shortcuts-grid">
-            <section v-for="section in sections" :key="section.title" class="shortcuts-section">
+          <label class="shortcuts-filter">
+            <AppIcon name="search" :size="15" :stroke-width="1.9" />
+            <input
+              ref="filterInput"
+              v-model="shortcutFilter"
+              type="search"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Filter shortcuts..."
+              aria-label="Filter shortcuts"
+              @keydown.escape.prevent.stop="handleFilterEscape"
+            />
+            <span v-if="shortcutFilter" class="shortcuts-filter-count">
+              {{ visibleShortcutCount }}
+            </span>
+            <button
+              v-if="shortcutFilter"
+              type="button"
+              class="shortcuts-filter-clear"
+              aria-label="Clear shortcut filter"
+              @click="clearFilter"
+            >
+              <AppIcon name="x" :size="13" :stroke-width="2.2" />
+            </button>
+          </label>
+
+          <div v-if="filteredSections.length > 0" class="shortcuts-grid">
+            <section v-for="section in filteredSections" :key="section.title" class="shortcuts-section">
               <h3>{{ section.title }}</h3>
               <ul>
                 <li v-for="shortcut in section.shortcuts" :key="shortcut.label + shortcut.keys.join()">
@@ -158,6 +282,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
                 </li>
               </ul>
             </section>
+          </div>
+
+          <div v-else class="shortcuts-empty">
+            <AppIcon name="search" :size="24" :stroke-width="1.5" />
+            <span>No shortcuts found</span>
           </div>
 
         </div>
@@ -249,6 +378,78 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
 }
 
 /* ── Grid ─────────────────────────────────────────────────── */
+.shortcuts-filter {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  flex-shrink: 0;
+  min-height: 38px;
+  padding: 0 8px 0 12px;
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+  background: var(--input-bg);
+  box-shadow: var(--input-shadow);
+  color: var(--text-faint);
+}
+
+.shortcuts-filter:focus-within {
+  border-color: var(--accent-border);
+  color: var(--text-muted);
+  box-shadow:
+    var(--input-shadow),
+    var(--accent-focus-ring);
+}
+
+.shortcuts-filter input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 520;
+  letter-spacing: 0;
+}
+
+.shortcuts-filter input::placeholder {
+  color: var(--text-faint);
+}
+
+.shortcuts-filter input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.shortcuts-filter-count {
+  min-width: 24px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  text-align: center;
+}
+
+.shortcuts-filter-clear {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.shortcuts-filter-clear:hover,
+.shortcuts-filter-clear:focus-visible {
+  background: var(--btn-hover);
+  color: var(--text);
+  outline: 0;
+}
+
 .shortcuts-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -338,6 +539,20 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.shortcuts-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  min-height: 220px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--text) 2.5%, transparent);
+  color: var(--text-faint);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 /* ── Animation ────────────────────────────────────────────── */

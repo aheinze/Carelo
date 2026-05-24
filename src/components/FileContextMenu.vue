@@ -52,9 +52,11 @@ const props = defineProps({
 const emit = defineEmits(['action', 'close']);
 
 const menuRef = ref(null);
+const filterInput = ref(null);
 const toolsItemRef = ref(null);
 const toolsMenuRef = ref(null);
 const toolsSubmenuOpen = ref(false);
+const actionFilter = ref('');
 const menuStyle = ref({
   left: `${props.position.x}px`,
   top: `${props.position.y}px`,
@@ -71,6 +73,216 @@ const itemType = computed(() => (props.entry?.kind === 'directory' ? 'Folder' : 
 const visibleCustomTools = computed(() =>
   props.customTools.filter((tool) => tool?.enabled !== false && tool?.name && tool?.command),
 );
+const normalizedActionFilter = computed(() => normalizeMenuText(actionFilter.value));
+const visibleSubmenuTools = computed(() => {
+  const query = normalizedActionFilter.value;
+
+  if (!query) {
+    return visibleCustomTools.value;
+  }
+
+  const matchingTools = visibleCustomTools.value.filter((tool) => customToolMatchesFilter(tool, query));
+
+  if (matchingTools.length > 0) {
+    return matchingTools;
+  }
+
+  return matchesQuery('tools custom commands external tools', query)
+    ? visibleCustomTools.value
+    : [];
+});
+const actionGroups = computed(() => {
+  const entryKind = props.entry?.kind;
+  const groups = [];
+
+  if (visibleCustomTools.value.length > 0) {
+    groups.push({
+      id: 'tools',
+      items: [
+        {
+          id: 'tools',
+          type: 'submenu',
+          label: 'Tools',
+          icon: 'tool',
+          disabled: !props.canCustomTools,
+          keywords: [
+            'custom commands external tools',
+            ...visibleCustomTools.value.flatMap((tool) => [tool.name, tool.command]),
+          ],
+        },
+      ],
+    });
+  }
+
+  groups.push({
+    id: 'open',
+    items: [
+      {
+        id: 'open',
+        action: 'open',
+        label: 'Open',
+        icon: entryKind === 'directory' ? 'folder' : 'file',
+        keywords: ['default'],
+      },
+      ...(props.canEditFile
+        ? [{
+            id: 'editFile',
+            action: 'editFile',
+            label: 'Edit File',
+            icon: 'file-code',
+            keywords: ['editor f4 modify'],
+          }]
+        : []),
+      {
+        id: 'openWith',
+        action: 'openWith',
+        label: 'Open With…',
+        icon: 'app',
+        disabled: !props.canOpenWith,
+        keywords: ['application app'],
+      },
+      {
+        id: 'openInNewTab',
+        action: 'openInNewTab',
+        label: 'Open in New Tab',
+        icon: 'plus',
+        disabled: !canOpenInNewTab.value,
+        keywords: ['tab'],
+      },
+      {
+        id: 'reveal',
+        action: 'reveal',
+        label: 'Reveal in File Manager',
+        icon: 'folder',
+        keywords: ['show locate finder explorer nautilus'],
+      },
+    ],
+  });
+
+  groups.push({
+    id: 'path',
+    items: [
+      {
+        id: 'copyPath',
+        action: 'copyPath',
+        label: 'Copy Path',
+        icon: 'copy',
+        keywords: ['clipboard pathname location'],
+      },
+      {
+        id: 'rename',
+        action: 'rename',
+        label: 'Rename',
+        icon: 'file',
+        disabled: !props.canModify,
+        keywords: ['name move'],
+      },
+    ],
+  });
+
+  groups.push({
+    id: 'archive',
+    items: [
+      {
+        id: 'archive',
+        action: 'archive',
+        label: 'Create Archive',
+        icon: 'archive',
+        disabled: !props.canArchive,
+        keywords: ['zip compress'],
+      },
+      {
+        id: 'unarchive',
+        action: 'unarchive',
+        label: 'Extract Zip Archive',
+        icon: 'extract',
+        disabled: !props.canUnarchive,
+        keywords: ['unzip decompress extract'],
+      },
+    ],
+  });
+
+  groups.push({
+    id: 'transfer',
+    items: [
+      {
+        id: 'copyToOtherPane',
+        action: 'copyToOtherPane',
+        label: 'Copy to Other Pane',
+        icon: 'copy',
+        disabled: !props.canTransfer,
+        keywords: ['duplicate transfer other panel'],
+      },
+      {
+        id: 'moveToOtherPane',
+        action: 'moveToOtherPane',
+        label: 'Move to Other Pane',
+        icon: 'chevron-right',
+        disabled: !props.canMove,
+        keywords: ['transfer other panel'],
+      },
+    ],
+  });
+
+  groups.push({
+    id: 'danger',
+    items: [
+      {
+        id: 'delete',
+        action: 'delete',
+        label: 'Delete',
+        icon: 'trash',
+        disabled: !props.canModify,
+        danger: true,
+        keywords: ['remove trash'],
+      },
+    ],
+  });
+
+  return groups;
+});
+const filteredActionGroups = computed(() => {
+  const query = normalizedActionFilter.value;
+
+  return actionGroups.value
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => itemMatchesFilter(item, query)),
+    }))
+    .filter((group) => group.items.length > 0);
+});
+const hasVisibleActions = computed(() => filteredActionGroups.value.length > 0);
+const firstEnabledFilteredItem = computed(() => (
+  filteredActionGroups.value
+    .flatMap((group) => group.items)
+    .find((item) => !item.disabled) || null
+));
+
+function normalizeMenuText(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function matchesQuery(value, query) {
+  if (!query) {
+    return true;
+  }
+
+  const haystack = normalizeMenuText(value);
+
+  return query.split(' ').every((term) => haystack.includes(term));
+}
+
+function itemMatchesFilter(item, query) {
+  return matchesQuery([item.label, ...(item.keywords || [])].join(' '), query);
+}
+
+function customToolMatchesFilter(tool, query) {
+  return matchesQuery(`${tool?.name || ''} ${tool?.command || ''}`, query);
+}
+
+function assignToolsItemRef(element) {
+  toolsItemRef.value = element || null;
+}
 
 function updatePosition() {
   nextTick(() => {
@@ -120,6 +332,78 @@ function emitAction(action) {
   emit('action', action);
 }
 
+function clearActionFilter() {
+  actionFilter.value = '';
+  focusFilter();
+}
+
+function focusFilter() {
+  nextTick(() => {
+    filterInput.value?.focus?.({ preventScroll: true });
+  });
+}
+
+function focusFirstMenuItem() {
+  nextTick(() => {
+    menuRef.value?.querySelector('.context-menu-item:not(:disabled)')?.focus();
+  });
+}
+
+function activateFirstFilteredItem() {
+  const item = firstEnabledFilteredItem.value;
+
+  if (!item) {
+    return;
+  }
+
+  handleMenuItemClick(item);
+}
+
+function handleFilterEscape() {
+  if (actionFilter.value) {
+    clearActionFilter();
+    return;
+  }
+
+  if (toolsSubmenuOpen.value) {
+    toolsSubmenuOpen.value = false;
+    return;
+  }
+
+  emit('close');
+}
+
+function handleMenuItemPointerEnter(item) {
+  if (item.type === 'submenu') {
+    openToolsSubmenu();
+    return;
+  }
+
+  toolsSubmenuOpen.value = false;
+}
+
+function handleMenuItemClick(item) {
+  if (!item || item.disabled) {
+    return;
+  }
+
+  if (item.type === 'submenu') {
+    openToolsSubmenu();
+    return;
+  }
+
+  emitAction(item.action);
+}
+
+function handleMenuItemRight(event, item) {
+  if (item.type !== 'submenu') {
+    return;
+  }
+
+  event.preventDefault();
+  openToolsSubmenu();
+}
+
 function updateToolsMenuPosition() {
   nextTick(() => {
     const item = toolsItemRef.value;
@@ -155,7 +439,7 @@ function updateToolsMenuPosition() {
 }
 
 function openToolsSubmenu() {
-  if (visibleCustomTools.value.length === 0 || !props.canCustomTools) {
+  if (visibleSubmenuTools.value.length === 0 || !props.canCustomTools) {
     toolsSubmenuOpen.value = false;
     return;
   }
@@ -189,9 +473,15 @@ function handleKeydown(event) {
 
 watch(() => props.position, updatePosition, { deep: true });
 watch(() => props.entry, () => {
+  actionFilter.value = '';
   toolsSubmenuOpen.value = false;
+  focusFilter();
 });
-watch(visibleCustomTools, (tools) => {
+watch(actionFilter, () => {
+  toolsSubmenuOpen.value = false;
+  updatePosition();
+});
+watch(visibleSubmenuTools, (tools) => {
   if (tools.length === 0) {
     toolsSubmenuOpen.value = false;
   } else if (toolsSubmenuOpen.value) {
@@ -201,6 +491,7 @@ watch(visibleCustomTools, (tools) => {
 
 onMounted(() => {
   updatePosition();
+  focusFilter();
   window.addEventListener('pointerdown', handleWindowPointerDown);
   window.addEventListener('keydown', handleKeydown);
   window.addEventListener('resize', updatePosition);
@@ -224,158 +515,83 @@ onUnmounted(() => {
       :aria-label="`${entry.name} context menu`"
       @contextmenu.prevent
     >
+      <label class="context-menu-filter">
+        <AppIcon name="search" :size="14" :stroke-width="1.9" />
+        <input
+          ref="filterInput"
+          v-model="actionFilter"
+          type="search"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Filter actions..."
+          aria-label="Filter context menu actions"
+          @keydown.enter.prevent="activateFirstFilteredItem"
+          @keydown.down.prevent="focusFirstMenuItem"
+          @keydown.escape.prevent.stop="handleFilterEscape"
+        />
+        <button
+          v-if="actionFilter"
+          type="button"
+          class="context-menu-filter-clear"
+          aria-label="Clear context menu filter"
+          @click="clearActionFilter"
+        >
+          <AppIcon name="x" :size="13" :stroke-width="2.2" />
+        </button>
+      </label>
+
       <div class="context-menu-title">
         <span>{{ entry.name }}</span>
         <small>{{ itemType }}</small>
       </div>
 
-      <template v-if="visibleCustomTools.length > 0">
-        <button
-          ref="toolsItemRef"
-          type="button"
-          role="menuitem"
-          class="context-menu-item context-menu-item--submenu"
-          :class="{ 'context-menu-item--open': toolsSubmenuOpen }"
-          :disabled="!canCustomTools"
-          aria-haspopup="menu"
-          :aria-expanded="toolsSubmenuOpen"
-          @pointerenter="openToolsSubmenu"
-          @focus="openToolsSubmenu"
-          @keydown.right.prevent="openToolsSubmenu"
-          @click="openToolsSubmenu"
+      <template v-if="hasVisibleActions">
+        <template
+          v-for="(group, groupIndex) in filteredActionGroups"
+          :key="group.id"
         >
-          <AppIcon name="tool" :size="16" />
-          <span>Tools</span>
-          <AppIcon
-            class="context-submenu-chevron"
-            name="chevron-right"
-            :size="13"
-            :stroke-width="2.1"
-          />
-        </button>
+          <div v-if="groupIndex > 0" class="context-menu-separator"></div>
 
-        <div class="context-menu-separator"></div>
+          <button
+            v-for="item in group.items"
+            :key="item.id"
+            :ref="item.type === 'submenu' ? assignToolsItemRef : undefined"
+            type="button"
+            role="menuitem"
+            class="context-menu-item"
+            :class="{
+              'context-menu-item--submenu': item.type === 'submenu',
+              'context-menu-item--open': item.type === 'submenu' && toolsSubmenuOpen,
+              'context-menu-item--danger': item.danger,
+            }"
+            :disabled="item.disabled"
+            :aria-haspopup="item.type === 'submenu' ? 'menu' : undefined"
+            :aria-expanded="item.type === 'submenu' ? toolsSubmenuOpen : undefined"
+            @pointerenter="handleMenuItemPointerEnter(item)"
+            @focus="handleMenuItemPointerEnter(item)"
+            @keydown.right="handleMenuItemRight($event, item)"
+            @click="handleMenuItemClick(item)"
+          >
+            <AppIcon :name="item.icon" :size="16" />
+            <span>{{ item.label }}</span>
+            <AppIcon
+              v-if="item.type === 'submenu'"
+              class="context-submenu-chevron"
+              name="chevron-right"
+              :size="13"
+              :stroke-width="2.1"
+            />
+          </button>
+        </template>
       </template>
 
-      <button type="button" role="menuitem" class="context-menu-item" @click="emitAction('open')">
-        <AppIcon :name="entry.kind === 'directory' ? 'folder' : 'file'" :size="16" />
-        <span>Open</span>
-      </button>
-      <button
-        v-if="canEditFile"
-        type="button"
-        role="menuitem"
-        class="context-menu-item"
-        @click="emitAction('editFile')"
-      >
-        <AppIcon name="file-code" :size="16" />
-        <span>Edit File</span>
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        class="context-menu-item"
-        :disabled="!canOpenWith"
-        @click="emitAction('openWith')"
-      >
-        <AppIcon name="app" :size="16" />
-        <span>Open With…</span>
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        class="context-menu-item"
-        :disabled="!canOpenInNewTab"
-        @click="emitAction('openInNewTab')"
-      >
-        <AppIcon name="plus" :size="16" />
-        <span>Open in New Tab</span>
-      </button>
-      <button type="button" role="menuitem" class="context-menu-item" @click="emitAction('reveal')">
-        <AppIcon name="folder" :size="16" />
-        <span>Reveal in File Manager</span>
-      </button>
-
-      <div class="context-menu-separator"></div>
-
-      <button type="button" role="menuitem" class="context-menu-item" @click="emitAction('copyPath')">
-        <AppIcon name="copy" :size="16" />
-        <span>Copy Path</span>
-      </button>
-
-      <button
-        type="button"
-        role="menuitem"
-        class="context-menu-item"
-        :disabled="!canModify"
-        @click="emitAction('rename')"
-      >
-        <AppIcon name="file" :size="16" />
-        <span>Rename</span>
-      </button>
-
-      <div class="context-menu-separator"></div>
-
-      <button
-        type="button"
-        role="menuitem"
-        class="context-menu-item"
-        :disabled="!canArchive"
-        @click="emitAction('archive')"
-      >
-        <AppIcon name="archive" :size="16" />
-        <span>Create Archive</span>
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        class="context-menu-item"
-        :disabled="!canUnarchive"
-        @click="emitAction('unarchive')"
-      >
-        <AppIcon name="extract" :size="16" />
-        <span>Extract Zip Archive</span>
-      </button>
-
-      <div class="context-menu-separator"></div>
-
-      <button
-        type="button"
-        role="menuitem"
-        class="context-menu-item"
-        :disabled="!canTransfer"
-        @click="emitAction('copyToOtherPane')"
-      >
-        <AppIcon name="copy" :size="16" />
-        <span>Copy to Other Pane</span>
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        class="context-menu-item"
-        :disabled="!canMove"
-        @click="emitAction('moveToOtherPane')"
-      >
-        <AppIcon name="chevron-right" :size="16" />
-        <span>Move to Other Pane</span>
-      </button>
-
-      <div class="context-menu-separator"></div>
-
-      <button
-        type="button"
-        role="menuitem"
-        class="context-menu-item context-menu-item--danger"
-        :disabled="!canModify"
-        @click="emitAction('delete')"
-      >
-        <AppIcon name="trash" :size="16" />
-        <span>Delete</span>
-      </button>
+      <div v-else class="context-menu-empty">
+        No matching actions
+      </div>
     </div>
 
     <div
-      v-if="entry && toolsSubmenuOpen && visibleCustomTools.length > 0"
+      v-if="entry && toolsSubmenuOpen && visibleSubmenuTools.length > 0"
       ref="toolsMenuRef"
       class="context-menu context-submenu"
       :style="toolsMenuStyle"
@@ -384,7 +600,7 @@ onUnmounted(() => {
       @contextmenu.prevent
     >
       <button
-        v-for="tool in visibleCustomTools"
+        v-for="tool in visibleSubmenuTools"
         :key="tool.id"
         type="button"
         role="menuitem"
@@ -403,6 +619,7 @@ onUnmounted(() => {
   position: fixed;
   z-index: 2000;
   min-width: 224px;
+  max-width: min(292px, calc(100vw - 16px));
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -416,6 +633,10 @@ onUnmounted(() => {
   transform-origin: top left;
   scrollbar-width: thin;
   scrollbar-color: var(--control-border) transparent;
+}
+
+.context-menu:not(.context-submenu) {
+  width: min(292px, calc(100vw - 16px));
 }
 
 .context-menu::-webkit-scrollbar {
@@ -442,6 +663,68 @@ onUnmounted(() => {
     opacity: 1;
     transform: scale(1);
   }
+}
+
+/* ── Filter ───────────────────────────────────────────────── */
+.context-menu-filter {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  margin: 1px 1px 5px;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--input-border);
+  border-radius: 9px;
+  background: var(--input-bg);
+  box-shadow: var(--input-shadow);
+  color: var(--text-faint);
+}
+
+.context-menu-filter:focus-within {
+  border-color: var(--accent-border);
+  color: var(--text-muted);
+  box-shadow:
+    var(--input-shadow),
+    var(--accent-focus-ring);
+}
+
+.context-menu-filter input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 520;
+  letter-spacing: 0;
+}
+
+.context-menu-filter input::placeholder {
+  color: var(--text-faint);
+}
+
+.context-menu-filter input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.context-menu-filter-clear {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.context-menu-filter-clear:hover,
+.context-menu-filter-clear:focus-visible {
+  background: var(--btn-hover);
+  color: var(--text);
+  outline: 0;
 }
 
 /* ── Title header ─────────────────────────────────────────── */
@@ -546,6 +829,14 @@ onUnmounted(() => {
 
 .context-submenu .context-menu-item {
   min-height: 28px;
+}
+
+.context-menu-empty {
+  padding: 12px 10px 11px;
+  color: var(--text-faint);
+  font-size: 12px;
+  font-weight: 560;
+  text-align: center;
 }
 
 /* ── Separator ────────────────────────────────────────────── */
