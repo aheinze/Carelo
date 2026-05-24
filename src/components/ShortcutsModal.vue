@@ -32,6 +32,7 @@ const sections = [
       { keys: ['Tab'],         label: 'Switch active pane' },
       { keys: ['⌥', 'F1'],    label: 'Focus left pane' },
       { keys: ['⌥', 'F2'],    label: 'Focus right pane' },
+      { keys: ['⌘', '⇧', 'P'], label: 'Command palette' },
       { keys: ['⌘', 'P'],     label: 'Fuzzy search current folder' },
       { keys: ['⌘', '⇧', 'F'], label: 'Search file contents' },
       { keys: ['⌥', '←'],    label: 'Go back' },

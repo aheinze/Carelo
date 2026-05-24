@@ -5,6 +5,7 @@ import AppIcon from './AppIcon.vue';
 import { canUseLocalFileAssets, searchContent, searchFiles } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { isArchivePath } from '../utils/archivePaths';
+import { RUN_COMMAND_EVENT } from '../utils/appEvents';
 
 const SEARCH_LIMIT = 80;
 const CONTENT_SEARCH_MAX_FILE_BYTES = 24 * 1024 * 1024;
@@ -35,16 +36,524 @@ const activeSearchJob = computed(() => (
     : null
 ));
 const currentMode = computed(() => store.fileSearchMode || 'files');
+const isCommandMode = computed(() => currentMode.value === 'commands');
 const activeRoot = computed(() => (
   store.effectiveDirectoryFor(store.activePaneId) || store.activeTabFor(store.activePaneId)?.currentPath || '~'
 ));
+const targetPaneId = computed(() => (store.activePaneId === 'left' ? 'right' : 'left'));
+const targetRoot = computed(() => (
+  store.effectiveDirectoryFor(targetPaneId.value) || store.activeTabFor(targetPaneId.value)?.currentPath || '~'
+));
+const selectedEntry = computed(() => store.selectedEntryFor(store.activePaneId));
+const operationEntries = computed(() => store.operationEntriesFor(store.activePaneId));
+const hasOperationEntries = computed(() => operationEntries.value.length > 0);
+const hasFocusedEntry = computed(() => Boolean(selectedEntry.value));
+const hasArchiveOperationEntries = computed(() => (
+  operationEntries.value.some((entry) => isArchivePath(entry.path))
+));
 const canSearchRoot = computed(() => {
   const root = activeRoot.value;
-  return canUseLocalFileAssets()
+  return isCommandMode.value || (canUseLocalFileAssets()
     && root
-    && !isArchivePath(root);
+    && !isArchivePath(root));
 });
+const commandDefinitions = [
+  {
+    id: 'palette.files',
+    section: 'Search',
+    title: 'Search files',
+    detail: 'Fuzzy search the current folder',
+    icon: 'file',
+    shortcut: 'Ctrl P',
+    keywords: 'finder filename current folder',
+  },
+  {
+    id: 'palette.content',
+    section: 'Search',
+    title: 'Search file contents',
+    detail: 'Find text inside files in the current folder',
+    icon: 'search',
+    shortcut: 'Ctrl Shift F',
+    keywords: 'grep content text full text',
+  },
+  {
+    id: 'file.open',
+    section: 'File',
+    title: 'Open selected item',
+    detail: () => selectedEntry.value?.kind === 'directory' ? 'Open folder in the active pane' : 'Open with the default app',
+    icon: 'file',
+    shortcut: 'Enter',
+    when: () => hasFocusedEntry.value,
+    keywords: 'launch default app folder directory',
+  },
+  {
+    id: 'file.edit',
+    section: 'File',
+    title: 'Edit selected file',
+    detail: 'Open the focused file in your configured editor',
+    icon: 'file-code',
+    shortcut: 'F4',
+    when: () => selectedEntry.value?.kind === 'file' && !isArchivePath(selectedEntry.value?.path),
+    keywords: 'editor code modify',
+  },
+  {
+    id: 'file.preview',
+    section: 'File',
+    title: 'Preview selected item',
+    detail: 'Show the preview panel for the focused item',
+    icon: 'eye',
+    shortcut: 'F3',
+    when: () => hasFocusedEntry.value,
+    keywords: 'inspect quicklook info',
+  },
+  {
+    id: 'file.copyOtherPane',
+    section: 'File',
+    title: 'Copy to other pane',
+    detail: () => `Copy selection to ${targetRoot.value}`,
+    icon: 'copy',
+    shortcut: 'F5',
+    when: () => hasOperationEntries.value,
+    keywords: 'duplicate transfer',
+  },
+  {
+    id: 'file.copyHereRename',
+    section: 'File',
+    title: 'Copy here with new name',
+    detail: 'Copy the focused item in place and choose a new name',
+    icon: 'copy',
+    shortcut: 'Shift F5',
+    when: () => operationEntries.value.length === 1,
+    keywords: 'duplicate rename',
+  },
+  {
+    id: 'file.moveOtherPane',
+    section: 'File',
+    title: 'Move to other pane',
+    detail: () => `Move selection to ${targetRoot.value}`,
+    icon: 'open-other-pane',
+    shortcut: 'F6',
+    when: () => hasOperationEntries.value && !hasArchiveOperationEntries.value,
+    keywords: 'transfer relocate',
+  },
+  {
+    id: 'file.rename',
+    section: 'File',
+    title: 'Rename selected item',
+    detail: 'Change the focused file or folder name',
+    icon: 'file-text',
+    shortcut: 'Shift F6',
+    when: () => hasFocusedEntry.value && !isArchivePath(selectedEntry.value?.path),
+    keywords: 'name',
+  },
+  {
+    id: 'file.newFolder',
+    section: 'File',
+    title: 'New folder',
+    detail: 'Create a folder in the active pane',
+    icon: 'folder-plus',
+    shortcut: 'F7',
+    when: () => !isArchivePath(activeRoot.value),
+    keywords: 'directory mkdir create',
+  },
+  {
+    id: 'file.newFolderOtherPane',
+    section: 'File',
+    title: 'New folder in other pane',
+    detail: () => `Create a folder in ${targetRoot.value}`,
+    icon: 'folder-plus',
+    shortcut: 'Shift F7',
+    when: () => !isArchivePath(targetRoot.value),
+    keywords: 'directory mkdir create target',
+  },
+  {
+    id: 'file.delete',
+    section: 'File',
+    title: 'Delete selected items',
+    detail: 'Delete the current selection',
+    icon: 'trash',
+    shortcut: 'F8',
+    when: () => hasOperationEntries.value && !hasArchiveOperationEntries.value,
+    keywords: 'remove erase',
+  },
+  {
+    id: 'file.contextMenu',
+    section: 'File',
+    title: 'Show context menu',
+    detail: 'Open actions for the focused item',
+    icon: 'menu',
+    shortcut: 'Shift F10',
+    when: () => hasFocusedEntry.value,
+    keywords: 'right click actions tools open with',
+  },
+  {
+    id: 'clipboard.copy',
+    section: 'Clipboard',
+    title: 'Copy files',
+    detail: 'Copy selected files to the file clipboard',
+    icon: 'copy',
+    shortcut: 'Ctrl C',
+    when: () => hasOperationEntries.value,
+    keywords: 'clipboard duplicate',
+  },
+  {
+    id: 'clipboard.cut',
+    section: 'Clipboard',
+    title: 'Cut files',
+    detail: 'Mark selected files to move on paste',
+    icon: 'copy',
+    shortcut: 'Ctrl X',
+    when: () => hasOperationEntries.value && !hasArchiveOperationEntries.value,
+    keywords: 'clipboard move',
+  },
+  {
+    id: 'clipboard.paste',
+    section: 'Clipboard',
+    title: 'Paste files here',
+    detail: 'Paste files into the active pane',
+    icon: 'download',
+    shortcut: 'Ctrl V',
+    when: () => !isArchivePath(activeRoot.value),
+    keywords: 'clipboard insert',
+  },
+  {
+    id: 'clipboard.copyName',
+    section: 'Clipboard',
+    title: 'Copy focused name',
+    detail: 'Copy only the selected file name',
+    icon: 'file-text',
+    shortcut: 'Ctrl Enter',
+    when: () => hasFocusedEntry.value,
+    keywords: 'filename clipboard',
+  },
+  {
+    id: 'clipboard.copyFocusedPath',
+    section: 'Clipboard',
+    title: 'Copy focused path',
+    detail: 'Copy the selected file path',
+    icon: 'file-text',
+    shortcut: 'Ctrl Shift Enter',
+    when: () => hasFocusedEntry.value,
+    keywords: 'absolute path clipboard',
+  },
+  {
+    id: 'clipboard.copyCurrentPath',
+    section: 'Clipboard',
+    title: 'Copy current folder path',
+    detail: () => activeRoot.value,
+    icon: 'folder',
+    keywords: 'directory location cwd clipboard',
+  },
+  {
+    id: 'pane.switch',
+    section: 'Navigation',
+    title: 'Switch active pane',
+    detail: 'Move focus to the other file pane',
+    icon: 'columns',
+    shortcut: 'Tab',
+    keywords: 'left right focus',
+  },
+  {
+    id: 'pane.left',
+    section: 'Navigation',
+    title: 'Focus left pane',
+    detail: 'Make the left pane active',
+    icon: 'columns',
+    shortcut: 'Alt F1',
+    keywords: 'left focus',
+  },
+  {
+    id: 'pane.right',
+    section: 'Navigation',
+    title: 'Focus right pane',
+    detail: 'Make the right pane active',
+    icon: 'columns',
+    shortcut: 'Alt F2',
+    keywords: 'right focus',
+  },
+  {
+    id: 'pane.back',
+    section: 'Navigation',
+    title: 'Go back',
+    detail: 'Navigate back in pane history',
+    icon: 'chevron-left',
+    shortcut: 'Alt Left',
+    keywords: 'history previous',
+  },
+  {
+    id: 'pane.forward',
+    section: 'Navigation',
+    title: 'Go forward',
+    detail: 'Navigate forward in pane history',
+    icon: 'chevron-right',
+    shortcut: 'Alt Right',
+    keywords: 'history next',
+  },
+  {
+    id: 'pane.parent',
+    section: 'Navigation',
+    title: 'Go to parent folder',
+    detail: 'Move one level up',
+    icon: 'folder',
+    shortcut: 'Backspace',
+    keywords: 'up directory parent',
+  },
+  {
+    id: 'pane.root',
+    section: 'Navigation',
+    title: 'Go to file system root',
+    detail: 'Open / in the active pane',
+    icon: 'drive',
+    shortcut: 'Ctrl \\',
+    keywords: 'root filesystem',
+  },
+  {
+    id: 'pane.openInOtherPane',
+    section: 'Navigation',
+    title: 'Open focused folder in other pane',
+    detail: 'Load the focused directory beside the current pane',
+    icon: 'open-other-pane',
+    shortcut: 'Ctrl Right',
+    when: () => selectedEntry.value?.kind === 'directory',
+    keywords: 'target pane sibling',
+  },
+  {
+    id: 'pane.newTabFromFocused',
+    section: 'Navigation',
+    title: 'New tab from focused item',
+    detail: 'Open the focused folder or archive in a new tab',
+    icon: 'plus',
+    shortcut: 'Ctrl Up',
+    keywords: 'tab folder archive',
+  },
+  {
+    id: 'pane.refresh',
+    section: 'Navigation',
+    title: 'Refresh current folder',
+    detail: 'Reload the active pane',
+    icon: 'refresh',
+    shortcut: 'F2',
+    keywords: 'reload rescan',
+  },
+  {
+    id: 'selection.selectAll',
+    section: 'Selection',
+    title: 'Select all',
+    detail: 'Select every visible item',
+    icon: 'check',
+    shortcut: 'Ctrl A',
+    keywords: 'mark all',
+  },
+  {
+    id: 'selection.clear',
+    section: 'Selection',
+    title: 'Clear selection',
+    detail: 'Clear selected items',
+    icon: 'minus',
+    shortcut: 'Num -',
+    keywords: 'unselect deselect',
+  },
+  {
+    id: 'selection.invert',
+    section: 'Selection',
+    title: 'Invert selection',
+    detail: 'Select unselected items and clear selected ones',
+    icon: 'check',
+    shortcut: 'Num *',
+    keywords: 'toggle mark',
+  },
+  {
+    id: 'tabs.new',
+    section: 'Tabs',
+    title: 'New tab',
+    detail: 'Open a new tab in the active pane',
+    icon: 'plus',
+    shortcut: 'Ctrl T',
+    keywords: 'create tab',
+  },
+  {
+    id: 'tabs.close',
+    section: 'Tabs',
+    title: 'Close current tab',
+    detail: 'Close the active pane tab',
+    icon: 'x',
+    shortcut: 'Ctrl W',
+    keywords: 'remove tab',
+  },
+  {
+    id: 'tabs.next',
+    section: 'Tabs',
+    title: 'Next tab',
+    detail: 'Activate the next tab in this pane',
+    icon: 'chevron-right',
+    shortcut: 'Ctrl Tab',
+    keywords: 'cycle tab',
+  },
+  {
+    id: 'tabs.previous',
+    section: 'Tabs',
+    title: 'Previous tab',
+    detail: 'Activate the previous tab in this pane',
+    icon: 'chevron-left',
+    shortcut: 'Ctrl Shift Tab',
+    keywords: 'cycle tab',
+  },
+  {
+    id: 'layout.swapPanes',
+    section: 'Layout',
+    title: 'Swap panes',
+    detail: 'Exchange left and right pane contents',
+    icon: 'columns',
+    shortcut: 'Ctrl U',
+    keywords: 'layout exchange',
+  },
+  {
+    id: 'layout.sidebar',
+    section: 'Layout',
+    title: () => store.sidebarVisible ? 'Hide sidebar' : 'Show sidebar',
+    detail: 'Toggle locations, favorites, devices, and remote storage',
+    icon: 'sidebar',
+    shortcut: 'Ctrl B',
+    keywords: 'locations favorites devices remote',
+  },
+  {
+    id: 'layout.preview',
+    section: 'Layout',
+    title: () => store.previewPanelVisible ? 'Hide preview panel' : 'Show preview panel',
+    detail: 'Toggle the inspector and preview panel',
+    icon: 'panel-right',
+    shortcut: 'Ctrl I',
+    keywords: 'inspector info details',
+  },
+  {
+    id: 'layout.terminal',
+    section: 'Layout',
+    title: () => store.terminalPanelVisible ? 'Hide terminal' : 'Show terminal',
+    detail: 'Toggle the integrated terminal',
+    icon: 'terminal',
+    shortcut: 'Ctrl `',
+    keywords: 'shell command line',
+  },
+  {
+    id: 'view.hidden',
+    section: 'View',
+    title: () => store.showHiddenFiles ? 'Hide hidden files' : 'Show hidden files',
+    detail: 'Toggle dotfiles and hidden entries',
+    icon: () => store.showHiddenFiles ? 'eye-off' : 'eye',
+    shortcut: 'Ctrl .',
+    keywords: 'dotfiles invisible',
+  },
+  {
+    id: 'view.grid',
+    section: 'View',
+    title: 'Grid view',
+    detail: 'Show the active pane as a grid',
+    icon: 'grid',
+    shortcut: 'Ctrl F1',
+    keywords: 'icons layout',
+  },
+  {
+    id: 'view.list',
+    section: 'View',
+    title: 'List view',
+    detail: 'Show the active pane as a list',
+    icon: 'list',
+    shortcut: 'Ctrl F2',
+    keywords: 'details table',
+  },
+  {
+    id: 'sort.name',
+    section: 'Sort',
+    title: 'Sort by name',
+    detail: 'Order entries by name',
+    icon: 'list',
+    shortcut: 'Ctrl F3',
+    keywords: 'ordering alphabetical',
+  },
+  {
+    id: 'sort.extension',
+    section: 'Sort',
+    title: 'Sort by extension',
+    detail: 'Order entries by file extension',
+    icon: 'file',
+    shortcut: 'Ctrl F4',
+    keywords: 'type suffix',
+  },
+  {
+    id: 'sort.modifiedAt',
+    section: 'Sort',
+    title: 'Sort by date modified',
+    detail: 'Order entries by modification date',
+    icon: 'activity-list',
+    shortcut: 'Ctrl F5',
+    keywords: 'time date newest',
+  },
+  {
+    id: 'sort.size',
+    section: 'Sort',
+    title: 'Sort by size',
+    detail: 'Order entries by file size',
+    icon: 'archive',
+    shortcut: 'Ctrl F6',
+    keywords: 'bytes large small',
+  },
+  {
+    id: 'sort.none',
+    section: 'Sort',
+    title: 'No sorting',
+    detail: 'Use the directory order from the source',
+    icon: 'list',
+    shortcut: 'Ctrl F7',
+    keywords: 'unsorted natural',
+  },
+  {
+    id: 'sort.direction',
+    section: 'Sort',
+    title: 'Reverse sort direction',
+    detail: 'Toggle ascending and descending order',
+    icon: 'chevron-down',
+    keywords: 'ascending descending order',
+  },
+  {
+    id: 'sidebar.remoteStorage',
+    section: 'Sidebar',
+    title: 'Connect remote storage',
+    detail: 'Add SFTP, FTP, SMB, WebDAV, or S3 storage',
+    icon: 'network',
+    keywords: 'server network volume connect',
+  },
+  {
+    id: 'sidebar.newGroup',
+    section: 'Sidebar',
+    title: 'New sidebar group',
+    detail: 'Create a custom section for shortcuts',
+    icon: 'folder-plus',
+    keywords: 'favorites bookmarks section',
+  },
+  {
+    id: 'app.settings',
+    section: 'App',
+    title: 'Open settings',
+    detail: 'Change Carelo preferences',
+    icon: 'settings',
+    shortcut: 'Ctrl ,',
+    keywords: 'preferences configure',
+  },
+  {
+    id: 'app.shortcuts',
+    section: 'App',
+    title: 'Keyboard shortcuts',
+    detail: 'Show the searchable shortcut overview',
+    icon: 'info',
+    shortcut: 'F1',
+    keywords: 'help hotkeys keys',
+  },
+];
 const statusText = computed(() => {
+  if (isCommandMode.value) {
+    return pluralize(results.value.length, 'command');
+  }
+
   if (!canSearchRoot.value) {
     return 'Search unavailable';
   }
@@ -81,18 +590,124 @@ const statusText = computed(() => {
   return pluralize(results.value.length, 'result');
 });
 const inputPlaceholder = computed(() => (
-  currentMode.value === 'content'
+  currentMode.value === 'commands'
+    ? 'Select a command...'
+    : currentMode.value === 'content'
     ? 'Search file contents in current folder'
     : 'Search files in current folder'
 ));
 const emptyPlaceholder = computed(() => (
-  currentMode.value === 'content'
+  currentMode.value === 'commands'
+    ? 'Type to find an app command'
+    : currentMode.value === 'content'
     ? 'Type to search inside files in the current folder'
     : 'Type to fuzzy search the current folder'
 ));
 const dialogLabel = computed(() => (
-  currentMode.value === 'content' ? 'Content search' : 'Fuzzy file search'
+  currentMode.value === 'commands'
+    ? 'Command palette'
+    : currentMode.value === 'content'
+      ? 'Content search'
+      : 'Fuzzy file search'
 ));
+const paletteSubtitle = computed(() => (
+  currentMode.value === 'commands' ? `Active pane: ${activeRoot.value}` : activeRoot.value
+));
+
+function normalizeCommandText(value) {
+  return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function commandValue(value) {
+  return typeof value === 'function' ? value() : value;
+}
+
+function commandIsVisible(command) {
+  return typeof command.when === 'function' ? command.when() : true;
+}
+
+function commandScore(command, query) {
+  const title = normalizeCommandText(command.title);
+  const section = normalizeCommandText(command.section);
+  const shortcut = normalizeCommandText(command.shortcut);
+  const detail = normalizeCommandText(command.detail);
+  const keywords = normalizeCommandText(command.keywords);
+  const terms = query.split(' ').filter(Boolean);
+
+  if (terms.length === 0) {
+    return 1;
+  }
+
+  let score = 0;
+
+  for (const term of terms) {
+    if (title.startsWith(term)) {
+      score += 120;
+    } else if (title.includes(term)) {
+      score += 80;
+    } else if (section.includes(term)) {
+      score += 48;
+    } else if (shortcut.includes(term)) {
+      score += 42;
+    } else if (keywords.includes(term)) {
+      score += 32;
+    } else if (detail.includes(term)) {
+      score += 20;
+    } else {
+      return 0;
+    }
+  }
+
+  return score;
+}
+
+const commandResults = computed(() => {
+  const queryText = normalizeCommandText(query.value);
+
+  return commandDefinitions
+    .map((definition, index) => {
+      const command = {
+        ...definition,
+        title: commandValue(definition.title),
+        detail: commandValue(definition.detail),
+        icon: commandValue(definition.icon) || 'app',
+        shortcut: commandValue(definition.shortcut),
+      };
+
+      if (!commandIsVisible(command)) {
+        return null;
+      }
+
+      const score = commandScore(command, queryText);
+
+      if (queryText && score <= 0) {
+        return null;
+      }
+
+      return {
+        type: 'command',
+        commandId: command.id,
+        name: command.title,
+        path: `command:${command.id}`,
+        parentPath: command.detail,
+        section: command.section,
+        icon: command.icon,
+        shortcut: command.shortcut,
+        score,
+        order: index,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || a.order - b.order)
+    .slice(0, SEARCH_LIMIT);
+});
+
+function refreshCommandResults() {
+  results.value = commandResults.value;
+  selectedIndex.value = Math.min(selectedIndex.value, Math.max(results.value.length - 1, 0));
+  error.value = '';
+  loading.value = false;
+}
 
 function setMode(mode) {
   cancelActiveSearchJob();
@@ -163,6 +778,11 @@ async function ensureFileSearchResultsListener() {
 async function runSearch() {
   cancelActiveSearchJob();
   const version = ++searchVersion;
+
+  if (isCommandMode.value) {
+    refreshCommandResults();
+    return;
+  }
 
   if (!query.value.trim()) {
     results.value = [];
@@ -318,6 +938,28 @@ async function openResult(result = results.value[selectedIndex.value]) {
     return;
   }
 
+  if (result.type === 'command') {
+    if (result.commandId === 'palette.files') {
+      query.value = '';
+      setMode('files');
+      return;
+    }
+
+    if (result.commandId === 'palette.content') {
+      query.value = '';
+      setMode('content');
+      return;
+    }
+
+    close();
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent(RUN_COMMAND_EVENT, {
+        detail: { id: result.commandId },
+      }));
+    }, 0);
+    return;
+  }
+
   await store.revealPathInPane(store.activePaneId, result.path, result.kind);
   close();
 }
@@ -335,10 +977,20 @@ function handleKeydown(event) {
   } else if (event.key === 'Enter') {
     event.preventDefault();
     openResult();
+  } else if (event.key === 'Tab') {
+    event.preventDefault();
+    const modes = ['commands', 'files', 'content'];
+    const currentIndex = modes.indexOf(currentMode.value);
+    const nextIndex = (currentIndex + (event.shiftKey ? -1 : 1) + modes.length) % modes.length;
+    setMode(modes[nextIndex]);
   }
 }
 
 function resultIcon(result) {
+  if (result?.type === 'command') {
+    return result.icon || 'app';
+  }
+
   return result?.kind === 'directory' ? 'folder' : 'file';
 }
 
@@ -348,6 +1000,10 @@ function resultKey(result) {
 
 function resultTitle(result) {
   return result.name;
+}
+
+function resultShortcut(result) {
+  return result?.type === 'command' ? result.shortcut : '';
 }
 
 function resultTitleSegments(result) {
@@ -390,12 +1046,6 @@ function contentResultMeta(result) {
   return `Line ${lineNumber} / ${lineCountText}`;
 }
 
-function resultDetail(result) {
-  return currentMode.value === 'content'
-    ? result.lineText
-    : result.parentPath;
-}
-
 watch(
   () => store.fileSearchVisible,
   async (visible) => {
@@ -416,6 +1066,12 @@ watch([query, activeRoot, currentMode, () => store.showHiddenFiles], () => {
   if (store.fileSearchVisible) {
     selectedIndex.value = 0;
     scheduleSearch();
+  }
+});
+
+watch(commandResults, () => {
+  if (store.fileSearchVisible && isCommandMode.value) {
+    refreshCommandResults();
   }
 });
 
@@ -451,21 +1107,32 @@ onBeforeUnmount(() => {
             <div class="command-palette__title-group">
               <div class="command-palette__title-text">
                 <h2>{{ dialogLabel }}</h2>
-                <span class="command-palette__root" :title="activeRoot">{{ activeRoot }}</span>
+                <span class="command-palette__root" :title="paletteSubtitle">{{ paletteSubtitle }}</span>
               </div>
             </div>
 
             <button
               type="button"
               class="command-palette__close"
-              aria-label="Close search"
+              aria-label="Close palette"
               @click="close"
             >
               <AppIcon name="x" :size="14" :stroke-width="2" />
             </button>
           </header>
 
-          <div class="command-palette__modes" role="tablist" aria-label="Search mode">
+          <div class="command-palette__modes" role="tablist" aria-label="Palette mode">
+            <button
+              type="button"
+              class="command-palette__mode"
+              :class="{ 'command-palette__mode--active': currentMode === 'commands' }"
+              role="tab"
+              :aria-selected="currentMode === 'commands'"
+              @click="setMode('commands')"
+            >
+              <AppIcon name="app" :size="13" :stroke-width="1.8" />
+              <span>Commands</span>
+            </button>
             <button
               type="button"
               class="command-palette__mode"
@@ -525,6 +1192,7 @@ onBeforeUnmount(() => {
               :class="{
                 'command-palette__result--active': index === selectedIndex,
                 'command-palette__result--content': currentMode === 'content',
+                'command-palette__result--command': result.type === 'command',
               }"
               type="button"
               role="option"
@@ -553,9 +1221,17 @@ onBeforeUnmount(() => {
                     v-if="currentMode === 'content'"
                     class="command-palette__match-meta"
                   >{{ contentResultMeta(result) }}</span>
+                  <span
+                    v-else-if="result.type === 'command'"
+                    class="command-palette__match-meta"
+                  >{{ result.section }}</span>
                 </span>
                 <span
-                  v-if="currentMode === 'content' && result.lineText"
+                  v-if="result.type === 'command' && result.parentPath"
+                  class="command-palette__path"
+                >{{ result.parentPath }}</span>
+                <span
+                  v-else-if="currentMode === 'content' && result.lineText"
                   class="command-palette__snippet"
                 >{{ result.lineText }}</span>
                 <span
@@ -568,7 +1244,14 @@ onBeforeUnmount(() => {
                 >{{ result.parentPath }}</span>
               </span>
               <span
-                v-if="index === selectedIndex"
+                v-if="resultShortcut(result)"
+                class="command-palette__shortcut"
+                aria-hidden="true"
+              >
+                <kbd>{{ resultShortcut(result) }}</kbd>
+              </span>
+              <span
+                v-else-if="index === selectedIndex"
                 class="command-palette__enter-hint"
                 aria-hidden="true"
               >
@@ -581,7 +1264,7 @@ onBeforeUnmount(() => {
               <span>{{ error }}</span>
             </div>
             <div
-              v-else-if="!query.trim()"
+              v-else-if="!query.trim() && results.length === 0"
               class="command-palette__empty"
             >
               <AppIcon name="search" :size="22" :stroke-width="1.5" />
@@ -864,6 +1547,10 @@ onBeforeUnmount(() => {
   padding-bottom: 9px;
 }
 
+.command-palette__result--command {
+  min-height: 52px;
+}
+
 .command-palette__result--active {
   background: rgb(var(--accent-rgb) / 0.14);
   border-color: rgb(var(--accent-rgb) / 0.32);
@@ -957,7 +1644,18 @@ onBeforeUnmount(() => {
   opacity: 0.9;
 }
 
-.command-palette__enter-hint kbd {
+.command-palette__shortcut {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 154px;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 1 auto;
+  opacity: 0.86;
+}
+
+.command-palette__enter-hint kbd,
+.command-palette__shortcut kbd {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -972,6 +1670,13 @@ onBeforeUnmount(() => {
   font-family: inherit;
   font-size: 11px;
   font-weight: 600;
+}
+
+.command-palette__shortcut kbd {
+  max-width: 154px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Empty / error states ─────────────────────────────────── */

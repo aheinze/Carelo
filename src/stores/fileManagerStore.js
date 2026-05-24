@@ -2683,8 +2683,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   }
 
   function openFileSearch(mode = 'files') {
-    fileSearchMode.value = mode === 'content' ? 'content' : 'files';
+    fileSearchMode.value = ['commands', 'content', 'files'].includes(mode) ? mode : 'files';
     fileSearchVisible.value = true;
+  }
+
+  function openCommandPalette() {
+    openFileSearch('commands');
   }
 
   function openContentSearch() {
@@ -2866,6 +2870,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     openSettings,
     closeSettings,
     toggleSettings,
+    openCommandPalette,
     openFileSearch,
     openContentSearch,
     closeFileSearch,

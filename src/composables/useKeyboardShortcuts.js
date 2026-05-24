@@ -14,6 +14,11 @@ import {
 import { useShortcutsModal } from './useShortcutsModal';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveRootPath, isArchiveEntry, isArchivePath } from '../utils/archivePaths';
+import {
+  CREATE_SIDEBAR_GROUP_EVENT,
+  OPEN_REMOTE_STORAGE_EVENT,
+  RUN_COMMAND_EVENT,
+} from '../utils/appEvents';
 
 let fileClipboard = null;
 const FILE_CLIPBOARD_STORAGE_KEY = 'carelo.fileClipboard';
@@ -224,7 +229,7 @@ function dispatchSelectedContextMenu(store) {
 function shortcutHelpText() {
   return [
     'F3 Preview, F4 Edit, F5 Copy, F6 Move, F7 New Folder, F8/Delete Delete',
-    'Ctrl+P Fuzzy Search, Ctrl+Shift+F Content Search, Ctrl+C Copy, Ctrl+X Cut, Ctrl+V Paste',
+    'Ctrl+Shift+P Commands, Ctrl+P Fuzzy Search, Ctrl+Shift+F Content Search, Ctrl+C Copy, Ctrl+X Cut, Ctrl+V Paste',
     'Tab Switch Pane, Alt+Left/Right History, Ctrl+\\ Root, Ctrl+PageUp Parent',
     'Insert/Space Toggle Selection, Ctrl+A/Num+ Select All, Num- Clear, Num* Invert',
     'Ctrl+F1 Grid, Ctrl+F2 List, Ctrl+F3 Name, Ctrl+F4 Extension, Ctrl+F5 Date, Ctrl+F6 Size, Ctrl+F7 Unsorted',
@@ -674,12 +679,200 @@ export function useKeyboardShortcuts() {
     }
   }
 
+  async function executeCommand(commandId) {
+    const paneId = activePane();
+    const targetPaneId = otherPaneId(paneId);
+    const targetPath = currentPath(targetPaneId);
+
+    try {
+      switch (commandId) {
+        case 'palette.commands':
+          store.openCommandPalette();
+          return;
+        case 'palette.files':
+          store.openFileSearch();
+          return;
+        case 'palette.content':
+          store.openContentSearch();
+          return;
+        case 'file.open':
+          await openFocusedExternally();
+          return;
+        case 'file.edit':
+          await editFocusedFile();
+          return;
+        case 'file.preview':
+          previewFocused();
+          return;
+        case 'file.copyOtherPane':
+          await copyToDirectory(targetPath, { targetPaneId });
+          return;
+        case 'file.copyHereRename':
+          await copyToDirectory(currentPath(), { promptRename: true });
+          return;
+        case 'file.moveOtherPane':
+          await moveToDirectory(targetPath);
+          return;
+        case 'file.rename':
+          await renameFocused();
+          return;
+        case 'file.newFolder':
+          await createDirectory();
+          return;
+        case 'file.newFolderOtherPane':
+          await createDirectory(targetPaneId, store.selectedEntryFor(paneId)?.name || 'New Folder');
+          return;
+        case 'file.delete':
+          await deleteSelected();
+          return;
+        case 'file.contextMenu':
+          dispatchSelectedContextMenu(store);
+          return;
+        case 'clipboard.copy':
+          await setClipboard('copy');
+          return;
+        case 'clipboard.cut':
+          await setClipboard('move');
+          return;
+        case 'clipboard.paste':
+          await pasteClipboard();
+          return;
+        case 'clipboard.copyName':
+          copyFocusedName(false);
+          return;
+        case 'clipboard.copyFocusedPath':
+          copyFocusedName(true);
+          return;
+        case 'clipboard.copyCurrentPath':
+          copyCurrentPath();
+          return;
+        case 'pane.switch':
+          store.switchActivePane();
+          return;
+        case 'pane.left':
+          store.setActivePane('left');
+          return;
+        case 'pane.right':
+          store.setActivePane('right');
+          return;
+        case 'pane.back':
+          store.goBack();
+          return;
+        case 'pane.forward':
+          store.goForward();
+          return;
+        case 'pane.parent':
+          store.goToParent(paneId);
+          return;
+        case 'pane.root':
+          store.setPanePath(paneId, '/');
+          return;
+        case 'pane.openInOtherPane':
+          store.openFocusedDirectoryInOtherPane(paneId);
+          return;
+        case 'pane.newTabFromFocused':
+          createTabFromFocused();
+          return;
+        case 'pane.refresh':
+          await reloadPane();
+          return;
+        case 'selection.selectAll':
+          store.selectAllEntries(paneId);
+          return;
+        case 'selection.clear':
+          store.clearSelection(paneId);
+          return;
+        case 'selection.invert':
+          store.invertSelection(paneId);
+          return;
+        case 'tabs.new':
+          store.addPaneTab(paneId);
+          return;
+        case 'tabs.close':
+          store.closeActivePaneTab();
+          return;
+        case 'tabs.next':
+          store.activateAdjacentTab(paneId, 1);
+          return;
+        case 'tabs.previous':
+          store.activateAdjacentTab(paneId, -1);
+          return;
+        case 'layout.swapPanes':
+          store.swapPanes();
+          return;
+        case 'layout.sidebar':
+          store.toggleSidebar();
+          return;
+        case 'layout.preview':
+          store.togglePreviewPanel();
+          return;
+        case 'layout.terminal':
+          store.toggleTerminalPanel();
+          return;
+        case 'view.hidden':
+          store.toggleHiddenFiles();
+          return;
+        case 'view.grid':
+          store.setPaneView(paneId, 'grid');
+          return;
+        case 'view.list':
+          store.setPaneView(paneId, 'list');
+          return;
+        case 'sort.name':
+          store.setPaneSortKey(paneId, 'name');
+          return;
+        case 'sort.extension':
+          store.setPaneSortKey(paneId, 'extension');
+          return;
+        case 'sort.modifiedAt':
+          store.setPaneSortKey(paneId, 'modifiedAt');
+          return;
+        case 'sort.size':
+          store.setPaneSortKey(paneId, 'size');
+          return;
+        case 'sort.none':
+          store.setPaneSortKey(paneId, 'none');
+          return;
+        case 'sort.direction':
+          store.togglePaneSortDirection(paneId);
+          return;
+        case 'sidebar.remoteStorage':
+          window.dispatchEvent(new CustomEvent(OPEN_REMOTE_STORAGE_EVENT));
+          return;
+        case 'sidebar.newGroup':
+          window.dispatchEvent(new CustomEvent(CREATE_SIDEBAR_GROUP_EVENT));
+          return;
+        case 'app.settings':
+          store.openSettings();
+          return;
+        case 'app.shortcuts':
+          shortcutsModal.show();
+          return;
+        default:
+          return;
+      }
+    } catch (error) {
+      console.error(error);
+      await dialog.alert({
+        title: 'Command Failed',
+        message: error?.message || 'The selected command could not be completed.',
+        variant: 'warning',
+      });
+    }
+  }
+
   async function handleShortcut(event) {
     const key = event.key;
     const code = event.code;
     const lowerKey = key.toLowerCase();
     const command = isCommand(event);
     const onlyCommand = command && !event.altKey && !event.shiftKey;
+
+    if (command && event.shiftKey && lowerKey === 'p' && !event.altKey) {
+      event.preventDefault();
+      store.openCommandPalette();
+      return;
+    }
 
     if (command && event.shiftKey && lowerKey === 'f' && !event.altKey) {
       event.preventDefault();
@@ -978,12 +1171,6 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      if (onlyCommand && lowerKey === 'p') {
-        event.preventDefault();
-        copyCurrentPath();
-        return;
-      }
-
       if (onlyCommand && lowerKey === 'm') {
         event.preventDefault();
         await renameFocused();
@@ -1148,11 +1335,21 @@ export function useKeyboardShortcuts() {
     handleShortcut(event);
   }
 
+  function handleCommandEvent(event) {
+    const commandId = event?.detail?.id;
+
+    if (commandId) {
+      executeCommand(commandId);
+    }
+  }
+
   onMounted(() => {
     window.addEventListener('keydown', handleKeydown);
+    window.addEventListener(RUN_COMMAND_EVENT, handleCommandEvent);
   });
 
   onUnmounted(() => {
     window.removeEventListener('keydown', handleKeydown);
+    window.removeEventListener(RUN_COMMAND_EVENT, handleCommandEvent);
   });
 }

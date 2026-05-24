@@ -5,6 +5,10 @@ import { getFileMetadata, mountVolume, removeRemoteVolume } from '../composables
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import {
+  CREATE_SIDEBAR_GROUP_EVENT,
+  OPEN_REMOTE_STORAGE_EVENT,
+} from '../utils/appEvents';
+import {
   closeTauriWindow,
   getTauriWindow,
   minimizeTauriWindow,
@@ -675,6 +679,8 @@ function closeWindow(event) {
 onMounted(() => {
   store.initialize();
   document.addEventListener('pointerdown', handleDocumentPointerDown, true);
+  window.addEventListener(OPEN_REMOTE_STORAGE_EVENT, openRemoteModal);
+  window.addEventListener(CREATE_SIDEBAR_GROUP_EVENT, createFavoriteGroup);
   window.addEventListener('pointermove', handlePointerFileDragMove, true);
   window.addEventListener('pointerup', clearPointerFileDragIndicator, true);
   window.addEventListener('pointercancel', clearPointerFileDragIndicator, true);
@@ -685,6 +691,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
+  window.removeEventListener(OPEN_REMOTE_STORAGE_EVENT, openRemoteModal);
+  window.removeEventListener(CREATE_SIDEBAR_GROUP_EVENT, createFavoriteGroup);
   window.removeEventListener('pointermove', handlePointerFileDragMove, true);
   window.removeEventListener('pointerup', clearPointerFileDragIndicator, true);
   window.removeEventListener('pointercancel', clearPointerFileDragIndicator, true);

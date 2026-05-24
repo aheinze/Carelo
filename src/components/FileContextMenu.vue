@@ -349,6 +349,47 @@ function focusFirstMenuItem() {
   });
 }
 
+function focusFirstToolsMenuItem() {
+  nextTick(() => {
+    toolsMenuRef.value?.querySelector('.context-menu-item:not(:disabled)')?.focus?.({ preventScroll: true });
+  });
+}
+
+function activeMenuRoot() {
+  if (toolsSubmenuOpen.value && toolsMenuRef.value?.contains(document.activeElement)) {
+    return toolsMenuRef.value;
+  }
+
+  return menuRef.value;
+}
+
+function keyboardMenuItems(root = activeMenuRoot()) {
+  return Array.from(root?.querySelectorAll('.context-menu-item:not(:disabled)') || []);
+}
+
+function focusMenuItemAt(index, root = activeMenuRoot()) {
+  const items = keyboardMenuItems(root);
+
+  if (items.length === 0) {
+    return;
+  }
+
+  const nextIndex = (index + items.length) % items.length;
+  items[nextIndex]?.focus?.({ preventScroll: true });
+}
+
+function focusRelativeMenuItem(delta) {
+  const root = activeMenuRoot();
+  const items = keyboardMenuItems(root);
+
+  if (items.length === 0) {
+    return;
+  }
+
+  const currentIndex = items.indexOf(document.activeElement);
+  focusMenuItemAt(currentIndex < 0 ? (delta < 0 ? items.length - 1 : 0) : currentIndex + delta, root);
+}
+
 function activateFirstFilteredItem() {
   const item = firstEnabledFilteredItem.value;
 
@@ -389,6 +430,7 @@ function handleMenuItemClick(item) {
 
   if (item.type === 'submenu') {
     openToolsSubmenu();
+    focusFirstToolsMenuItem();
     return;
   }
 
@@ -402,6 +444,7 @@ function handleMenuItemRight(event, item) {
 
   event.preventDefault();
   openToolsSubmenu();
+  focusFirstToolsMenuItem();
 }
 
 function updateToolsMenuPosition() {
@@ -468,6 +511,37 @@ function handleKeydown(event) {
     }
 
     emit('close');
+    return;
+  }
+
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    focusRelativeMenuItem(1);
+    return;
+  }
+
+  if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    focusRelativeMenuItem(-1);
+    return;
+  }
+
+  if (event.key === 'Home') {
+    event.preventDefault();
+    focusMenuItemAt(0);
+    return;
+  }
+
+  if (event.key === 'End') {
+    event.preventDefault();
+    focusMenuItemAt(-1);
+    return;
+  }
+
+  if (event.key === 'ArrowLeft' && toolsSubmenuOpen.value) {
+    event.preventDefault();
+    toolsSubmenuOpen.value = false;
+    toolsItemRef.value?.focus?.({ preventScroll: true });
   }
 }
 
@@ -525,8 +599,8 @@ onUnmounted(() => {
           spellcheck="false"
           placeholder="Filter actions..."
           aria-label="Filter context menu actions"
-          @keydown.enter.prevent="activateFirstFilteredItem"
-          @keydown.down.prevent="focusFirstMenuItem"
+          @keydown.enter.prevent.stop="activateFirstFilteredItem"
+          @keydown.down.prevent.stop="focusFirstMenuItem"
           @keydown.escape.prevent.stop="handleFilterEscape"
         />
         <button
