@@ -8,6 +8,7 @@ import {
   archiveItems,
   deleteItems,
   editFile,
+  isRemotePath,
   listOpenWithApps,
   listDirectory,
   openWithApp,
@@ -1953,21 +1954,34 @@ async function handleContextAction(action) {
 
     if (action === 'delete') {
       const deleteEntries = contextOperationEntries(menu);
+      const useTrash = store.appSettings.deleteMode === 'trash';
+
+      if (useTrash && deleteEntries.some((item) => isRemotePath(item.path))) {
+        await dialog.alert({
+          title: 'Trash Not Available',
+          message: 'Remote storage items can only be deleted permanently. Change deletion behavior to Delete permanently to continue.',
+          variant: 'warning',
+        });
+        return;
+      }
+
       const label = deleteEntries.length === 1 ? `"${deleteEntries[0].name}"` : `${deleteEntries.length} items`;
       const confirmed = store.appSettings.confirmDelete
         ? await dialog.confirm({
-            title: 'Delete Item',
-            message: `Delete ${label}?`,
-            detail: 'This cannot be undone from inside the app.',
-            confirmLabel: 'Delete',
-            variant: 'danger',
-            destructive: true,
+            title: useTrash ? 'Move to Trash' : 'Delete Item',
+            message: useTrash ? `Move ${label} to Trash?` : `Delete ${label} permanently?`,
+            detail: useTrash
+              ? 'Local items can be restored from the system Trash.'
+              : 'This cannot be undone from inside the app.',
+            confirmLabel: useTrash ? 'Move to Trash' : 'Delete',
+            variant: useTrash ? 'warning' : 'danger',
+            destructive: !useTrash,
           })
         : true;
 
       if (confirmed) {
         const touchedDirectories = parentDirectoriesForEntries(deleteEntries);
-        await deleteItems(deleteEntries.map((item) => item.path));
+        await deleteItems(deleteEntries.map((item) => item.path), store.appSettings.deleteMode);
         store.clearSelection(props.paneId);
         await refreshDirectories(touchedDirectories);
       }
@@ -2174,6 +2188,7 @@ async function handleContextAction(action) {
           :is-entry-selected="(index) => store.isEntrySelected(paneId, index)"
           :show-hidden-files="store.showHiddenFiles"
           :date-format="store.appSettings.dateFormat"
+          :alternate-row-colors="store.appSettings.alternateRowColors"
           :refresh-key="activeTab.loadVersion"
           :column-refresh-request="store.columnRefreshRequests[paneId]"
           :column-selection-reset-key="store.columnSelectionResetKeys[paneId]"

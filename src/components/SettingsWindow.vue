@@ -43,7 +43,7 @@ const sections = [
     id: 'files',
     label: 'Files',
     icon: 'folder',
-    keywords: 'files hidden default view list grid columns date format modified',
+    keywords: 'files hidden default view list grid columns date format modified zebra alternate row background',
   },
   {
     id: 'startup',
@@ -55,7 +55,7 @@ const sections = [
     id: 'safety',
     label: 'Safety',
     icon: 'shield',
-    keywords: 'safety confirm delete remove destructive',
+    keywords: 'safety confirm delete remove destructive trash permanent hard delete',
   },
   {
     id: 'tools',
@@ -89,6 +89,10 @@ const viewModes = [
   { value: 'grid', label: 'Grid', icon: 'grid' },
   { value: 'columns', label: 'Columns', icon: 'columns' },
 ];
+const deletionModes = [
+  { value: 'trash', label: 'Move to Trash', icon: 'trash' },
+  { value: 'permanent', label: 'Delete permanently', icon: 'alert' },
+];
 const toolTargets = [
   { value: 'both', label: 'Both' },
   { value: 'files', label: 'Files' },
@@ -109,9 +113,7 @@ const editorTemplates = [
 const activeSection = computed(() =>
   sections.find((section) => section.id === activeSectionId.value) || sections[0],
 );
-const dateFormatPreview = computed(() =>
-  formatDate(new Date(2026, 4, 18, 14, 30), store.appSettings.dateFormat, { includeTime: true }),
-);
+const dateFormatSample = new Date(2026, 4, 18, 14, 30);
 const updateProgressLabel = computed(() => {
   const progress = updateProgress.value;
 
@@ -199,8 +201,16 @@ function setDefaultViewMode(viewMode) {
   store.setAppSetting('defaultViewMode', viewMode);
 }
 
-function setDateFormat(event) {
-  store.setAppSetting('dateFormat', event.target.value);
+function setDeleteMode(deleteMode) {
+  store.setAppSetting('deleteMode', deleteMode);
+}
+
+function dateFormatOptionPreview(format) {
+  return formatDate(dateFormatSample, format, { includeTime: true });
+}
+
+function setDateFormat(format) {
+  store.setAppSetting('dateFormat', format);
 }
 
 function setBooleanSetting(key, event) {
@@ -593,28 +603,36 @@ onUnmounted(() => {
                     </div>
                   </div>
 
-                  <label class="setting-row">
-                    <span class="setting-copy">
+                  <div class="setting-row setting-row--stacked">
+                    <div class="setting-copy">
                       <strong>Date format</strong>
                       <span>Used in file lists, preview metadata, and file conflict dialogs.</span>
-                    </span>
-                    <span class="settings-select-group">
-                      <span>{{ dateFormatPreview }}</span>
-                      <select
-                        :value="store.appSettings.dateFormat"
-                        aria-label="Date format"
-                        @change="setDateFormat"
+                    </div>
+
+                    <div class="date-format-options" role="group" aria-label="Date format">
+                      <button
+                        v-for="option in DATE_FORMAT_OPTIONS"
+                        :key="option.value"
+                        type="button"
+                        class="date-format-option"
+                        :class="{ active: store.appSettings.dateFormat === option.value }"
+                        :aria-pressed="store.appSettings.dateFormat === option.value"
+                        @click="setDateFormat(option.value)"
                       >
-                        <option
-                          v-for="option in DATE_FORMAT_OPTIONS"
-                          :key="option.value"
-                          :value="option.value"
+                        <span class="date-format-copy">
+                          <strong>{{ option.label }}</strong>
+                          <span>{{ dateFormatOptionPreview(option.value) }}</span>
+                        </span>
+                        <span
+                          class="date-format-check"
+                          :class="{ visible: store.appSettings.dateFormat === option.value }"
+                          aria-hidden="true"
                         >
-                          {{ option.label }}
-                        </option>
-                      </select>
-                    </span>
-                  </label>
+                          <AppIcon name="check" :size="14" :stroke-width="2.1" />
+                        </span>
+                      </button>
+                    </div>
+                  </div>
 
                   <label class="setting-row setting-row--switch">
                     <span class="setting-copy">
@@ -626,6 +644,20 @@ onUnmounted(() => {
                       type="checkbox"
                       :checked="store.showHiddenFiles"
                       @change="store.setShowHiddenFiles($event.target.checked)"
+                    />
+                    <span class="settings-switch" aria-hidden="true"></span>
+                  </label>
+
+                  <label class="setting-row setting-row--switch">
+                    <span class="setting-copy">
+                      <strong>Alternate row backgrounds</strong>
+                      <span>Tint every other row in list and column view.</span>
+                    </span>
+                    <input
+                      class="switch-input"
+                      type="checkbox"
+                      :checked="store.appSettings.alternateRowColors"
+                      @change="setBooleanSetting('alternateRowColors', $event)"
                     />
                     <span class="settings-switch" aria-hidden="true"></span>
                   </label>
@@ -676,6 +708,27 @@ onUnmounted(() => {
                 </div>
 
                 <div class="settings-group">
+                  <div class="setting-row setting-row--stacked">
+                    <div class="setting-copy">
+                      <strong>Deletion behavior</strong>
+                      <span>Choose whether local deletes go to the system Trash or are removed immediately.</span>
+                    </div>
+
+                    <div class="view-segment delete-mode-segment" role="group" aria-label="Deletion behavior">
+                      <button
+                        v-for="mode in deletionModes"
+                        :key="mode.value"
+                        type="button"
+                        :class="{ active: store.appSettings.deleteMode === mode.value }"
+                        :aria-pressed="store.appSettings.deleteMode === mode.value"
+                        @click="setDeleteMode(mode.value)"
+                      >
+                        <AppIcon :name="mode.icon" :size="16" :stroke-width="1.8" />
+                        <span>{{ mode.label }}</span>
+                      </button>
+                    </div>
+                  </div>
+
                   <label class="setting-row setting-row--switch">
                     <span class="setting-copy">
                       <strong>Confirm before deleting</strong>
@@ -1469,6 +1522,17 @@ onUnmounted(() => {
   font-weight: 660;
 }
 
+.view-segment button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delete-mode-segment button {
+  min-width: 152px;
+}
+
 .view-segment button + button {
   border-left: 1px solid var(--hairline);
 }
@@ -1483,48 +1547,87 @@ onUnmounted(() => {
   color: var(--text);
 }
 
-.settings-select-group {
-  display: flex;
-  min-width: 190px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+.date-format-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(172px, 1fr));
+  gap: 8px;
 }
 
-.settings-select-group > span {
-  max-width: 150px;
-  overflow: hidden;
+.date-format-option {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 2.5%, transparent);
   color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 560;
-  text-align: right;
+  text-align: left;
+}
+
+.date-format-option:hover {
+  border-color: var(--control-border);
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+.date-format-option:focus-visible {
+  border-color: var(--accent-border);
+  box-shadow: var(--accent-focus-ring);
+  outline: 0;
+}
+
+.date-format-option.active {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px rgb(var(--accent-rgb) / 0.22);
+  color: var(--text);
+}
+
+.date-format-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.date-format-copy strong,
+.date-format-copy span {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.settings-select-group select {
-  height: 32px;
-  min-width: 150px;
-  border: 1px solid var(--input-border);
-  border-radius: 8px;
-  padding: 0 30px 0 10px;
-  background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.02)),
-    var(--input-bg);
-  box-shadow: var(--input-shadow);
-  color: var(--text);
-  font: inherit;
+.date-format-copy strong {
+  color: inherit;
   font-size: 12px;
-  font-weight: 650;
-  outline: 0;
+  font-weight: 720;
 }
 
-.settings-select-group select:focus-visible {
-  border-color: var(--accent-border);
-  box-shadow:
-    var(--accent-focus-ring),
-    var(--input-shadow);
+.date-format-copy span {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 560;
+  font-variant-numeric: tabular-nums;
+}
+
+.date-format-check {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--accent);
+  opacity: 0;
+  transform: scale(0.82);
+  transition: opacity 100ms ease, transform 100ms ease;
+}
+
+.date-format-check.visible {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .custom-tool-list {

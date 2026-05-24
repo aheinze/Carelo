@@ -178,23 +178,44 @@ pub async fn rename_item(
 #[tauri::command]
 pub async fn delete_items(
     paths: Vec<String>,
+    delete_mode: Option<DeleteMode>,
     sudo_password: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<(), FsError> {
+    let delete_mode = delete_mode.unwrap_or_default();
     let mut local_paths = Vec::new();
+    let mut remote_paths = Vec::new();
 
     for path in paths {
         if archive::is_archive_uri(&path) {
             return Err(archive_read_only_error(&path));
         } else if let Some(remote_path) = parse_remote_path(&path) {
-            delete_remote_item(&remotes, remote_path).await?;
+            remote_paths.push((path, remote_path));
         } else {
             local_paths.push(path);
         }
     }
 
+    if delete_mode == DeleteMode::Trash {
+        if let Some((path, _)) = remote_paths.first() {
+            return Err(FsError::new(
+                "trash_unsupported_remote",
+                "Moving remote storage items to Trash is not supported. Change deletion behavior to delete permanently.",
+                Some(path.clone()),
+            ));
+        }
+    }
+
+    for (_, remote_path) in remote_paths {
+        delete_remote_item(&remotes, remote_path).await?;
+    }
+
     if local_paths.is_empty() {
         return Ok(());
+    }
+
+    if delete_mode == DeleteMode::Trash {
+        return run_local(move |_| move_local_paths_to_trash(local_paths)).await;
     }
 
     let sudo_paths = local_paths.clone();
@@ -216,6 +237,30 @@ pub async fn delete_items(
         },
     )
     .await
+}
+
+fn move_local_paths_to_trash(paths: Vec<String>) -> FsResult<()> {
+    for path in paths {
+        let path = expand_local_path(&path)?;
+
+        if path.as_os_str().is_empty() || path == Path::new("/") {
+            return Err(FsError::new(
+                "unsafe_delete_target",
+                "Refusing to move the root directory to Trash.",
+                Some(path.to_string_lossy().into_owned()),
+            ));
+        }
+
+        trash::delete(&path).map_err(|error| {
+            FsError::new(
+                "trash_delete_failed",
+                format!("Unable to move item to Trash: {error}"),
+                Some(path.to_string_lossy().into_owned()),
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]

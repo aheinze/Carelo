@@ -107,6 +107,10 @@ const props = defineProps({
     type: String,
     default: 'system',
   },
+  alternateRowColors: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 const emit = defineEmits([
@@ -174,6 +178,7 @@ const baseColumn = computed(() => ({
 
 const columns = computed(() => [baseColumn.value, ...columnTrail.value]);
 const parentDirectory = computed(() => parentPathForDirectory(props.directoryKey));
+const listStripeOffset = computed(() => (parentDirectory.value ? 1 : 0));
 const materializedColumns = computed(() =>
   columns.value.map((column) => ({
     ...column,
@@ -1818,6 +1823,7 @@ watch(
               type="button"
               class="file-column-row"
               :class="{
+                'file-column-row--striped': alternateRowColors && item.index % 2 === 1,
                 'file-column-row--selected': columnSelectionClass(column, columnIndex, item.index),
                 'file-column-row--directory': item.entry.kind === 'directory',
                 'file-column-row--archive': isArchiveEntry(item.entry),
@@ -1967,7 +1973,7 @@ watch(
         <div
           v-for="item in virtualListItems"
           :key="item.entry.path"
-          v-memo="[item.entry.path, item.entry.name, item.entry.size, item.entry.modifiedAt, isEntrySelected(item.index), entryDropPath === item.entry.path, dateFormat]"
+          v-memo="[item.index, item.entry.path, item.entry.name, item.entry.size, item.entry.modifiedAt, isEntrySelected(item.index), entryDropPath === item.entry.path, dateFormat, alternateRowColors, listStripeOffset]"
           class="file-list-item"
           :class="{ 'file-drop-target': entryDropPath === item.entry.path }"
           :data-file-index="item.index"
@@ -1988,6 +1994,7 @@ watch(
             :entry="item.entry"
             :selected="isEntrySelected(item.index)"
             :date-format="dateFormat"
+            :striped="alternateRowColors && (item.index + listStripeOffset) % 2 === 1"
             variant="list"
             draggable
             @click="$emit('select', { index: item.index, event: $event })"
@@ -2449,6 +2456,10 @@ watch(
 
 .file-column-row--directory {
   font-weight: 700;
+}
+
+.file-column-row--striped {
+  background: color-mix(in srgb, var(--text) 3.2%, transparent);
 }
 
 .file-column-row:hover {

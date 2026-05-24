@@ -49,6 +49,7 @@ const SORT_DIRECTIONS = ['asc', 'desc'];
 const VIEW_MODES = ['list', 'grid', 'columns'];
 const APPEARANCE_MODES = ['system', 'light', 'dark'];
 const CUSTOM_TOOL_TARGETS = ['both', 'files', 'folders'];
+const DELETE_MODES = ['trash', 'permanent'];
 const DEFAULT_FAVORITE_GROUP_ID = 'favorites';
 const NAV_HISTORY_LIMIT = 80;
 const REMOTE_HEALTH_ACTIVE_REFRESH_INTERVAL_MS = 60_000;
@@ -66,9 +67,11 @@ const DEFAULT_APP_SETTINGS = Object.freeze({
   defaultViewMode: 'list',
   dateFormat: 'system',
   showHiddenFiles: false,
+  alternateRowColors: false,
   restoreSession: true,
   restoreTerminalPanel: false,
   confirmDelete: true,
+  deleteMode: 'trash',
   terminalStartsInActiveFolder: true,
   editorCommand: '',
   customTools: [],
@@ -96,6 +99,10 @@ function normalizeAppearanceMode(mode) {
 
 function normalizeCustomToolTarget(target) {
   return CUSTOM_TOOL_TARGETS.includes(target) ? target : 'both';
+}
+
+function normalizeDeleteMode(mode) {
+  return DELETE_MODES.includes(mode) ? mode : DEFAULT_APP_SETTINGS.deleteMode;
 }
 
 function normalizeCustomToolExtensions(extensions) {
@@ -160,9 +167,11 @@ function normalizeAppSettings(settings = {}) {
     defaultViewMode: normalizeViewMode(value.defaultViewMode),
     dateFormat: normalizeDateFormat(value.dateFormat),
     showHiddenFiles: value.showHiddenFiles === true,
+    alternateRowColors: value.alternateRowColors === true,
     restoreSession: value.restoreSession !== false,
     restoreTerminalPanel: value.restoreTerminalPanel === true,
     confirmDelete: value.confirmDelete !== false,
+    deleteMode: normalizeDeleteMode(value.deleteMode),
     terminalStartsInActiveFolder: value.terminalStartsInActiveFolder !== false,
     editorCommand: normalizeEditorCommand(value.editorCommand),
     customTools: normalizeCustomTools(value.customTools),

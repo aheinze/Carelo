@@ -24,6 +24,10 @@ const props = defineProps({
     type: String,
     default: 'system',
   },
+  striped: {
+    type: Boolean,
+    default: false,
+  },
   draggable: {
     type: Boolean,
     default: false,
@@ -209,6 +213,7 @@ onBeforeUnmount(stopThumbnailObserver);
     type="button"
     class="file-row"
     :class="{
+      'file-row--striped': striped,
       'file-row--selected': selected,
       'file-row--directory': entry.kind === 'directory',
       'file-row--archive': isArchiveEntry(entry),
@@ -256,6 +261,10 @@ onBeforeUnmount(stopThumbnailObserver);
   text-align: left;
   font-size: 14px;
   transition: background 80ms ease;
+}
+
+.file-row--striped {
+  background: color-mix(in srgb, var(--text) 3.2%, transparent);
 }
 
 .file-row:hover {

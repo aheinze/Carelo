@@ -20,6 +20,7 @@ function bridgeUnavailableError() {
 const REMOTE_PREVIEW_CACHE_TTL_MS = 60_000;
 const REMOTE_PREVIEW_CACHE_MAX_ENTRIES = 32;
 const REMOTE_MEDIA_PREVIEW_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const DELETE_MODES = new Set(['trash', 'permanent']);
 const remotePreviewCache = new Map();
 
 function remotePreviewCacheKey(kind, path, maxBytes) {
@@ -163,6 +164,10 @@ function includesRemotePath(value) {
 
 function operationPath(args = {}, error = null) {
   return error?.path || args.path || args.from || args.to || args.paths?.[0] || args.items?.[0]?.from || '';
+}
+
+function normalizeDeleteMode(mode) {
+  return DELETE_MODES.has(mode) ? mode : 'trash';
 }
 
 async function promptSudoPassword(command, args, error, retry = false) {
@@ -393,8 +398,10 @@ export async function renameItem(from, to) {
   return invokeCommand('rename_item', { from, to }, { sudo: true });
 }
 
-export async function deleteItems(paths) {
-  return invokeCommand('delete_items', { paths }, { sudo: true });
+export async function deleteItems(paths, deleteMode = 'trash') {
+  const mode = normalizeDeleteMode(deleteMode);
+
+  return invokeCommand('delete_items', { paths, deleteMode: mode }, { sudo: mode === 'permanent' });
 }
 
 export async function copyItems(items, jobId = null) {

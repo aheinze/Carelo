@@ -3,7 +3,7 @@ import { computed } from 'vue';
 import AppIcon from './AppIcon.vue';
 import SidebarSelector from './SidebarSelector.vue';
 import WorkIndicator from './WorkIndicator.vue';
-import { createFolder, deleteItems } from '../composables/useFileOperations';
+import { createFolder, deleteItems, isRemotePath } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveDisplayName, isArchivePath } from '../utils/archivePaths';
@@ -126,14 +126,28 @@ async function deleteSelection() {
     return;
   }
 
+  const useTrash = store.appSettings.deleteMode === 'trash';
+
+  if (useTrash && entries.some((entry) => isRemotePath(entry.path))) {
+    await dialog.alert({
+      title: 'Trash Not Available',
+      message: 'Remote storage items can only be deleted permanently. Change deletion behavior to Delete permanently to continue.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  const label = entries.length === 1 ? `"${entries[0].name}"` : `${entries.length} selected items`;
   const confirmed = store.appSettings.confirmDelete
     ? await dialog.confirm({
-        title: entries.length === 1 ? 'Delete Item' : 'Delete Items',
-        message: entries.length === 1 ? `Delete "${entries[0].name}"?` : `Delete ${entries.length} selected items?`,
-        detail: 'This cannot be undone from inside the app.',
-        confirmLabel: 'Delete',
-        variant: 'danger',
-        destructive: true,
+        title: useTrash ? 'Move to Trash' : (entries.length === 1 ? 'Delete Item' : 'Delete Items'),
+        message: useTrash ? `Move ${label} to Trash?` : `Delete ${label} permanently?`,
+        detail: useTrash
+          ? 'Local items can be restored from the system Trash.'
+          : 'This cannot be undone from inside the app.',
+        confirmLabel: useTrash ? 'Move to Trash' : 'Delete',
+        variant: useTrash ? 'warning' : 'danger',
+        destructive: !useTrash,
       })
     : true;
 
@@ -144,7 +158,7 @@ async function deleteSelection() {
   const touchedDirectories = [...new Set(
     entries.map((entry) => store.parentDirectoryFor(entry.path)).filter(Boolean),
   )];
-  await deleteItems(entries.map((entry) => entry.path));
+  await deleteItems(entries.map((entry) => entry.path), store.appSettings.deleteMode);
   await Promise.all(touchedDirectories.map((path) => store.reloadDirectoryInPanes(path)));
 }
 </script>

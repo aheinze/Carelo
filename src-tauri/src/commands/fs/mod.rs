@@ -55,6 +55,14 @@ pub struct TransferItem {
     pub symlink_mode: operations::SymlinkMode,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum DeleteMode {
+    #[default]
+    Permanent,
+    Trash,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileSearchOptions {
