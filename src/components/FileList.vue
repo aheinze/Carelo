@@ -1963,10 +1963,9 @@ watch(
           <span>Name</span>
           <AppIcon
             v-if="sortKey === 'name'"
-            name="chevron-down"
+            :name="sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'"
             :size="12"
             :stroke-width="2.1"
-            :class="{ 'sort-icon--asc': sortDirection === 'asc' }"
           />
         </button>
         <span role="columnheader"></span>
@@ -1982,10 +1981,9 @@ watch(
           <span>Size</span>
           <AppIcon
             v-if="sortKey === 'size'"
-            name="chevron-down"
+            :name="sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'"
             :size="12"
             :stroke-width="2.1"
-            :class="{ 'sort-icon--asc': sortDirection === 'asc' }"
           />
         </button>
         <button
@@ -2000,10 +1998,9 @@ watch(
           <span>Modified</span>
           <AppIcon
             v-if="sortKey === 'modifiedAt'"
-            name="chevron-down"
+            :name="sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'"
             :size="12"
             :stroke-width="2.1"
-            :class="{ 'sort-icon--asc': sortDirection === 'asc' }"
           />
         </button>
       </div>
@@ -2181,10 +2178,6 @@ watch(
 
 .file-list-heading--active {
   color: var(--text-muted);
-}
-
-.sort-icon--asc {
-  transform: rotate(180deg);
 }
 
 .file-list {

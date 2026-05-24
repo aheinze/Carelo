@@ -273,6 +273,24 @@ defineProps({
       <path d="m6 9 6 6 6-6" />
     </template>
 
+    <template v-else-if="name === 'arrow-up'">
+      <path d="M12 19V5" />
+      <path d="m6 11 6-6 6 6" />
+    </template>
+
+    <template v-else-if="name === 'arrow-down'">
+      <path d="M12 5v14" />
+      <path d="m6 13 6 6 6-6" />
+    </template>
+
+    <template v-else-if="name === 'sort'">
+      <path d="M6 7h11" />
+      <path d="M6 12h8" />
+      <path d="M6 17h5" />
+      <path d="m17 13 3 3 3-3" />
+      <path d="M20 8v8" />
+    </template>
+
     <template v-else-if="name === 'check'">
       <path d="m5 12.4 4.2 4.2L19 6.8" />
     </template>

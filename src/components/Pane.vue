@@ -226,6 +226,27 @@ const summaryParts = computed(() => {
 const sortDirectionLabel = computed(() =>
   activeTab.value?.sortDirection === 'asc' ? 'Ascending' : 'Descending',
 );
+const sortOptions = [
+  { value: 'name', label: 'Name' },
+  { value: 'extension', label: 'Extension' },
+  { value: 'size', label: 'Size' },
+  { value: 'modifiedAt', label: 'Modified' },
+  { value: 'none', label: 'Unsorted' },
+];
+const selectedSortLabel = computed(() =>
+  sortOptions.find((option) => option.value === activeTab.value?.sortKey)?.label || sortOptions[0].label,
+);
+const sortDirectionDisabled = computed(() => activeTab.value?.sortKey === 'none');
+const sortDirectionIcon = computed(() =>
+  activeTab.value?.sortDirection === 'asc' ? 'arrow-up' : 'arrow-down',
+);
+const sortDirectionToggleLabel = computed(() => {
+  if (sortDirectionDisabled.value) {
+    return 'Sort direction unavailable while unsorted';
+  }
+
+  return `Toggle sort direction, currently ${sortDirectionLabel.value.toLowerCase()}`;
+});
 const contextMenu = ref(null);
 const tabContextMenu = ref(null);
 const archiveDialog = ref({
@@ -622,6 +643,10 @@ function setSortKey(event) {
 }
 
 function toggleSortDirection() {
+  if (sortDirectionDisabled.value) {
+    return;
+  }
+
   store.togglePaneSortDirection(props.paneId);
 }
 
@@ -2138,27 +2163,31 @@ async function handleContextAction(action) {
               <div class="sort-combo" role="group" aria-label="Sort options">
                 <label class="sort-control">
                   <span class="visually-hidden">Sort by</span>
+                  <AppIcon class="sort-control-icon" name="sort" :size="13" :stroke-width="1.9" />
+                  <span class="sort-control-measure" aria-hidden="true">{{ selectedSortLabel }}</span>
                   <select :value="activeTab.sortKey" @change.stop="setSortKey" @keydown.stop>
-                    <option value="name">Name</option>
-                    <option value="extension">Extension</option>
-                    <option value="size">Size</option>
-                    <option value="modifiedAt">Modified</option>
-                    <option value="none">Unsorted</option>
+                    <option
+                      v-for="option in sortOptions"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
                   </select>
                 </label>
                 <button
                   type="button"
                   class="sort-direction"
-                  :aria-label="`Sort ${sortDirectionLabel.toLowerCase()}`"
-                  :title="sortDirectionLabel"
+                  :aria-label="sortDirectionToggleLabel"
+                  :disabled="sortDirectionDisabled"
+                  :title="sortDirectionDisabled ? 'Unsorted' : sortDirectionLabel"
                   @click.stop="toggleSortDirection"
                   @keydown.stop
                 >
                   <AppIcon
-                    name="chevron-down"
-                    :size="12"
-                    :stroke-width="2.1"
-                    :class="{ 'sort-direction-icon--asc': activeTab.sortDirection === 'asc' }"
+                    :name="sortDirectionIcon"
+                    :size="13"
+                    :stroke-width="2"
                   />
                 </button>
               </div>
@@ -2717,16 +2746,30 @@ async function handleContextAction(action) {
 
 .sort-combo {
   display: inline-flex;
-  height: 24px;
+  height: 28px;
   min-width: 0;
   align-items: center;
   overflow: hidden;
-  border: 1px solid var(--input-border);
-  border-radius: 6px;
-  background: var(--input-bg);
-  box-shadow: var(--input-shadow);
+  border: 1px solid color-mix(in srgb, var(--input-border) 78%, transparent);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.045), rgb(255 255 255 / 0.015)),
+    color-mix(in srgb, var(--input-bg) 86%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.045),
+    var(--input-shadow);
   color: var(--icon);
-  transition: border-color 140ms ease, box-shadow 140ms ease;
+  transition:
+    background 120ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.sort-combo:hover {
+  border-color: var(--input-border);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.065), rgb(255 255 255 / 0.018)),
+    color-mix(in srgb, var(--input-bg) 76%, transparent);
 }
 
 .sort-combo:focus-within {
@@ -2738,25 +2781,49 @@ async function handleContextAction(action) {
 
 .sort-control {
   position: relative;
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-areas: "control";
   height: 100%;
   min-width: 0;
   align-items: center;
+  color: var(--icon);
+}
+
+.sort-control-icon {
+  grid-area: control;
+  position: absolute;
+  left: 8px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.sort-control-measure {
+  grid-area: control;
+  min-width: 0;
+  padding: 0 10px 0 28px;
+  color: transparent;
+  font: inherit;
+  font-weight: 650;
+  pointer-events: none;
+  visibility: hidden;
+  white-space: nowrap;
 }
 
 .sort-control select {
   -webkit-appearance: none;
   appearance: none;
-  width: 96px;
+  grid-area: control;
+  width: 100%;
   height: 100%;
   min-width: 0;
   border: 0;
   border-radius: 0;
-  padding: 0 7px;
+  padding: 0 10px 0 28px;
   background: transparent;
   box-shadow: none;
   color: var(--text-muted);
   font: inherit;
+  font-weight: 650;
   cursor: pointer;
   outline: 0;
   transition: color 100ms ease;
@@ -2772,11 +2839,11 @@ async function handleContextAction(action) {
 
 .sort-direction {
   display: inline-grid;
-  width: 24px;
+  width: 29px;
   height: 100%;
   place-items: center;
   border: 0;
-  border-left: 1px solid var(--input-border);
+  border-left: 1px solid color-mix(in srgb, var(--input-border) 74%, transparent);
   border-radius: 0;
   background: transparent;
   color: var(--icon);
@@ -2791,12 +2858,23 @@ async function handleContextAction(action) {
   color: var(--text-muted);
 }
 
-.sort-direction:focus-visible {
-  outline: 0;
+.sort-direction:active {
+  background: var(--btn-active-bg);
+  color: var(--text);
 }
 
-.sort-direction :deep(.sort-direction-icon--asc) {
-  transform: rotate(180deg);
+.sort-direction:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+.sort-direction:disabled:hover {
+  background: transparent;
+  color: var(--icon);
+}
+
+.sort-direction:focus-visible {
+  outline: 0;
 }
 
 
