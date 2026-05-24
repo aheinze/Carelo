@@ -18,6 +18,7 @@ import {
 } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import {
+  cleanPath,
   dropEffectFromEvent,
   forcedTransferModeFromEvent,
   useFileTransferGuards,
@@ -782,8 +783,13 @@ function scheduleFileDragClear() {
 
 function writeDragPayload(event, entries) {
   const requestedMode = forcedTransferModeFromEvent(event);
+  cancelFileDragClear();
+  store.startFileDrag(props.paneId, entries, requestedMode);
+
   const payload = {
+    id: store.dragOperation?.id || null,
     sourcePaneId: props.paneId,
+    requestedMode,
     entries: entries.map((entry) => ({
       name: entry.name,
       path: entry.path,
@@ -791,9 +797,6 @@ function writeDragPayload(event, entries) {
       isSymlink: entry.isSymlink,
     })),
   };
-
-  cancelFileDragClear();
-  store.startFileDrag(props.paneId, entries, requestedMode);
 
   if (!event.dataTransfer) {
     return;
@@ -825,6 +828,10 @@ function closestFromElements(elements, selector) {
 }
 
 function pointerElements(event) {
+  if (!isPointerInsideViewport(event)) {
+    return [];
+  }
+
   if (typeof document.elementsFromPoint === 'function') {
     return document.elementsFromPoint(event.clientX, event.clientY);
   }
@@ -834,6 +841,17 @@ function pointerElements(event) {
 
 function hasPointerCoordinates(event) {
   return typeof event?.clientX === 'number' && typeof event?.clientY === 'number';
+}
+
+function isPointerInsideViewport(event) {
+  if (!hasPointerCoordinates(event) || typeof window === 'undefined') {
+    return false;
+  }
+
+  return event.clientX >= 0 &&
+    event.clientY >= 0 &&
+    event.clientX <= window.innerWidth &&
+    event.clientY <= window.innerHeight;
 }
 
 function pointerFavoriteDrop(elements, event) {
@@ -897,6 +915,28 @@ function pointerPaneDrop(elements) {
   };
 }
 
+function isSameDirectoryTransfer(dragOperation, targetDirectory) {
+  if (!dragOperation?.entries?.length || !targetDirectory) {
+    return false;
+  }
+
+  const targetPath = cleanPath(targetDirectory);
+
+  return dragOperation.entries.every((entry) =>
+    cleanPath(store.parentDirectoryFor(entry.path)) === targetPath,
+  );
+}
+
+function shouldTransferToPaneDrop(dragOperation, paneDrop, event = null) {
+  if (!dragOperation?.entries?.length || !paneDrop?.targetPaneId || !paneDrop?.targetDirectory) {
+    return false;
+  }
+
+  const requestedMode = forcedTransferModeFromEvent(event) || dragOperation.requestedMode;
+
+  return requestedMode === 'copy' || !isSameDirectoryTransfer(dragOperation, paneDrop.targetDirectory);
+}
+
 function paneDropFromEvent(event) {
   if (hasPointerCoordinates(event)) {
     const paneDrop = pointerPaneDrop(pointerElements(event));
@@ -933,8 +973,18 @@ async function transferEntriesToPointerDrop(event, dragOperation, paneDrop) {
     return false;
   }
 
+  if (!shouldTransferToPaneDrop(dragOperation, paneDrop, event)) {
+    return false;
+  }
+
+  if (!store.claimFileDrop(dragOperation.id)) {
+    return false;
+  }
+
   const payload = {
+    id: dragOperation.id,
     sourcePaneId: dragOperation.sourcePaneId,
+    requestedMode: dragOperation.requestedMode,
     entries: dragOperation.entries,
   };
 
@@ -979,6 +1029,10 @@ async function finishPointerFileDrop(event, state) {
   const favoriteDrop = pointerFavoriteDrop(elements, event);
 
   if (favoriteDrop) {
+    if (!store.claimFileDrop(state.id)) {
+      return;
+    }
+
     const directories = state.entries.filter((entry) =>
       entry.kind === 'directory' && !isArchivePath(entry.path),
     );
@@ -1073,6 +1127,7 @@ function handleFilePointerDragStart(payload) {
   cleanupPointerDrag();
 
   pointerDrag = {
+    id: null,
     pointerId: event.pointerId,
     sourcePaneId: props.paneId,
     entries: [],
@@ -1106,6 +1161,7 @@ function handleFilePointerDragStart(payload) {
         pointerDrag.entries,
         forcedTransferModeFromEvent(moveEvent),
       );
+      pointerDrag.id = store.dragOperation?.id || null;
       updateDragGhost(moveEvent, pointerDrag.entries);
       document.body.classList.add('is-file-pointer-dragging');
     }
@@ -1250,20 +1306,18 @@ function handlePaneFileDragOver(event) {
     return;
   }
 
-  store.markFileDragTarget(paneDrop);
+  if (
+    store.dragOperation?.entries?.length &&
+    !shouldTransferToPaneDrop(store.dragOperation, paneDrop, event)
+  ) {
+    return;
+  }
+
   event.preventDefault();
 
   if (event.dataTransfer) {
     event.dataTransfer.dropEffect = dropEffectFromEvent(event);
   }
-}
-
-function handlePaneFileDragLeave(event) {
-  if (!isFileTransferDragEvent(event) || event.currentTarget.contains(event.relatedTarget)) {
-    return;
-  }
-
-  store.clearFileDragTarget();
 }
 
 function handlePaneFileDrop(event) {
@@ -1286,19 +1340,40 @@ function handlePaneFileDrop(event) {
 function handleFileDragEnd(event) {
   const dragOperation = store.dragOperation?.entries?.length
     ? {
+        id: store.dragOperation.id,
         sourcePaneId: store.dragOperation.sourcePaneId,
+        requestedMode: store.dragOperation.requestedMode,
         entries: store.dragOperation.entries,
       }
     : null;
-  const paneDrop = dragOperation && hasPointerCoordinates(event)
-    ? pointerPaneDrop(pointerElements(event))
+  const elements = dragOperation && hasPointerCoordinates(event)
+    ? pointerElements(event)
+    : [];
+  const favoriteDrop = elements.length > 0
+    ? pointerFavoriteDrop(elements, event)
     : null;
-  const recentDropTarget = paneDrop ? store.recentFileDragTarget() : null;
-  const isRecentInternalDrop = recentDropTarget
-    && recentDropTarget.targetPaneId === paneDrop.targetPaneId
-    && recentDropTarget.targetDirectory === paneDrop.targetDirectory;
 
-  if (dragOperation && paneDrop && isRecentInternalDrop) {
+  if (dragOperation && favoriteDrop) {
+    finishPointerFileDrop(event, dragOperation)
+      .catch(async (error) => {
+        console.error(error);
+        await dialog.alert({
+          title: 'Drag and Drop Failed',
+          message: error?.message || 'The dragged items could not be dropped there.',
+          variant: 'warning',
+        });
+      })
+      .finally(() => {
+        clearFileDragNow();
+      });
+    return;
+  }
+
+  const paneDrop = dragOperation && hasPointerCoordinates(event)
+    ? pointerPaneDrop(elements)
+    : null;
+
+  if (shouldTransferToPaneDrop(dragOperation, paneDrop, event)) {
     transferEntriesToPointerDrop(event, dragOperation, paneDrop);
     return;
   }
@@ -1314,6 +1389,15 @@ async function handleFileDrop(targetEntry, event, currentTargetDirectory = null)
 
   if (!payload?.entries?.length || !targetDirectory) {
     clearFileDragNow();
+    return;
+  }
+
+  if (!shouldTransferToPaneDrop(payload, { targetPaneId: props.paneId, targetDirectory }, event)) {
+    clearFileDragNow();
+    return;
+  }
+
+  if (!store.claimFileDrop(payload.id)) {
     return;
   }
 
@@ -1939,7 +2023,6 @@ async function handleContextAction(action) {
     @focusin="store.setActivePane(paneId)"
     @click="store.setActivePane(paneId)"
     @dragover.capture="handlePaneFileDragOver"
-    @dragleave.capture="handlePaneFileDragLeave"
     @dragover="handlePaneFileDragOver"
     @drop="handlePaneFileDrop"
     @keydown.up.prevent.stop="store.moveSelection(paneId, -1, { extend: $event.shiftKey })"
@@ -2077,7 +2160,6 @@ async function handleContextAction(action) {
       <div class="pane-list-host">
         <FileList
           :pane-id="paneId"
-          :drag-source-pane-id="store.dragOperation?.sourcePaneId || ''"
           :entries="entries"
           :raw-entry-count="rawEntryCount"
           :search-query="activeSearchQuery"

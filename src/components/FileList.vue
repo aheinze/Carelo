@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue';
 import FileRow from './FileRow.vue';
 import { listDirectory } from '../composables/useFileOperations';
-import { dropEffectFromEvent } from '../composables/useFileTransferGuards';
+import { dropEffectFromEvent, parentPath } from '../composables/useFileTransferGuards';
 import { archiveParentPath, archiveRootPath, isArchiveEntry, isArchivePath, isBrowsableEntry } from '../utils/archivePaths';
 import { fileTypeIconKind, fileTypeIconName } from '../utils/fileTypeIcons';
 
@@ -28,10 +28,6 @@ function fileTypeClass(entry, prefix) {
 
 const props = defineProps({
   paneId: {
-    type: String,
-    default: '',
-  },
-  dragSourcePaneId: {
     type: String,
     default: '',
   },
@@ -991,6 +987,13 @@ function isSameOrChildPath(path, parentPath) {
   return child === parent || (parent !== '/' && child.startsWith(`${parent}/`));
 }
 
+function isSameParentDrop(targetDirectory, draggedPaths) {
+  const targetPath = cleanPath(targetDirectory);
+
+  return draggedPaths.length > 0 &&
+    draggedPaths.every((path) => cleanPath(parentPath(path)) === targetPath);
+}
+
 function dataTransferTypes(event) {
   return Array.from(event?.dataTransfer?.types || []);
 }
@@ -1015,14 +1018,30 @@ function isFileDragActive(event = null) {
   return props.dragging || localDraggedPaths.value.length > 0 || hasCareloFileDrag(event);
 }
 
-function isCrossPaneFileDrag() {
-  return Boolean(props.paneId && props.dragSourcePaneId && props.dragSourcePaneId !== props.paneId);
-}
-
 function fileDragElementFromEvent(event, selector) {
   const element = event.target?.closest?.(selector);
 
-  return element && event.currentTarget?.contains?.(element) ? element : null;
+  if (element && event.currentTarget?.contains?.(element)) {
+    return element;
+  }
+
+  if (
+    typeof event.clientX !== 'number' ||
+    typeof event.clientY !== 'number' ||
+    typeof document.elementsFromPoint !== 'function'
+  ) {
+    return null;
+  }
+
+  for (const candidate of document.elementsFromPoint(event.clientX, event.clientY)) {
+    const match = candidate?.closest?.(selector);
+
+    if (match && event.currentTarget?.contains?.(match)) {
+      return match;
+    }
+  }
+
+  return null;
 }
 
 function entryPathName(path) {
@@ -1095,7 +1114,8 @@ function canDropOnEntry(entry, event = null) {
   const targetPath = cleanPath(entry.path);
   const draggedPaths = activeDraggedPaths(event);
 
-  return !draggedPaths.some((path) => isSameOrChildPath(targetPath, path));
+  return !draggedPaths.some((path) => isSameOrChildPath(targetPath, path)) &&
+    !isSameParentDrop(targetPath, draggedPaths);
 }
 
 function canDropOnDirectory(directoryPath = activeColumnDirectory(), event = null) {
@@ -1106,7 +1126,8 @@ function canDropOnDirectory(directoryPath = activeColumnDirectory(), event = nul
   const targetPath = cleanPath(directoryPath);
   const draggedPaths = activeDraggedPaths(event);
 
-  return !draggedPaths.some((path) => isSameOrChildPath(targetPath, path));
+  return !draggedPaths.some((path) => isSameOrChildPath(targetPath, path)) &&
+    !isSameParentDrop(targetPath, draggedPaths);
 }
 
 function isFileRowTarget(event) {
@@ -1330,10 +1351,6 @@ function handleDelegatedDragOver(event) {
   const entryElement = fileDragElementFromEvent(event, '[data-drop-entry-path]');
 
   if (entryElement) {
-    if (!isCrossPaneFileDrag()) {
-      return;
-    }
-
     const entry = entryFromDragElement(entryElement);
     const handled = entry
       ? handleEntryDragOver(entry, event, directoryFromDragElement(entryElement))
@@ -1365,10 +1382,6 @@ function handleDelegatedDrop(event) {
   const entryElement = fileDragElementFromEvent(event, '[data-drop-entry-path]');
 
   if (entryElement) {
-    if (!isCrossPaneFileDrag()) {
-      return;
-    }
-
     const entry = entryFromDragElement(entryElement);
     const handled = entry
       ? handleEntryDrop(entry, event, directoryFromDragElement(entryElement))

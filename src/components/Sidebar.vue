@@ -174,8 +174,8 @@ function readFileDragPayload(event) {
   }
 }
 
-function draggedDirectoryEntriesFromStoreOrPayload(event) {
-  return (readFileDragPayload(event)?.entries || []).filter((entry) => entry.kind === 'directory');
+function draggedDirectoryEntriesFromStoreOrPayload(event, payload = readFileDragPayload(event)) {
+  return (payload?.entries || []).filter((entry) => entry.kind === 'directory');
 }
 
 function isPotentialFileDropEvent(event) {
@@ -234,8 +234,8 @@ function droppedTextPaths(event) {
   )];
 }
 
-async function directoryEntriesFromDrop(event) {
-  const payloadEntries = draggedDirectoryEntriesFromStoreOrPayload(event);
+async function directoryEntriesFromDrop(event, payload = readFileDragPayload(event)) {
+  const payloadEntries = draggedDirectoryEntriesFromStoreOrPayload(event, payload);
 
   if (payloadEntries.length > 0) {
     return payloadEntries;
@@ -478,6 +478,7 @@ async function handleSidebarFileDrop(event) {
 
 async function dropFavoriteAt(groupId, index, event) {
   const favoritePayload = readFavoriteDragPayload(event);
+  const filePayload = favoritePayload ? null : readFileDragPayload(event);
   const targetGroupId = groupId || DEFAULT_FAVORITE_GROUP_ID;
 
   event.preventDefault();
@@ -489,7 +490,11 @@ async function dropFavoriteAt(groupId, index, event) {
       return;
     }
 
-    const directories = await directoryEntriesFromDrop(event);
+    if (!store.claimFileDrop(filePayload?.id)) {
+      return;
+    }
+
+    const directories = await directoryEntriesFromDrop(event, filePayload);
 
     if (directories.length > 0) {
       await store.addFavoritesFromEntries(directories, index, targetGroupId);
