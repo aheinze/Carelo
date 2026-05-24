@@ -11,6 +11,13 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
+use sevenz_rust2::encoder_options::{AesEncoderOptions, Lzma2Options};
+use sevenz_rust2::{
+    Archive as SevenZArchive, ArchiveEntry as SevenZArchiveEntry,
+    ArchiveReader as SevenZArchiveReader, ArchiveWriter as SevenZArchiveWriter,
+    EncoderConfiguration as SevenZEncoderConfiguration, Error as SevenZError,
+    Password as SevenZPassword,
+};
 use tar::Archive as TarArchive;
 use tar::Builder as TarBuilder;
 use zip::read::ZipFile;
@@ -69,6 +76,7 @@ enum BrowsableArchiveFormat {
     Tar,
     TarGz,
     TarZst,
+    SevenZ,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +105,7 @@ pub enum ArchiveFormat {
     Tar,
     TarGz,
     TarZst,
+    SevenZ,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,6 +206,7 @@ pub fn list_archive_directory(path: &ArchivePath) -> FsResult<Vec<FileEntry>> {
             })?;
             list_tar_directory(path, decoder)?
         }
+        Some(BrowsableArchiveFormat::SevenZ) => list_sevenz_directory(path)?,
         None => {
             return Err(FsError::new(
                 "unsupported_archive_format",
@@ -338,6 +348,9 @@ pub fn extract_archive_entry_to(
             })?;
             extract_tar_entry_to(path, decoder, destination, overwrite)
         }
+        Some(BrowsableArchiveFormat::SevenZ) => {
+            extract_sevenz_entry_to(path, destination, overwrite)
+        }
         None => Err(FsError::new(
             "unsupported_archive_format",
             "This archive format is not supported for browsing.",
@@ -369,6 +382,8 @@ fn archive_format_for_path(path: &Path) -> Option<BrowsableArchiveFormat> {
         Some(BrowsableArchiveFormat::TarZst)
     } else if name.ends_with(".tar") {
         Some(BrowsableArchiveFormat::Tar)
+    } else if name.ends_with(".7z") {
+        Some(BrowsableArchiveFormat::SevenZ)
     } else {
         None
     }
@@ -500,6 +515,7 @@ fn archive_entry_info(path: &ArchivePath) -> FsResult<Option<ArchiveEntryInfo>> 
             })?;
             tar_entry_info(path, decoder)
         }
+        Some(BrowsableArchiveFormat::SevenZ) => sevenz_entry_info(path),
         None => Ok(None),
     }
 }
@@ -546,6 +562,22 @@ fn list_tar_directory<R: Read>(
             )
         })?;
         let Some(info) = tar_entry_to_info(entry)? else {
+            continue;
+        };
+
+        add_direct_child(&path.archive_path, &path.inner_path, info, &mut children);
+    }
+
+    Ok(children)
+}
+
+fn list_sevenz_directory(path: &ArchivePath) -> FsResult<BTreeMap<String, ArchiveChildInfo>> {
+    let archive = SevenZArchive::open(&path.archive_path)
+        .map_err(|error| sevenz_error("Unable to read 7z archive", &path.archive_path, error))?;
+    let mut children = BTreeMap::new();
+
+    for entry in &archive.files {
+        let Some(info) = sevenz_entry_to_info(entry)? else {
             continue;
         };
 
@@ -609,6 +641,37 @@ fn tar_entry_info<R: Read>(path: &ArchivePath, reader: R) -> FsResult<Option<Arc
             )
         })?;
         let Some(info) = tar_entry_to_info(entry)? else {
+            continue;
+        };
+
+        if info.path == path.inner_path {
+            return Ok(Some(info));
+        }
+
+        if is_archive_child_path(&info.path, &path.inner_path) {
+            found_directory = Some(ArchiveEntryInfo {
+                path: path.inner_path.clone(),
+                kind: FileEntryKind::Directory,
+                size: None,
+                modified_at: found_directory
+                    .as_ref()
+                    .and_then(|entry: &ArchiveEntryInfo| entry.modified_at)
+                    .or(info.modified_at),
+                is_symlink: false,
+            });
+        }
+    }
+
+    Ok(found_directory)
+}
+
+fn sevenz_entry_info(path: &ArchivePath) -> FsResult<Option<ArchiveEntryInfo>> {
+    let archive = SevenZArchive::open(&path.archive_path)
+        .map_err(|error| sevenz_error("Unable to read 7z archive", &path.archive_path, error))?;
+    let mut found_directory = None;
+
+    for entry in &archive.files {
+        let Some(info) = sevenz_entry_to_info(entry)? else {
             continue;
         };
 
@@ -714,6 +777,33 @@ fn tar_entry_to_info<R: Read>(entry: tar::Entry<'_, R>) -> FsResult<Option<Archi
     }))
 }
 
+fn sevenz_entry_to_info(entry: &SevenZArchiveEntry) -> FsResult<Option<ArchiveEntryInfo>> {
+    if entry.is_anti_item() {
+        return Ok(None);
+    }
+
+    let Some(path) = safe_sevenz_entry_path(entry)? else {
+        return Ok(None);
+    };
+    let kind = if entry.is_directory() {
+        FileEntryKind::Directory
+    } else {
+        FileEntryKind::File
+    };
+
+    Ok(Some(ArchiveEntryInfo {
+        path,
+        kind,
+        size: if kind == FileEntryKind::File {
+            Some(entry.size())
+        } else {
+            None
+        },
+        modified_at: sevenz_modified_at(entry),
+        is_symlink: false,
+    }))
+}
+
 fn safe_zip_entry_path(entry: &ZipFile<'_>) -> FsResult<Option<String>> {
     let Some(path) = entry.enclosed_name() else {
         return Err(FsError::new(
@@ -726,6 +816,22 @@ fn safe_zip_entry_path(entry: &ZipFile<'_>) -> FsResult<Option<String>> {
         return Err(FsError::new(
             "unsafe_archive_entry",
             "The zip archive contains an unsafe path.",
+            Some(entry.name().to_string()),
+        ));
+    };
+
+    if path.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(path))
+}
+
+fn safe_sevenz_entry_path(entry: &SevenZArchiveEntry) -> FsResult<Option<String>> {
+    let Some(path) = normalize_archive_inner_path(entry.name()) else {
+        return Err(FsError::new(
+            "unsafe_archive_entry",
+            "The 7z archive contains an unsafe path.",
             Some(entry.name().to_string()),
         ));
     };
@@ -928,6 +1034,48 @@ fn extract_tar_entry_to<R: Read>(
     Ok(())
 }
 
+fn extract_sevenz_entry_to(
+    path: &ArchivePath,
+    destination: &Path,
+    overwrite: bool,
+) -> FsResult<()> {
+    let mut reader = SevenZArchiveReader::open(&path.archive_path, SevenZPassword::empty())
+        .map_err(|error| sevenz_error("Unable to read 7z archive", &path.archive_path, error))?;
+    let mut pending_error = None;
+
+    let result = reader.for_each_entries(|entry, source| {
+        let step = (|| -> FsResult<()> {
+            let Some(info) = sevenz_entry_to_info_for_extract(entry)? else {
+                return Ok(());
+            };
+            let Some(relative_path) = relative_extract_path(&path.inner_path, &info.path) else {
+                return Ok(());
+            };
+
+            write_sevenz_extract_entry(source, info, destination, &relative_path, overwrite)
+        })();
+
+        if let Err(error) = step {
+            pending_error = Some(error);
+            return Err(sevenz_callback_error("7z extraction failed"));
+        }
+
+        Ok(true)
+    });
+
+    if let Some(error) = pending_error {
+        return Err(error);
+    }
+
+    result.map_err(|error| {
+        sevenz_error(
+            "Unable to extract 7z archive entry",
+            &path.archive_path,
+            error,
+        )
+    })
+}
+
 fn zip_entry_to_info_for_extract(entry: &ZipFile<'_>) -> FsResult<Option<ArchiveEntryInfo>> {
     if is_symlink_entry(entry) {
         return Err(FsError::new(
@@ -1008,6 +1156,24 @@ fn tar_entry_to_info_for_extract<R: Read>(
     }))
 }
 
+fn sevenz_entry_to_info_for_extract(
+    entry: &SevenZArchiveEntry,
+) -> FsResult<Option<ArchiveEntryInfo>> {
+    let Some(info) = sevenz_entry_to_info(entry)? else {
+        return Ok(None);
+    };
+
+    if info.is_symlink {
+        return Err(FsError::new(
+            "unsupported_archive_entry",
+            "Archive entries that create symbolic links are not supported.",
+            Some(info.path),
+        ));
+    }
+
+    Ok(Some(info))
+}
+
 fn relative_extract_path(selected_path: &str, entry_path: &str) -> Option<PathBuf> {
     if entry_path == selected_path {
         return Some(PathBuf::new());
@@ -1052,7 +1218,24 @@ fn write_tar_extract_entry<R: Read>(
     )
 }
 
-fn write_archive_entry<R: Read>(
+fn write_sevenz_extract_entry(
+    entry: &mut dyn Read,
+    info: ArchiveEntryInfo,
+    destination: &Path,
+    relative_path: &Path,
+    overwrite: bool,
+) -> FsResult<()> {
+    write_archive_entry(
+        entry,
+        info.kind,
+        destination,
+        relative_path,
+        overwrite,
+        info.size.unwrap_or(0),
+    )
+}
+
+fn write_archive_entry<R: Read + ?Sized>(
     reader: &mut R,
     kind: FileEntryKind,
     destination: &Path,
@@ -1113,6 +1296,18 @@ fn zip_modified_at(datetime: zip::DateTime) -> Option<u64> {
         u32::from(datetime.minute()),
         u32::from(datetime.second()),
     )
+}
+
+fn sevenz_modified_at(entry: &SevenZArchiveEntry) -> Option<u64> {
+    if !entry.has_last_modified_date {
+        return None;
+    }
+
+    let system_time: SystemTime = entry.last_modified_date().into();
+    system_time
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 fn unix_seconds_from_ymd_hms(
@@ -1306,6 +1501,27 @@ where
                 )?;
                 finish_tar_zst_archive(tar, &destination)?;
             }
+            ArchiveFormat::SevenZ => {
+                let archive_file = File::create(&destination).map_err(|error| {
+                    FsError::io("Unable to create 7z archive", &destination, error)
+                })?;
+                let mut sevenz = SevenZArchiveWriter::new(archive_file).map_err(|error| {
+                    sevenz_error("Unable to start 7z archive", &destination, error)
+                })?;
+                sevenz.set_content_methods(sevenz_content_methods(&options));
+                add_sources_to_sevenz_archive(
+                    &mut sevenz,
+                    &source_paths,
+                    &options,
+                    &mut visited_directories,
+                    &mut progress,
+                    &mut on_progress,
+                    &mut should_cancel,
+                )?;
+                sevenz.finish().map(|_| ()).map_err(|error| {
+                    FsError::io("Unable to finish 7z archive", &destination, error)
+                })?;
+            }
         }
 
         progress.processed_bytes = progress.total_bytes;
@@ -1338,7 +1554,7 @@ where
     if paths.is_empty() {
         return Err(FsError::new(
             "unarchive_empty_selection",
-            "Select at least one zip archive to extract.",
+            "Select at least one archive to extract.",
             None,
         ));
     }
@@ -1374,7 +1590,7 @@ where
     let mut extracted_paths = Vec::new();
 
     for archive_path in archive_paths {
-        validate_zip_source(&archive_path)?;
+        validate_extract_source(&archive_path)?;
 
         let target_directory = unique_extraction_directory(&destination_directory, &archive_path)?;
         fs::create_dir(&target_directory).map_err(|error| {
@@ -1596,7 +1812,261 @@ where
     ))
 }
 
+fn add_sources_to_sevenz_archive<F, C>(
+    sevenz: &mut SevenZArchiveWriter<File>,
+    source_paths: &[PathBuf],
+    options: &ArchiveOptions,
+    visited_directories: &mut HashSet<PathBuf>,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    should_cancel: &mut C,
+) -> FsResult<()>
+where
+    F: FnMut(ArchiveProgress),
+    C: FnMut() -> bool,
+{
+    for source_path in source_paths {
+        let Some(metadata) = archive_metadata(source_path)? else {
+            continue;
+        };
+
+        if should_flatten_single_source_directory(source_paths, options, &metadata) {
+            add_sevenz_directory_children(
+                sevenz,
+                source_path,
+                options,
+                visited_directories,
+                progress,
+                on_progress,
+                should_cancel,
+            )?;
+        } else {
+            let archive_name = archive_root_name(source_path)?;
+            add_path_to_sevenz_archive(
+                sevenz,
+                source_path,
+                Path::new(&archive_name),
+                options,
+                visited_directories,
+                progress,
+                on_progress,
+                should_cancel,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn add_sevenz_directory_children<F, C>(
+    sevenz: &mut SevenZArchiveWriter<File>,
+    directory: &Path,
+    options: &ArchiveOptions,
+    visited_directories: &mut HashSet<PathBuf>,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    should_cancel: &mut C,
+) -> FsResult<()>
+where
+    F: FnMut(ArchiveProgress),
+    C: FnMut() -> bool,
+{
+    check_cancelled(should_cancel, Some(directory))?;
+
+    let canonical = fs::canonicalize(directory)
+        .map_err(|error| FsError::io("Unable to resolve archive directory", directory, error))?;
+
+    if !visited_directories.insert(canonical) {
+        return Err(FsError::new(
+            "archive_cycle",
+            "Refusing to archive a directory cycle.",
+            Some(directory.to_string_lossy().into_owned()),
+        ));
+    }
+
+    for child in fs::read_dir(directory)
+        .map_err(|error| FsError::io("Unable to read archive directory", directory, error))?
+    {
+        let child = child.map_err(|error| {
+            FsError::io("Unable to read archive directory entry", directory, error)
+        })?;
+        add_path_to_sevenz_archive(
+            sevenz,
+            &child.path(),
+            Path::new(&child.file_name()),
+            options,
+            visited_directories,
+            progress,
+            on_progress,
+            should_cancel,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn add_path_to_sevenz_archive<F, C>(
+    sevenz: &mut SevenZArchiveWriter<File>,
+    path: &Path,
+    archive_path: &Path,
+    options: &ArchiveOptions,
+    visited_directories: &mut HashSet<PathBuf>,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    should_cancel: &mut C,
+) -> FsResult<()>
+where
+    F: FnMut(ArchiveProgress),
+    C: FnMut() -> bool,
+{
+    check_cancelled(should_cancel, Some(path))?;
+
+    let Some(metadata) = archive_metadata(path)? else {
+        return Ok(());
+    };
+
+    if metadata.is_dir() {
+        let canonical = fs::canonicalize(path)
+            .map_err(|error| FsError::io("Unable to resolve archive directory", path, error))?;
+
+        if !visited_directories.insert(canonical) {
+            return Err(FsError::new(
+                "archive_cycle",
+                "Refusing to archive a directory cycle.",
+                Some(path.to_string_lossy().into_owned()),
+            ));
+        }
+
+        let archive_name = sevenz_entry_name(archive_path)?;
+        let entry = SevenZArchiveEntry::from_path(path, archive_name);
+        sevenz
+            .push_archive_entry::<&[u8]>(entry, None)
+            .map_err(|error| sevenz_error("Unable to add directory to 7z archive", path, error))?;
+        progress.processed_entries += 1;
+        emit_progress(progress, Some(path), true, on_progress);
+
+        for child in fs::read_dir(path)
+            .map_err(|error| FsError::io("Unable to read archive directory", path, error))?
+        {
+            let child = child.map_err(|error| {
+                FsError::io("Unable to read archive directory entry", path, error)
+            })?;
+            add_path_to_sevenz_archive(
+                sevenz,
+                &child.path(),
+                &archive_path.join(child.file_name()),
+                options,
+                visited_directories,
+                progress,
+                on_progress,
+                should_cancel,
+            )?;
+        }
+
+        return Ok(());
+    }
+
+    if metadata.is_file() {
+        let archive_name = sevenz_entry_name(archive_path)?;
+        let source = File::open(path)
+            .map_err(|error| FsError::io("Unable to open archive source file", path, error))?;
+        let reader = ProgressReader {
+            inner: source,
+            current_path: path,
+            current_total_bytes: metadata.len(),
+            progress,
+            on_progress,
+            should_cancel,
+        };
+        let entry = SevenZArchiveEntry::from_path(path, archive_name);
+        sevenz
+            .push_archive_entry(entry, Some(reader))
+            .map_err(|error| sevenz_error("Unable to add file to 7z archive", path, error))?;
+        progress.processed_entries += 1;
+        emit_progress(progress, Some(path), true, on_progress);
+
+        return Ok(());
+    }
+
+    Err(FsError::new(
+        "unsupported_archive_source",
+        "Only regular files and folders can be archived.",
+        Some(path.to_string_lossy().into_owned()),
+    ))
+}
+
 fn extract_archive_to_directory<F, C>(
+    archive_path: &Path,
+    target_directory: &Path,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    should_cancel: &mut C,
+) -> FsResult<()>
+where
+    F: FnMut(ArchiveProgress),
+    C: FnMut() -> bool,
+{
+    match archive_format_for_path(archive_path) {
+        Some(BrowsableArchiveFormat::Zip) => extract_zip_archive_to_directory(
+            archive_path,
+            target_directory,
+            progress,
+            on_progress,
+            should_cancel,
+        ),
+        Some(BrowsableArchiveFormat::Tar) => {
+            let file = open_archive_file(archive_path)?;
+            extract_tar_archive_to_directory(
+                archive_path,
+                file,
+                target_directory,
+                progress,
+                on_progress,
+                should_cancel,
+            )
+        }
+        Some(BrowsableArchiveFormat::TarGz) => {
+            let file = open_archive_file(archive_path)?;
+            let decoder = GzDecoder::new(file);
+            extract_tar_archive_to_directory(
+                archive_path,
+                decoder,
+                target_directory,
+                progress,
+                on_progress,
+                should_cancel,
+            )
+        }
+        Some(BrowsableArchiveFormat::TarZst) => {
+            let file = open_archive_file(archive_path)?;
+            let decoder = zstd::stream::read::Decoder::new(file).map_err(|error| {
+                archive_io_error("Unable to read tar.zst archive", archive_path, error)
+            })?;
+            extract_tar_archive_to_directory(
+                archive_path,
+                decoder,
+                target_directory,
+                progress,
+                on_progress,
+                should_cancel,
+            )
+        }
+        Some(BrowsableArchiveFormat::SevenZ) => extract_sevenz_archive_to_directory(
+            archive_path,
+            target_directory,
+            progress,
+            on_progress,
+            should_cancel,
+        ),
+        None => Err(FsError::new(
+            "unsupported_archive_format",
+            "This archive format is not supported for extraction.",
+            Some(archive_path.to_string_lossy().into_owned()),
+        )),
+    }
+}
+
+fn extract_zip_archive_to_directory<F, C>(
     archive_path: &Path,
     target_directory: &Path,
     progress: &mut ProgressState,
@@ -1684,6 +2154,172 @@ where
     }
 
     Ok(())
+}
+
+fn extract_tar_archive_to_directory<R, F, C>(
+    archive_path: &Path,
+    reader: R,
+    target_directory: &Path,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    should_cancel: &mut C,
+) -> FsResult<()>
+where
+    R: Read,
+    F: FnMut(ArchiveProgress),
+    C: FnMut() -> bool,
+{
+    let mut archive = TarArchive::new(reader);
+
+    for entry in archive
+        .entries()
+        .map_err(|error| archive_io_error("Unable to read tar archive", archive_path, error))?
+    {
+        check_cancelled(should_cancel, Some(archive_path))?;
+
+        let mut entry = entry.map_err(|error| {
+            archive_io_error("Unable to read tar archive entry", archive_path, error)
+        })?;
+        let Some(info) = tar_entry_to_info_for_extract(&entry)? else {
+            continue;
+        };
+        let output_path = target_directory.join(&info.path);
+
+        if info.kind == FileEntryKind::Directory {
+            fs::create_dir_all(&output_path).map_err(|error| {
+                FsError::io("Unable to create extracted directory", &output_path, error)
+            })?;
+            progress.processed_entries += 1;
+            emit_progress(progress, Some(&output_path), true, on_progress);
+            continue;
+        }
+
+        if info.kind != FileEntryKind::File {
+            progress.processed_entries += 1;
+            emit_progress(progress, Some(&output_path), true, on_progress);
+            continue;
+        }
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                FsError::io("Unable to create extracted parent directory", parent, error)
+            })?;
+        }
+
+        let current_total_bytes = info.size.unwrap_or(0);
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .map_err(|error| FsError::io("Unable to create extracted file", &output_path, error))?;
+        copy_with_progress(
+            &mut entry,
+            &mut output,
+            &output_path,
+            current_total_bytes,
+            progress,
+            on_progress,
+            should_cancel,
+        )?;
+        progress.processed_entries += 1;
+        emit_progress(progress, Some(&output_path), true, on_progress);
+
+        #[cfg(unix)]
+        if let Ok(mode) = entry.header().mode() {
+            let permissions = fs::Permissions::from_mode(mode & 0o777);
+            fs::set_permissions(&output_path, permissions).map_err(|error| {
+                FsError::io(
+                    "Unable to apply extracted file permissions",
+                    &output_path,
+                    error,
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_sevenz_archive_to_directory<F, C>(
+    archive_path: &Path,
+    target_directory: &Path,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    should_cancel: &mut C,
+) -> FsResult<()>
+where
+    F: FnMut(ArchiveProgress),
+    C: FnMut() -> bool,
+{
+    let mut reader = SevenZArchiveReader::open(archive_path, SevenZPassword::empty())
+        .map_err(|error| sevenz_error("Unable to read 7z archive", archive_path, error))?;
+    let mut pending_error = None;
+
+    let result = reader.for_each_entries(|entry, source| {
+        let step = (|| -> FsResult<()> {
+            check_cancelled(should_cancel, Some(archive_path))?;
+
+            let Some(info) = sevenz_entry_to_info_for_extract(entry)? else {
+                return Ok(());
+            };
+            let output_path = target_directory.join(&info.path);
+
+            if info.kind == FileEntryKind::Directory {
+                fs::create_dir_all(&output_path).map_err(|error| {
+                    FsError::io("Unable to create extracted directory", &output_path, error)
+                })?;
+                progress.processed_entries += 1;
+                emit_progress(progress, Some(&output_path), true, on_progress);
+                return Ok(());
+            }
+
+            if info.kind != FileEntryKind::File {
+                progress.processed_entries += 1;
+                emit_progress(progress, Some(&output_path), true, on_progress);
+                return Ok(());
+            }
+
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    FsError::io("Unable to create extracted parent directory", parent, error)
+                })?;
+            }
+
+            let current_total_bytes = info.size.unwrap_or(0);
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output_path)
+                .map_err(|error| {
+                    FsError::io("Unable to create extracted file", &output_path, error)
+                })?;
+            copy_with_progress(
+                source,
+                &mut output,
+                &output_path,
+                current_total_bytes,
+                progress,
+                on_progress,
+                should_cancel,
+            )?;
+            progress.processed_entries += 1;
+            emit_progress(progress, Some(&output_path), true, on_progress);
+            Ok(())
+        })();
+
+        if let Err(error) = step {
+            pending_error = Some(error);
+            return Err(sevenz_callback_error("7z extraction failed"));
+        }
+
+        Ok(true)
+    });
+
+    if let Some(error) = pending_error {
+        return Err(error);
+    }
+
+    result.map_err(|error| sevenz_error("Unable to extract 7z archive", archive_path, error))
 }
 
 fn measure_paths<C>(
@@ -1841,39 +2477,133 @@ where
 
     for path in paths {
         check_cancelled(should_cancel, Some(path))?;
-        validate_zip_source(path)?;
-        let file = File::open(path)
-            .map_err(|error| FsError::io("Unable to open zip archive", path, error))?;
-        let mut archive = ZipArchive::new(file)
-            .map_err(|error| zip_error("Unable to read zip archive", path, error))?;
+        validate_extract_source(path)?;
 
-        for index in 0..archive.len() {
-            check_cancelled(should_cancel, Some(path))?;
-            let entry = archive
-                .by_index(index)
-                .map_err(|error| zip_error("Unable to read zip archive entry", path, error))?;
-
-            if is_symlink_entry(&entry) {
+        let archive_measure = match archive_format_for_path(path) {
+            Some(BrowsableArchiveFormat::Zip) => measure_zip_archive(path, should_cancel)?,
+            Some(BrowsableArchiveFormat::Tar) => {
+                let file = open_archive_file(path)?;
+                measure_tar_archive(path, file, should_cancel)?
+            }
+            Some(BrowsableArchiveFormat::TarGz) => {
+                let file = open_archive_file(path)?;
+                measure_tar_archive(path, GzDecoder::new(file), should_cancel)?
+            }
+            Some(BrowsableArchiveFormat::TarZst) => {
+                let file = open_archive_file(path)?;
+                let decoder = zstd::stream::read::Decoder::new(file).map_err(|error| {
+                    archive_io_error("Unable to read tar.zst archive", path, error)
+                })?;
+                measure_tar_archive(path, decoder, should_cancel)?
+            }
+            Some(BrowsableArchiveFormat::SevenZ) => measure_sevenz_archive(path, should_cancel)?,
+            None => {
                 return Err(FsError::new(
-                    "unsupported_archive_entry",
-                    "Zip entries that create symbolic links are not supported.",
+                    "unsupported_archive_format",
+                    "This archive format is not supported for extraction.",
                     Some(path.to_string_lossy().into_owned()),
                 ));
             }
+        };
+        measure.add(archive_measure);
+    }
 
-            if entry.enclosed_name().is_none() {
-                return Err(FsError::new(
-                    "unsafe_archive_entry",
-                    "The zip archive contains an unsafe path.",
-                    Some(entry.name().to_string()),
-                ));
-            }
+    Ok(measure)
+}
 
-            measure.entries += 1;
+fn measure_zip_archive<C>(path: &Path, should_cancel: &mut C) -> FsResult<ArchiveMeasure>
+where
+    C: FnMut() -> bool,
+{
+    let file =
+        File::open(path).map_err(|error| FsError::io("Unable to open zip archive", path, error))?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|error| zip_error("Unable to read zip archive", path, error))?;
+    let mut measure = ArchiveMeasure::default();
 
-            if !entry.name().ends_with('/') {
-                measure.bytes = measure.bytes.saturating_add(entry.size());
-            }
+    for index in 0..archive.len() {
+        check_cancelled(should_cancel, Some(path))?;
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| zip_error("Unable to read zip archive entry", path, error))?;
+
+        if is_symlink_entry(&entry) {
+            return Err(FsError::new(
+                "unsupported_archive_entry",
+                "Zip entries that create symbolic links are not supported.",
+                Some(path.to_string_lossy().into_owned()),
+            ));
+        }
+
+        if entry.enclosed_name().is_none() {
+            return Err(FsError::new(
+                "unsafe_archive_entry",
+                "The zip archive contains an unsafe path.",
+                Some(entry.name().to_string()),
+            ));
+        }
+
+        measure.entries += 1;
+
+        if !entry.name().ends_with('/') {
+            measure.bytes = measure.bytes.saturating_add(entry.size());
+        }
+    }
+
+    Ok(measure)
+}
+
+fn measure_tar_archive<R, C>(
+    path: &Path,
+    reader: R,
+    should_cancel: &mut C,
+) -> FsResult<ArchiveMeasure>
+where
+    R: Read,
+    C: FnMut() -> bool,
+{
+    let mut archive = TarArchive::new(reader);
+    let mut measure = ArchiveMeasure::default();
+
+    for entry in archive
+        .entries()
+        .map_err(|error| archive_io_error("Unable to read tar archive", path, error))?
+    {
+        check_cancelled(should_cancel, Some(path))?;
+        let entry = entry
+            .map_err(|error| archive_io_error("Unable to read tar archive entry", path, error))?;
+        let Some(info) = tar_entry_to_info_for_extract(&entry)? else {
+            continue;
+        };
+
+        measure.entries += 1;
+
+        if info.kind == FileEntryKind::File {
+            measure.bytes = measure.bytes.saturating_add(info.size.unwrap_or(0));
+        }
+    }
+
+    Ok(measure)
+}
+
+fn measure_sevenz_archive<C>(path: &Path, should_cancel: &mut C) -> FsResult<ArchiveMeasure>
+where
+    C: FnMut() -> bool,
+{
+    let archive = SevenZArchive::open(path)
+        .map_err(|error| sevenz_error("Unable to read 7z archive", path, error))?;
+    let mut measure = ArchiveMeasure::default();
+
+    for entry in &archive.files {
+        check_cancelled(should_cancel, Some(path))?;
+        let Some(info) = sevenz_entry_to_info_for_extract(entry)? else {
+            continue;
+        };
+
+        measure.entries += 1;
+
+        if info.kind == FileEntryKind::File {
+            measure.bytes = measure.bytes.saturating_add(info.size.unwrap_or(0));
         }
     }
 
@@ -2290,10 +3020,12 @@ fn normalize_archive_options(options: &ArchiveOptions) -> ArchiveOptions {
 }
 
 fn validate_archive_options(options: &ArchiveOptions, destination: &Path) -> FsResult<()> {
-    if options.password.is_some() && options.format != ArchiveFormat::Zip {
+    if options.password.is_some()
+        && !matches!(options.format, ArchiveFormat::Zip | ArchiveFormat::SevenZ)
+    {
         return Err(FsError::new(
             "archive_password_unsupported",
-            "Password protection is currently supported for zip archives only.",
+            "Password protection is currently supported for ZIP and 7Z archives only.",
             Some(destination.to_string_lossy().into_owned()),
         ));
     }
@@ -2327,6 +3059,7 @@ fn archive_format_extension(format: ArchiveFormat) -> &'static str {
         ArchiveFormat::Tar => ".tar",
         ArchiveFormat::TarGz => ".tar.gz",
         ArchiveFormat::TarZst => ".tar.zst",
+        ArchiveFormat::SevenZ => ".7z",
     }
 }
 
@@ -2336,6 +3069,7 @@ fn archive_format_label(format: ArchiveFormat) -> &'static str {
         ArchiveFormat::Tar => "TAR",
         ArchiveFormat::TarGz => "TAR.GZ",
         ArchiveFormat::TarZst => "TAR.ZST",
+        ArchiveFormat::SevenZ => "7Z",
     }
 }
 
@@ -2361,6 +3095,28 @@ fn zstd_compression_level(level: ArchiveCompressionLevel) -> i32 {
         ArchiveCompressionLevel::Balanced => 6,
         ArchiveCompressionLevel::Best => 19,
     }
+}
+
+fn sevenz_compression_level(level: ArchiveCompressionLevel) -> u32 {
+    match level {
+        ArchiveCompressionLevel::Fast => 1,
+        ArchiveCompressionLevel::Balanced => 6,
+        ArchiveCompressionLevel::Best => 9,
+    }
+}
+
+fn sevenz_content_methods(options: &ArchiveOptions) -> Vec<SevenZEncoderConfiguration> {
+    let compression: SevenZEncoderConfiguration =
+        Lzma2Options::from_level(sevenz_compression_level(options.compression_level)).into();
+
+    if let Some(password) = options.password.as_deref() {
+        return vec![
+            AesEncoderOptions::new(SevenZPassword::from(password)).into(),
+            compression,
+        ];
+    }
+
+    vec![compression]
 }
 
 fn finish_tar_archive<W: Write>(mut tar: TarBuilder<W>, destination: &Path) -> FsResult<W> {
@@ -2524,28 +3280,22 @@ fn archive_source_absolute(path: &Path, metadata: &fs::Metadata) -> FsResult<Pat
     Ok(parent_absolute.join(file_name))
 }
 
-fn validate_zip_source(path: &Path) -> FsResult<()> {
+fn validate_extract_source(path: &Path) -> FsResult<()> {
     let metadata = fs::metadata(path)
-        .map_err(|error| FsError::io("Unable to read zip archive metadata", path, error))?;
+        .map_err(|error| FsError::io("Unable to read archive metadata", path, error))?;
 
     if !metadata.is_file() {
         return Err(FsError::new(
             "invalid_archive_source",
-            "Only zip files can be extracted.",
+            "Only archive files can be extracted.",
             Some(path.to_string_lossy().into_owned()),
         ));
     }
 
-    let extension = path
-        .extension()
-        .and_then(OsStr::to_str)
-        .unwrap_or("")
-        .to_ascii_lowercase();
-
-    if extension != "zip" {
+    if archive_format_for_path(path).is_none() {
         return Err(FsError::new(
             "invalid_archive_source",
-            "Only .zip archives can be extracted.",
+            "This archive format is not supported for extraction.",
             Some(path.to_string_lossy().into_owned()),
         ));
     }
@@ -2554,10 +3304,8 @@ fn validate_zip_source(path: &Path) -> FsResult<()> {
 }
 
 fn unique_extraction_directory(parent: &Path, archive_path: &Path) -> FsResult<PathBuf> {
-    let base_name = archive_path
-        .file_stem()
-        .and_then(OsStr::to_str)
-        .map(safe_file_name)
+    let base_name = archive_base_name(archive_path)
+        .map(|name| safe_file_name(&name))
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "Archive".to_string());
 
@@ -2579,6 +3327,18 @@ fn unique_extraction_directory(parent: &Path, archive_path: &Path) -> FsResult<P
         "Unable to choose a unique extraction folder.",
         Some(parent.to_string_lossy().into_owned()),
     ))
+}
+
+fn archive_base_name(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    let lower = name.to_ascii_lowercase();
+    let extension = [
+        ".tar.zst", ".tar.gz", ".tgz", ".tzst", ".zip", ".tar", ".7z",
+    ]
+    .iter()
+    .find(|extension| lower.ends_with(**extension))?;
+
+    Some(name[..name.len().saturating_sub(extension.len())].to_string())
 }
 
 fn zip_options(
@@ -2632,6 +3392,33 @@ fn zip_entry_name(path: &Path) -> FsResult<String> {
         return Err(FsError::new(
             "invalid_archive_entry_name",
             "Unable to create a zip entry without a file name.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    Ok(parts.join("/"))
+}
+
+fn sevenz_entry_name(path: &Path) -> FsResult<String> {
+    let mut parts = Vec::new();
+
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            _ => {
+                return Err(FsError::new(
+                    "invalid_archive_entry_name",
+                    "Unable to create a safe 7z entry path.",
+                    Some(path.to_string_lossy().into_owned()),
+                ));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return Err(FsError::new(
+            "invalid_archive_entry_name",
+            "Unable to create a 7z entry without a file name.",
             Some(path.to_string_lossy().into_owned()),
         ));
     }
@@ -2730,6 +3517,33 @@ fn zip_error(action: &str, path: &Path, error: ZipError) -> FsError {
             Some(path.to_string_lossy().into_owned()),
         ),
     }
+}
+
+fn sevenz_error(action: &str, path: &Path, error: SevenZError) -> FsError {
+    let detail = error.to_string();
+
+    match error {
+        SevenZError::Io(error, _) | SevenZError::FileOpen(error, _) => {
+            archive_io_error(action, path, error)
+        }
+        SevenZError::PasswordRequired | SevenZError::MaybeBadPassword(_) => FsError::new(
+            "archive_password_required",
+            format!("{action}: a password is required for this 7z archive."),
+            Some(path.to_string_lossy().into_owned()),
+        ),
+        _ => FsError::new(
+            "archive_error",
+            format!("{action}: {detail}"),
+            Some(path.to_string_lossy().into_owned()),
+        ),
+    }
+}
+
+fn sevenz_callback_error(message: &'static str) -> SevenZError {
+    SevenZError::Io(
+        io::Error::new(io::ErrorKind::Other, message),
+        std::borrow::Cow::Borrowed(message),
+    )
 }
 
 fn archive_io_error(action: &str, path: &Path, error: io::Error) -> FsError {
@@ -2948,6 +3762,112 @@ mod tests {
     }
 
     #[test]
+    fn creates_and_extracts_sevenz_archive() {
+        let root = test_root("sevenz-round-trip");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("folder")).expect("create test directories");
+        fs::write(root.join("note.txt"), "hello").expect("write source file");
+        fs::write(root.join("folder").join("nested.txt"), "nested").expect("write nested file");
+
+        let archive_path = root.join("bundle.7z");
+        archive_items_with_options(
+            &[
+                root.join("note.txt").to_string_lossy().into_owned(),
+                root.join("folder").to_string_lossy().into_owned(),
+            ],
+            &archive_path.to_string_lossy(),
+            false,
+            &ArchiveOptions {
+                format: ArchiveFormat::SevenZ,
+                ..ArchiveOptions::default()
+            },
+        )
+        .expect("create 7z archive");
+
+        let output_root = root.join("out");
+        let extracted = unarchive_items(
+            &[archive_path.to_string_lossy().into_owned()],
+            &output_root.to_string_lossy(),
+        )
+        .expect("extract 7z archive");
+
+        let extracted_root = PathBuf::from(&extracted[0]);
+        assert_eq!(
+            fs::read_to_string(extracted_root.join("note.txt")).expect("read extracted file"),
+            "hello"
+        );
+        assert_eq!(
+            fs::read_to_string(extracted_root.join("folder").join("nested.txt"))
+                .expect("read nested extracted file"),
+            "nested"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn browses_sevenz_archive_and_copies_entries_out() {
+        let root = test_root("sevenz-browse");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("folder")).expect("create test directory");
+        fs::write(root.join("folder").join("nested.txt"), "nested").expect("write nested file");
+        fs::write(root.join("note.txt"), "hello").expect("write source file");
+
+        let archive_path = root.join("browse.7z");
+        archive_items_with_options(
+            &[
+                root.join("folder").to_string_lossy().into_owned(),
+                root.join("note.txt").to_string_lossy().into_owned(),
+            ],
+            &archive_path.to_string_lossy(),
+            false,
+            &ArchiveOptions {
+                format: ArchiveFormat::SevenZ,
+                ..ArchiveOptions::default()
+            },
+        )
+        .expect("create 7z archive");
+
+        let archive_root =
+            parse_archive_uri(&archive_root_uri(&archive_path)).expect("parse archive root uri");
+        let root_entries = list_archive_directory(&archive_root).expect("list 7z root");
+        let root_names = root_entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.kind))
+            .collect::<Vec<_>>();
+        assert!(root_names.contains(&("folder", FileEntryKind::Directory)));
+        assert!(root_names.contains(&("note.txt", FileEntryKind::File)));
+
+        let folder_path = parse_archive_uri(
+            &root_entries
+                .iter()
+                .find(|entry| entry.name == "folder")
+                .expect("find folder")
+                .path,
+        )
+        .expect("parse folder archive uri");
+        let folder_entries = list_archive_directory(&folder_path).expect("list folder in 7z");
+        assert_eq!(folder_entries.len(), 1);
+        assert_eq!(folder_entries[0].name, "nested.txt");
+        assert_eq!(folder_entries[0].kind, FileEntryKind::File);
+
+        let nested_path = parse_archive_uri(&folder_entries[0].path).expect("parse nested uri");
+        let metadata = stat_archive_entry(&nested_path).expect("stat nested file");
+        assert_eq!(metadata.kind, FileEntryKind::File);
+        assert_eq!(metadata.size, Some(6));
+        assert!(metadata.is_readonly);
+
+        let copied_path = root.join("copied.txt");
+        extract_archive_entry_to(&nested_path, &copied_path, false).expect("copy 7z entry out");
+        assert_eq!(
+            fs::read_to_string(copied_path).expect("read copied file"),
+            "nested"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn browses_tar_gz_archive_directories() {
         let root = test_root("tar-gz-browse");
         let _ = fs::remove_dir_all(&root);
@@ -3013,6 +3933,57 @@ mod tests {
         entry
             .read_to_string(&mut contents)
             .expect("read decrypted entry");
+
+        assert_eq!(contents, "classified");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn creates_password_protected_sevenz() {
+        let root = test_root("sevenz-password");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create test root");
+        fs::write(root.join("secret.txt"), "classified").expect("write source file");
+
+        let archive_path = root.join("protected.7z");
+        archive_items_with_options(
+            &[root.join("secret.txt").to_string_lossy().into_owned()],
+            &archive_path.to_string_lossy(),
+            false,
+            &ArchiveOptions {
+                format: ArchiveFormat::SevenZ,
+                password: Some("open sesame".to_string()),
+                ..ArchiveOptions::default()
+            },
+        )
+        .expect("create password 7z archive");
+
+        SevenZArchive::open(&archive_path).expect_err("encrypted 7z should require password");
+        let archive =
+            SevenZArchive::open_with_password(&archive_path, &SevenZPassword::from("open sesame"))
+                .expect("read encrypted 7z metadata");
+        assert!(archive
+            .files
+            .iter()
+            .any(|entry| entry.name() == "secret.txt"));
+
+        let mut reader =
+            SevenZArchiveReader::open(&archive_path, SevenZPassword::from("open sesame"))
+                .expect("open encrypted 7z reader");
+        let mut contents = String::new();
+        reader
+            .for_each_entries(|entry, source| {
+                if entry.name() == "secret.txt" {
+                    source
+                        .read_to_string(&mut contents)
+                        .expect("read encrypted 7z entry");
+                    return Ok(false);
+                }
+
+                Ok(true)
+            })
+            .expect("extract encrypted 7z entry");
 
         assert_eq!(contents, "classified");
 

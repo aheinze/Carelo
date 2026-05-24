@@ -125,7 +125,7 @@ const sudoActions = {
   copy_items: 'copy the selected items',
   move_items: 'move the selected items',
   archive_items: 'create this archive',
-  unarchive_items: 'extract this zip archive',
+  unarchive_items: 'extract this archive',
 };
 
 function isPermissionError(error) {

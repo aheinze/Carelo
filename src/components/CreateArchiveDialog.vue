@@ -35,6 +35,14 @@ const ARCHIVE_FORMATS = [
     extension: '.tar.zst',
     icon: 'archive',
   },
+  {
+    value: 'sevenZ',
+    label: '7Z',
+    detail: '.7z',
+    description: '7-Zip archive with strong compression',
+    extension: '.7z',
+    icon: 'archive',
+  },
 ];
 
 const COMPRESSION_LEVELS = [
@@ -106,7 +114,7 @@ const existingNameSet = computed(() => new Set(
 ));
 const selectedDirectory = computed(() => props.entries.length === 1 && props.entries[0]?.kind === 'directory');
 const canToggleTopLevel = computed(() => selectedDirectory.value);
-const passwordAvailable = computed(() => format.value === 'zip');
+const passwordAvailable = computed(() => ['zip', 'sevenZ'].includes(format.value));
 const compressionDisabled = computed(() => format.value === 'tar');
 const normalizedArchiveName = computed(() => normalizeArchiveName(archiveName.value, format.value));
 const nameExists = computed(() => {
@@ -185,6 +193,35 @@ function safeArchiveStem(value) {
     .replace(/^\.+|\.+$/g, '') || 'Archive';
 }
 
+function fileStemForName(value) {
+  const stem = safeArchiveStem(value);
+  const dotIndex = stem.lastIndexOf('.');
+
+  if (dotIndex <= 0 || dotIndex === stem.length - 1) {
+    return stem;
+  }
+
+  return stem.slice(0, dotIndex).trim() || stem;
+}
+
+function pathLeafName(value) {
+  const trimmed = String(value || '').trim().replace(/[\\/]+$/, '');
+
+  if (!trimmed || trimmed === '/') {
+    return '';
+  }
+
+  if (trimmed === '~') {
+    return 'Home';
+  }
+
+  if (trimmed.startsWith('~/')) {
+    return trimmed.slice(2).split('/').filter(Boolean).at(-1) || 'Home';
+  }
+
+  return trimmed.split(/[\\/]/).filter(Boolean).at(-1) || '';
+}
+
 function normalizeArchiveName(value, archiveFormat) {
   const raw = String(value || '').trim();
 
@@ -203,7 +240,19 @@ function normalizeArchiveName(value, archiveFormat) {
 
 function defaultArchiveStem() {
   if (props.entries.length === 1) {
-    return safeArchiveStem(props.entries[0]?.name || 'Archive');
+    const entry = props.entries[0] || {};
+
+    return entry.kind === 'file'
+      ? fileStemForName(entry.name || entry.path || 'Archive')
+      : safeArchiveStem(entry.name || pathLeafName(entry.path) || 'Archive');
+  }
+
+  if (props.entries.length > 1) {
+    const directoryName = pathLeafName(props.directory);
+
+    if (directoryName) {
+      return safeArchiveStem(`${directoryName} Selection`);
+    }
   }
 
   return 'Archive';
@@ -352,6 +401,7 @@ watch(
       resetDialog();
     }
   },
+  { immediate: true },
 );
 
 watch(format, (nextFormat, previousFormat) => {
@@ -360,7 +410,7 @@ watch(format, (nextFormat, previousFormat) => {
   archiveName.value = uniqueArchiveName(`${stem}${formatExtension(previousFormat)}`, nextFormat);
   replaceExisting.value = false;
 
-  if (nextFormat !== 'zip') {
+  if (!passwordAvailable.value) {
     usePassword.value = false;
     password.value = '';
     confirmPassword.value = '';
@@ -534,8 +584,8 @@ onUnmounted(() => {
                 :class="{ 'archive-switch-row--disabled': !passwordAvailable }"
               >
                 <span class="archive-switch-copy">
-                  <strong>Password protect ZIP</strong>
-                  <span>Available for ZIP archives only.</span>
+                  <strong>Password protect archive</strong>
+                  <span>Available for ZIP and 7Z archives.</span>
                 </span>
                 <input
                   v-model="usePassword"
@@ -557,12 +607,12 @@ onUnmounted(() => {
                 <input v-model="confirmPassword" type="password" autocomplete="new-password">
               </label>
               <p class="archive-note">
-                ZIP passwords use legacy ZipCrypto compatibility.
+                ZIP uses legacy ZipCrypto compatibility. 7Z uses AES encryption.
               </p>
             </div>
 
             <p v-else-if="!passwordAvailable" class="archive-note">
-              Passwords are available only for ZIP archives.
+              Passwords are available only for ZIP and 7Z archives.
             </p>
 
             <label v-if="nameExists" class="archive-switch-row archive-switch-row--replace">

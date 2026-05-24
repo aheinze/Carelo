@@ -194,10 +194,10 @@ const actionGroups = computed(() => {
       {
         id: 'unarchive',
         action: 'unarchive',
-        label: 'Extract Zip Archive',
+        label: 'Extract Archive',
         icon: 'extract',
         disabled: !props.canUnarchive,
-        keywords: ['unzip decompress extract'],
+        keywords: ['unzip 7z tar decompress extract'],
       },
     ],
   });

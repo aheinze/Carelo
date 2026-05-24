@@ -8,6 +8,7 @@ const ARCHIVE_EXTENSIONS = [
   '.tgz',
   '.tar.zst',
   '.tzst',
+  '.7z',
 ];
 
 export function isArchivePath(path) {

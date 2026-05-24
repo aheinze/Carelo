@@ -277,7 +277,7 @@ const canArchiveContext = computed(() => {
 const canUnarchiveContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
 
-  return operationEntries.length > 0 && operationEntries.every((item) => isLocalEntry(item) && isZipEntry(item));
+  return operationEntries.length > 0 && operationEntries.every((item) => isLocalEntry(item) && isExtractableArchiveEntry(item));
 });
 const canOpenWithContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
@@ -1098,6 +1098,10 @@ async function refreshDirectories(paths, paneIds = null) {
   await Promise.all(uniquePaths.map((path) => store.reloadDirectoryInPanes(path, paneIds)));
 }
 
+function refreshPathsForOperationDirectory(directory) {
+  return [directory, effectiveDirectory()].filter(Boolean);
+}
+
 function requestColumnRefreshes(paths, paneIds = null) {
   const uniquePaths = [...new Set(paths.filter(Boolean))];
   const targetPaneIds = Array.isArray(paneIds) && paneIds.length > 0
@@ -1204,8 +1208,8 @@ function isLocalEntry(entry) {
   return Boolean(entry?.path) && !isArchivePath(entry.path);
 }
 
-function isZipEntry(entry) {
-  return entry?.kind === 'file' && !isArchivePath(entry.path) && /\.zip$/i.test(entry.name || '');
+function isExtractableArchiveEntry(entry) {
+  return entry?.kind === 'file' && !isArchivePath(entry.path) && /\.(zip|tar|tar\.gz|tgz|tar\.zst|tzst|7z)$/i.test(entry.name || '');
 }
 
 function extensionListForTool(tool) {
@@ -1400,7 +1404,7 @@ async function handleCreateArchive(payload) {
       },
       overwrite: Boolean(payload.overwrite),
       label: `Creating ${archiveName}`,
-      refreshPaths: [currentPath],
+      refreshPaths: refreshPathsForOperationDirectory(currentPath),
       successDetail: `"${archiveName}" created`,
     });
   } catch (error) {
@@ -1413,14 +1417,14 @@ async function handleCreateArchive(payload) {
   }
 }
 
-async function extractZipArchive(menu) {
+async function extractArchive(menu) {
   const operationEntries = contextOperationEntries(menu);
   const currentPath = commonParentDirectoryFor(operationEntries);
 
-  if (!currentPath || operationEntries.length === 0 || operationEntries.some((item) => !isLocalEntry(item) || !isZipEntry(item))) {
+  if (!currentPath || operationEntries.length === 0 || operationEntries.some((item) => !isLocalEntry(item) || !isExtractableArchiveEntry(item))) {
     await dialog.alert({
       title: 'Extract Not Available',
-      message: 'Only .zip archives in file panels can be extracted.',
+      message: 'Only supported archives in file panels can be extracted.',
       variant: 'warning',
     });
     return;
@@ -1432,7 +1436,7 @@ async function extractZipArchive(menu) {
     label: operationEntries.length === 1
       ? `Extracting ${operationEntries[0].name}`
       : `Extracting ${operationEntries.length} archives`,
-    refreshPaths: [currentPath],
+    refreshPaths: refreshPathsForOperationDirectory(currentPath),
   });
 }
 
@@ -1691,7 +1695,7 @@ async function handleContextAction(action) {
     }
 
     if (action === 'unarchive') {
-      await extractZipArchive(menu);
+      await extractArchive(menu);
       return;
     }
 

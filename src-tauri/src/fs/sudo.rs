@@ -263,6 +263,13 @@ pub fn archive_items(
             Some(destination.to_string_lossy().into_owned()),
         ));
     }
+    if options.format == ArchiveFormat::SevenZ {
+        return Err(FsError::new(
+            "archive_sudo_unsupported",
+            "Creating 7Z archives with elevated permissions is not supported yet.",
+            Some(destination.to_string_lossy().into_owned()),
+        ));
+    }
     if options
         .password
         .as_ref()
@@ -271,7 +278,7 @@ pub fn archive_items(
     {
         return Err(FsError::new(
             "archive_password_unsupported",
-            "Password protection is currently supported for zip archives only.",
+            "Elevated password-protected archives are supported for ZIP archives only.",
             Some(destination.to_string_lossy().into_owned()),
         ));
     }
@@ -340,6 +347,11 @@ pub fn archive_items(
             &source_parent,
             options,
         ),
+        ArchiveFormat::SevenZ => Err(FsError::new(
+            "archive_sudo_unsupported",
+            "Creating 7Z archives with elevated permissions is not supported yet.",
+            Some(destination.to_string_lossy().into_owned()),
+        )),
     }
 }
 
@@ -351,7 +363,7 @@ pub fn unarchive_items(
     if paths.is_empty() {
         return Err(FsError::new(
             "unarchive_empty_selection",
-            "Select at least one zip archive to extract.",
+            "Select at least one archive to extract.",
             None,
         ));
     }
@@ -382,7 +394,7 @@ pub fn unarchive_items(
         if extension != "zip" {
             return Err(FsError::new(
                 "invalid_archive_source",
-                "Only .zip archives can be extracted.",
+                "Elevated extraction currently supports only .zip archives.",
                 Some(archive_path.to_string_lossy().into_owned()),
             ));
         }
@@ -520,6 +532,7 @@ fn archive_format_extension(format: ArchiveFormat) -> &'static str {
         ArchiveFormat::Tar => ".tar",
         ArchiveFormat::TarGz => ".tar.gz",
         ArchiveFormat::TarZst => ".tar.zst",
+        ArchiveFormat::SevenZ => ".7z",
     }
 }
 
@@ -529,6 +542,7 @@ fn archive_format_label(format: ArchiveFormat) -> &'static str {
         ArchiveFormat::Tar => "Tar",
         ArchiveFormat::TarGz => "Tar.gz",
         ArchiveFormat::TarZst => "Tar.zst",
+        ArchiveFormat::SevenZ => "7Z",
     }
 }
 
@@ -622,10 +636,10 @@ fn run_sudo_tar_archive(
             args.push(OsString::from("--zstd"));
             args.push(OsString::from("-cf"));
         }
-        ArchiveFormat::Zip => {
+        ArchiveFormat::Zip | ArchiveFormat::SevenZ => {
             return Err(FsError::new(
                 "invalid_archive_format",
-                "Zip archives must use the zip archive backend.",
+                "This archive format must use its dedicated archive backend.",
                 Some(destination.to_string_lossy().into_owned()),
             ));
         }
