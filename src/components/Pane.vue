@@ -254,6 +254,7 @@ const dragGhost = ref({
 });
 let pointerDrag = null;
 let pointerDragCleanup = null;
+let fileDragClearTimer = null;
 const otherPaneId = computed(() => (props.paneId === 'left' ? 'right' : 'left'));
 const canTransferToOtherPane = computed(() => {
   const targetDirectory = store.effectiveDirectoryFor(otherPaneId.value);
@@ -355,7 +356,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   cleanupPointerDrag();
-  store.clearFileDrag();
+  clearFileDragNow();
 });
 
 function activateTab(tabId) {
@@ -524,7 +525,7 @@ function handleTabDragStart(tab, event) {
   const payload = tabDragPayload(tab);
 
   closeTabContextMenu();
-  store.clearFileDrag();
+  clearFileDragNow();
   draggedTabId.value = tab.id;
 
   if (!event.dataTransfer) {
@@ -712,6 +713,11 @@ function readDragPayload(event) {
   }
 }
 
+function isFileTransferDragEvent(event) {
+  return Boolean(store.dragOperation?.entries?.length)
+    || dataTransferTypes(event).includes(FILE_DRAG_MIME);
+}
+
 function draggableEntriesFor(payload) {
   if (Array.isArray(payload.operationEntries) && payload.operationEntries.length > 0) {
     return payload.operationEntries;
@@ -735,6 +741,45 @@ function draggableEntriesFor(payload) {
   return [payload.entry];
 }
 
+function fileUriForLocalPath(path) {
+  const value = String(path || '');
+
+  if (!value || value.startsWith('remote://') || isArchivePath(value)) {
+    return '';
+  }
+
+  return `file://${value.split('/').map((part) => encodeURIComponent(part)).join('/')}`;
+}
+
+function nativeFileUriList(entries) {
+  return entries
+    .map((entry) => fileUriForLocalPath(entry.path))
+    .filter(Boolean)
+    .join('\n');
+}
+
+function cancelFileDragClear() {
+  if (!fileDragClearTimer) {
+    return;
+  }
+
+  clearTimeout(fileDragClearTimer);
+  fileDragClearTimer = null;
+}
+
+function clearFileDragNow() {
+  cancelFileDragClear();
+  store.clearFileDrag();
+}
+
+function scheduleFileDragClear() {
+  cancelFileDragClear();
+  fileDragClearTimer = window.setTimeout(() => {
+    fileDragClearTimer = null;
+    store.clearFileDrag();
+  }, 120);
+}
+
 function writeDragPayload(event, entries) {
   const requestedMode = forcedTransferModeFromEvent(event);
   const payload = {
@@ -747,6 +792,7 @@ function writeDragPayload(event, entries) {
     })),
   };
 
+  cancelFileDragClear();
   store.startFileDrag(props.paneId, entries, requestedMode);
 
   if (!event.dataTransfer) {
@@ -757,13 +803,13 @@ function writeDragPayload(event, entries) {
   event.dataTransfer.dropEffect = dropEffectFromEvent(event, requestedMode || 'move');
   event.dataTransfer.setData(FILE_DRAG_MIME, JSON.stringify(payload));
   event.dataTransfer.setData('text/plain', entries.map((entry) => entry.path).join('\n'));
-  event.dataTransfer.setData('text/uri-list', entries.map((entry) => {
-    if (entry.path?.startsWith('remote://')) {
-      return entry.path;
-    }
 
-    return `file://${entry.path.split('/').map((part) => encodeURIComponent(part)).join('/')}`;
-  }).join('\n'));
+  const uriList = nativeFileUriList(entries);
+
+  if (uriList) {
+    event.dataTransfer.setData('text/uri-list', uriList);
+    event.dataTransfer.setData('x-special/gnome-copied-files', `copy\n${uriList}`);
+  }
 }
 
 function closestFromElements(elements, selector) {
@@ -784,6 +830,10 @@ function pointerElements(event) {
   }
 
   return [document.elementFromPoint(event.clientX, event.clientY)].filter(Boolean);
+}
+
+function hasPointerCoordinates(event) {
+  return typeof event?.clientX === 'number' && typeof event?.clientY === 'number';
 }
 
 function pointerFavoriteDrop(elements, event) {
@@ -847,6 +897,26 @@ function pointerPaneDrop(elements) {
   };
 }
 
+function paneDropFromEvent(event) {
+  if (hasPointerCoordinates(event)) {
+    const paneDrop = pointerPaneDrop(pointerElements(event));
+
+    if (paneDrop) {
+      return paneDrop;
+    }
+  }
+
+  const targetDirectory = effectiveDirectory();
+
+  return targetDirectory
+    ? {
+        type: 'pane',
+        targetPaneId: props.paneId,
+        targetDirectory,
+      }
+    : null;
+}
+
 async function reloadPanesAfterPointerMove(sourcePaneId, targetPaneId, targetDirectory, operationEntries = []) {
   const paneIds = [...new Set([sourcePaneId, targetPaneId].filter(Boolean))];
   const touchedDirectories = [
@@ -856,6 +926,52 @@ async function reloadPanesAfterPointerMove(sourcePaneId, targetPaneId, targetDir
 
   await refreshDirectories(touchedDirectories, paneIds);
   requestColumnRefreshes(touchedDirectories, paneIds);
+}
+
+async function transferEntriesToPointerDrop(event, dragOperation, paneDrop) {
+  if (!dragOperation?.entries?.length || !paneDrop?.targetDirectory) {
+    return false;
+  }
+
+  const payload = {
+    sourcePaneId: dragOperation.sourcePaneId,
+    entries: dragOperation.entries,
+  };
+
+  clearFileDragNow();
+
+  try {
+    const mode = await transfers.transferModeForEvent(
+      event,
+      payload.entries,
+      paneDrop.targetDirectory,
+    );
+    const transferred = await transfers.transferEntries({
+      mode,
+      entries: payload.entries,
+      targetDirectory: paneDrop.targetDirectory,
+    });
+
+    if (transferred) {
+      await reloadPanesAfterPointerMove(
+        payload.sourcePaneId,
+        paneDrop.targetPaneId,
+        paneDrop.targetDirectory,
+        payload.entries,
+      );
+    }
+  } catch (error) {
+    console.error(error);
+    await dialog.alert({
+      title: 'Drag and Drop Failed',
+      message: error?.message || 'The dragged items could not be dropped there.',
+      variant: 'warning',
+    });
+  } finally {
+    clearFileDragNow();
+  }
+
+  return true;
 }
 
 async function finishPointerFileDrop(event, state) {
@@ -880,25 +996,7 @@ async function finishPointerFileDrop(event, state) {
     return;
   }
 
-  const mode = await transfers.transferModeForEvent(
-    event,
-    state.entries,
-    paneDrop.targetDirectory,
-  );
-  const transferred = await transfers.transferEntries({
-    mode,
-    entries: state.entries,
-    targetDirectory: paneDrop.targetDirectory,
-  });
-
-  if (transferred) {
-    await reloadPanesAfterPointerMove(
-      state.sourcePaneId,
-      paneDrop.targetPaneId,
-      paneDrop.targetDirectory,
-      state.entries,
-    );
-  }
+  await transferEntriesToPointerDrop(event, state, paneDrop);
 }
 
 function ghostKindForEntries(operationEntries) {
@@ -964,6 +1062,10 @@ function handleFilePointerDragStart(payload) {
     return;
   }
 
+  if (event.pointerType === 'mouse') {
+    return;
+  }
+
   if (!payload.entry?.path) {
     return;
   }
@@ -998,6 +1100,7 @@ function handleFilePointerDragStart(payload) {
 
       pointerDrag.entries = entries;
       pointerDrag.active = true;
+      cancelFileDragClear();
       store.startFileDrag(
         pointerDrag.sourcePaneId,
         pointerDrag.entries,
@@ -1041,7 +1144,7 @@ function handleFilePointerDragStart(payload) {
         });
       })
       .finally(() => {
-        store.clearFileDrag();
+        clearFileDragNow();
       });
   };
 
@@ -1051,12 +1154,12 @@ function handleFilePointerDragStart(payload) {
     }
 
     cleanupPointerDrag();
-    store.clearFileDrag();
+    clearFileDragNow();
   };
 
   const abortPointerDrag = () => {
     cleanupPointerDrag();
-    store.clearFileDrag();
+    clearFileDragNow();
   };
 
   const handleKeyDown = (keyEvent) => {
@@ -1136,8 +1239,71 @@ function handleFileDragStart(payload) {
   writeDragPayload(payload.event, entries);
 }
 
-function handleFileDragEnd() {
-  store.clearFileDrag();
+function handlePaneFileDragOver(event) {
+  if (!isFileTransferDragEvent(event)) {
+    return;
+  }
+
+  const paneDrop = paneDropFromEvent(event);
+
+  if (!paneDrop) {
+    return;
+  }
+
+  store.markFileDragTarget(paneDrop);
+  event.preventDefault();
+
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = dropEffectFromEvent(event);
+  }
+}
+
+function handlePaneFileDragLeave(event) {
+  if (!isFileTransferDragEvent(event) || event.currentTarget.contains(event.relatedTarget)) {
+    return;
+  }
+
+  store.clearFileDragTarget();
+}
+
+function handlePaneFileDrop(event) {
+  if (!isFileTransferDragEvent(event)) {
+    return;
+  }
+
+  const dragOperation = readDragPayload(event);
+  const paneDrop = paneDropFromEvent(event);
+
+  if (!dragOperation?.entries?.length || !paneDrop) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  transferEntriesToPointerDrop(event, dragOperation, paneDrop);
+}
+
+function handleFileDragEnd(event) {
+  const dragOperation = store.dragOperation?.entries?.length
+    ? {
+        sourcePaneId: store.dragOperation.sourcePaneId,
+        entries: store.dragOperation.entries,
+      }
+    : null;
+  const paneDrop = dragOperation && hasPointerCoordinates(event)
+    ? pointerPaneDrop(pointerElements(event))
+    : null;
+  const recentDropTarget = paneDrop ? store.recentFileDragTarget() : null;
+  const isRecentInternalDrop = recentDropTarget
+    && recentDropTarget.targetPaneId === paneDrop.targetPaneId
+    && recentDropTarget.targetDirectory === paneDrop.targetDirectory;
+
+  if (dragOperation && paneDrop && isRecentInternalDrop) {
+    transferEntriesToPointerDrop(event, dragOperation, paneDrop);
+    return;
+  }
+
+  scheduleFileDragClear();
 }
 
 async function handleFileDrop(targetEntry, event, currentTargetDirectory = null) {
@@ -1147,9 +1313,11 @@ async function handleFileDrop(targetEntry, event, currentTargetDirectory = null)
     : currentTargetDirectory || effectiveDirectory();
 
   if (!payload?.entries?.length || !targetDirectory) {
-    store.clearFileDrag();
+    clearFileDragNow();
     return;
   }
+
+  clearFileDragNow();
 
   try {
     const mode = await transfers.transferModeForEvent(
@@ -1174,7 +1342,7 @@ async function handleFileDrop(targetEntry, event, currentTargetDirectory = null)
       variant: 'warning',
     });
   } finally {
-    store.clearFileDrag();
+    clearFileDragNow();
   }
 }
 
@@ -1770,6 +1938,10 @@ async function handleContextAction(action) {
     tabindex="0"
     @focusin="store.setActivePane(paneId)"
     @click="store.setActivePane(paneId)"
+    @dragover.capture="handlePaneFileDragOver"
+    @dragleave.capture="handlePaneFileDragLeave"
+    @dragover="handlePaneFileDragOver"
+    @drop="handlePaneFileDrop"
     @keydown.up.prevent.stop="store.moveSelection(paneId, -1, { extend: $event.shiftKey })"
     @keydown.down.prevent.stop="store.moveSelection(paneId, 1, { extend: $event.shiftKey })"
     @keydown.enter.prevent.stop="openSelectedEntry"
@@ -1904,6 +2076,8 @@ async function handleContextAction(action) {
 
       <div class="pane-list-host">
         <FileList
+          :pane-id="paneId"
+          :drag-source-pane-id="store.dragOperation?.sourcePaneId || ''"
           :entries="entries"
           :raw-entry-count="rawEntryCount"
           :search-query="activeSearchQuery"
@@ -2029,20 +2203,20 @@ async function handleContextAction(action) {
   left: 0;
   z-index: 10000;
   display: grid;
-  grid-template-columns: 18px auto minmax(0, 1fr) auto;
-  max-width: min(260px, calc(100vw - 28px));
-  height: 31px;
+  grid-template-columns: 15px auto minmax(0, 1fr) auto;
+  max-width: min(232px, calc(100vw - 28px));
+  height: 27px;
   align-items: center;
-  gap: 7px;
-  padding: 0 9px;
-  border: 1px solid var(--control-border);
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--popover-bg) 92%, transparent);
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--control-border) 70%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--popover-bg) 78%, transparent);
   box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.08),
-    0 1px 4px rgb(0 0 0 / 0.22);
-  color: var(--text);
-  opacity: 0.94;
+    inset 0 1px 0 rgb(255 255 255 / 0.04),
+    0 1px 3px rgb(0 0 0 / 0.14);
+  color: var(--text-muted);
+  opacity: 0.84;
   pointer-events: none;
   contain: layout paint style;
   user-select: none;
@@ -2052,25 +2226,25 @@ async function handleContextAction(action) {
 
 .file-drag-ghost-icon {
   display: grid;
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   place-items: center;
-  color: var(--file-icon);
+  color: color-mix(in srgb, var(--file-icon) 78%, var(--text-faint));
 }
 
 .file-drag-ghost--directory .file-drag-ghost-icon {
-  color: var(--folder-icon);
+  color: color-mix(in srgb, var(--folder-icon) 78%, var(--text-faint));
 }
 
 .file-drag-ghost--multiple .file-drag-ghost-icon {
-  color: var(--accent);
+  color: color-mix(in srgb, var(--accent) 72%, var(--text-faint));
 }
 
 .file-drag-ghost-label {
   overflow: hidden;
   min-width: 0;
-  font-size: 12px;
-  font-weight: 650;
+  font-size: 11.5px;
+  font-weight: 580;
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2078,29 +2252,28 @@ async function handleContextAction(action) {
 
 .file-drag-ghost-operation {
   color: var(--text-faint);
-  font-size: 10px;
-  font-weight: 760;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  font-size: 9.5px;
+  font-weight: 640;
+  letter-spacing: 0;
 }
 
 .file-drag-ghost-count {
   display: grid;
-  min-width: 18px;
-  height: 18px;
+  min-width: 16px;
+  height: 16px;
   place-items: center;
   border-radius: 999px;
-  padding: 0 5px;
-  background: rgb(var(--accent-rgb) / 0.18);
-  color: var(--accent);
-  font-size: 10.5px;
-  font-weight: 760;
+  padding: 0 4px;
+  background: color-mix(in srgb, var(--control-bg) 68%, transparent);
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 650;
   line-height: 1;
 }
 
 @keyframes file-drag-ghost-in {
   from { opacity: 0; }
-  to { opacity: 0.94; }
+  to { opacity: 0.84; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -19,12 +19,22 @@ const GRID_MIN_COLUMN_WIDTH = 206;
 const GRID_COLUMN_GAP = 34;
 const GRID_ROW_STRIDE = 214;
 const GRID_OVERSCAN_ROWS = 3;
+const FILE_DRAG_MIME = 'application/x-carelo-files';
+const HANDLED_FILE_DRAG_EVENT = '__careloHandledFileDragEvent';
 
 function fileTypeClass(entry, prefix) {
   return `${prefix}--${fileTypeIconKind(entry)}`;
 }
 
 const props = defineProps({
+  paneId: {
+    type: String,
+    default: '',
+  },
+  dragSourcePaneId: {
+    type: String,
+    default: '',
+  },
   entries: {
     type: Array,
     required: true,
@@ -128,6 +138,7 @@ const columnTrail = ref([]);
 const entryDropPath = ref('');
 const currentDirectoryDropActive = ref(false);
 const currentDirectoryDropPath = ref('');
+const localDraggedPaths = ref([]);
 const listScrollTop = ref(0);
 const listViewportHeight = ref(0);
 const gridScrollTop = ref(0);
@@ -980,23 +991,122 @@ function isSameOrChildPath(path, parentPath) {
   return child === parent || (parent !== '/' && child.startsWith(`${parent}/`));
 }
 
-function canDropOnEntry(entry) {
-  if (!props.dragging || entry?.kind !== 'directory' || isArchivePath(entry?.path)) {
+function dataTransferTypes(event) {
+  return Array.from(event?.dataTransfer?.types || []);
+}
+
+function hasCareloFileDrag(event) {
+  return dataTransferTypes(event).includes(FILE_DRAG_MIME);
+}
+
+function activeDraggedPaths(event = null) {
+  if (props.draggedPaths.length > 0) {
+    return props.draggedPaths;
+  }
+
+  if (localDraggedPaths.value.length > 0) {
+    return localDraggedPaths.value;
+  }
+
+  return hasCareloFileDrag(event) ? [] : props.draggedPaths;
+}
+
+function isFileDragActive(event = null) {
+  return props.dragging || localDraggedPaths.value.length > 0 || hasCareloFileDrag(event);
+}
+
+function isCrossPaneFileDrag() {
+  return Boolean(props.paneId && props.dragSourcePaneId && props.dragSourcePaneId !== props.paneId);
+}
+
+function fileDragElementFromEvent(event, selector) {
+  const element = event.target?.closest?.(selector);
+
+  return element && event.currentTarget?.contains?.(element) ? element : null;
+}
+
+function entryPathName(path) {
+  return String(path || '').split('/').filter(Boolean).pop() || String(path || '');
+}
+
+function entryForPath(path) {
+  if (!path) {
+    return null;
+  }
+
+  const baseEntry = props.entries.find((entry) => entry.path === path);
+
+  if (baseEntry) {
+    return baseEntry;
+  }
+
+  for (const column of materializedColumns.value) {
+    const columnEntry = column.entries?.find((entry) => entry.path === path);
+
+    if (columnEntry) {
+      return columnEntry;
+    }
+  }
+
+  return null;
+}
+
+function entryFromDragElement(element) {
+  const path = element?.dataset?.dropEntryPath;
+
+  if (!path) {
+    return null;
+  }
+
+  return entryForPath(path) || {
+    path,
+    name: entryPathName(path),
+    kind: element.dataset.dropEntryKind || 'file',
+  };
+}
+
+function indexFromDragElement(element) {
+  const index = Number(element?.dataset?.fileIndex);
+
+  return Number.isInteger(index) ? index : null;
+}
+
+function columnIndexFromDragElement(element) {
+  const index = Number(element?.dataset?.columnIndex);
+
+  return Number.isInteger(index) ? index : 0;
+}
+
+function directoryFromDragElement(element) {
+  const directoryElement = element?.closest?.('[data-drop-directory-path]');
+
+  return directoryElement?.dataset?.dropDirectoryPath || activeColumnDirectory();
+}
+
+function stopDelegatedDragEvent(event) {
+  event[HANDLED_FILE_DRAG_EVENT] = true;
+}
+
+function canDropOnEntry(entry, event = null) {
+  if (!isFileDragActive(event) || entry?.kind !== 'directory' || isArchivePath(entry?.path)) {
     return false;
   }
 
   const targetPath = cleanPath(entry.path);
+  const draggedPaths = activeDraggedPaths(event);
 
-  return !props.draggedPaths.some((path) => isSameOrChildPath(targetPath, path));
+  return !draggedPaths.some((path) => isSameOrChildPath(targetPath, path));
 }
 
-function canDropOnDirectory(directoryPath = activeColumnDirectory()) {
-  if (!props.dragging || isArchivePath(directoryPath)) {
+function canDropOnDirectory(directoryPath = activeColumnDirectory(), event = null) {
+  if (!isFileDragActive(event) || isArchivePath(directoryPath)) {
     return false;
   }
 
   const targetPath = cleanPath(directoryPath);
-  return !props.draggedPaths.some((path) => isSameOrChildPath(targetPath, path));
+  const draggedPaths = activeDraggedPaths(event);
+
+  return !draggedPaths.some((path) => isSameOrChildPath(targetPath, path));
 }
 
 function isFileRowTarget(event) {
@@ -1010,6 +1120,10 @@ function clearDropTarget() {
 }
 
 function handleEntryDragStart(entry, index, columnIndex, event) {
+  if (event?.[HANDLED_FILE_DRAG_EVENT]) {
+    return;
+  }
+
   emitEntryDragStart(entry, index, columnIndex, event, 'drag-start');
 }
 
@@ -1049,6 +1163,18 @@ function emitEntryDragStart(entry, index, columnIndex, event, eventName) {
     }
   }
 
+  if (eventName === 'drag-start') {
+    if (operationEntries.length > 0) {
+      localDraggedPaths.value = operationEntries.map((item) => item.path).filter(Boolean);
+    } else if (props.selectedPaths.includes(entry.path)) {
+      localDraggedPaths.value = props.entries
+        .filter((item) => props.selectedPaths.includes(item.path))
+        .map((item) => item.path);
+    } else {
+      localDraggedPaths.value = [entry.path];
+    }
+  }
+
   emit(eventName, {
     entry,
     index: columnIndex === 0 ? index : null,
@@ -1059,11 +1185,15 @@ function emitEntryDragStart(entry, index, columnIndex, event, eventName) {
 }
 
 function handleEntryDragOver(entry, event, directoryPath = activeColumnDirectory()) {
-  const canDropIntoEntry = canDropOnEntry(entry);
-  const canDropIntoCurrent = !canDropIntoEntry && canDropOnDirectory(directoryPath);
+  if (event?.[HANDLED_FILE_DRAG_EVENT]) {
+    return true;
+  }
+
+  const canDropIntoEntry = canDropOnEntry(entry, event);
+  const canDropIntoCurrent = !canDropIntoEntry && canDropOnDirectory(directoryPath, event);
 
   if (!canDropIntoEntry && !canDropIntoCurrent) {
-    return;
+    return false;
   }
 
   event.preventDefault();
@@ -1074,9 +1204,14 @@ function handleEntryDragOver(entry, event, directoryPath = activeColumnDirectory
   entryDropPath.value = canDropIntoEntry ? entry.path : '';
   currentDirectoryDropActive.value = canDropIntoCurrent;
   currentDirectoryDropPath.value = canDropIntoCurrent ? directoryPath : '';
+  return true;
 }
 
 function handleEntryDragLeave(entry, event) {
+  if (event?.[HANDLED_FILE_DRAG_EVENT]) {
+    return;
+  }
+
   if (entryDropPath.value !== entry.path || event.currentTarget.contains(event.relatedTarget)) {
     return;
   }
@@ -1085,11 +1220,15 @@ function handleEntryDragLeave(entry, event) {
 }
 
 function handleEntryDrop(entry, event, directoryPath = activeColumnDirectory()) {
-  const canDropIntoEntry = canDropOnEntry(entry);
-  const canDropIntoCurrent = !canDropIntoEntry && canDropOnDirectory(directoryPath);
+  if (event?.[HANDLED_FILE_DRAG_EVENT]) {
+    return true;
+  }
+
+  const canDropIntoEntry = canDropOnEntry(entry, event);
+  const canDropIntoCurrent = !canDropIntoEntry && canDropOnDirectory(directoryPath, event);
 
   if (!canDropIntoEntry && !canDropIntoCurrent) {
-    return;
+    return false;
   }
 
   event.preventDefault();
@@ -1101,11 +1240,17 @@ function handleEntryDrop(entry, event, directoryPath = activeColumnDirectory()) 
   } else {
     emit('drop-current', { event, targetDirectory: directoryPath });
   }
+
+  return true;
 }
 
 function handleCurrentDirectoryDragOver(event, directoryPath = activeColumnDirectory()) {
-  if (!canDropOnDirectory(directoryPath) || isFileRowTarget(event)) {
-    return;
+  if (event?.[HANDLED_FILE_DRAG_EVENT]) {
+    return true;
+  }
+
+  if (!canDropOnDirectory(directoryPath, event) || isFileRowTarget(event)) {
+    return false;
   }
 
   event.preventDefault();
@@ -1116,9 +1261,14 @@ function handleCurrentDirectoryDragOver(event, directoryPath = activeColumnDirec
   entryDropPath.value = '';
   currentDirectoryDropActive.value = true;
   currentDirectoryDropPath.value = directoryPath;
+  return true;
 }
 
 function handleCurrentDirectoryDragLeave(event) {
+  if (event?.[HANDLED_FILE_DRAG_EVENT]) {
+    return;
+  }
+
   if (event.currentTarget.contains(event.relatedTarget)) {
     return;
   }
@@ -1128,14 +1278,19 @@ function handleCurrentDirectoryDragLeave(event) {
 }
 
 function handleCurrentDirectoryDrop(event, directoryPath = activeColumnDirectory()) {
-  if (!canDropOnDirectory(directoryPath) || isFileRowTarget(event)) {
-    return;
+  if (event?.[HANDLED_FILE_DRAG_EVENT]) {
+    return true;
+  }
+
+  if (!canDropOnDirectory(directoryPath, event) || isFileRowTarget(event)) {
+    return false;
   }
 
   event.preventDefault();
   event.stopPropagation();
   clearDropTarget();
   emit('drop-current', { event, targetDirectory: directoryPath });
+  return true;
 }
 
 function isCurrentDirectoryDropTarget(directoryPath) {
@@ -1144,7 +1299,103 @@ function isCurrentDirectoryDropTarget(directoryPath) {
 }
 
 function handleDragEnd(event) {
+  if (event?.[HANDLED_FILE_DRAG_EVENT]) {
+    return;
+  }
+
   clearDropTarget();
+  localDraggedPaths.value = [];
+  emit('drag-end', event);
+}
+
+function handleDelegatedDragStart(event) {
+  const sourceElement = fileDragElementFromEvent(event, '[data-file-drag-source="true"]');
+  const entry = entryFromDragElement(sourceElement);
+
+  if (!entry) {
+    return;
+  }
+
+  stopDelegatedDragEvent(event);
+  emitEntryDragStart(
+    entry,
+    indexFromDragElement(sourceElement),
+    columnIndexFromDragElement(sourceElement),
+    event,
+    'drag-start',
+  );
+}
+
+function handleDelegatedDragOver(event) {
+  const entryElement = fileDragElementFromEvent(event, '[data-drop-entry-path]');
+
+  if (entryElement) {
+    if (!isCrossPaneFileDrag()) {
+      return;
+    }
+
+    const entry = entryFromDragElement(entryElement);
+    const handled = entry
+      ? handleEntryDragOver(entry, event, directoryFromDragElement(entryElement))
+      : false;
+
+    if (handled) {
+      event[HANDLED_FILE_DRAG_EVENT] = true;
+    }
+
+    return;
+  }
+
+  const handled = handleCurrentDirectoryDragOver(event, directoryFromDragElement(event.target));
+
+  if (handled) {
+    event[HANDLED_FILE_DRAG_EVENT] = true;
+  }
+}
+
+function handleDelegatedDragLeave(event) {
+  if (event.currentTarget.contains(event.relatedTarget)) {
+    return;
+  }
+
+  clearDropTarget();
+}
+
+function handleDelegatedDrop(event) {
+  const entryElement = fileDragElementFromEvent(event, '[data-drop-entry-path]');
+
+  if (entryElement) {
+    if (!isCrossPaneFileDrag()) {
+      return;
+    }
+
+    const entry = entryFromDragElement(entryElement);
+    const handled = entry
+      ? handleEntryDrop(entry, event, directoryFromDragElement(entryElement))
+      : false;
+
+    if (handled) {
+      event[HANDLED_FILE_DRAG_EVENT] = true;
+    }
+
+    return;
+  }
+
+  const handled = handleCurrentDirectoryDrop(event, directoryFromDragElement(event.target));
+
+  if (handled) {
+    event[HANDLED_FILE_DRAG_EVENT] = true;
+  }
+}
+
+function handleDelegatedDragEnd(event) {
+  if (!fileDragElementFromEvent(event, '[data-file-drag-source="true"]') && !isFileDragActive(event)) {
+    return;
+  }
+
+  stopDelegatedDragEvent(event);
+  clearDropTarget();
+  localDraggedPaths.value = [];
   emit('drag-end', event);
 }
 
@@ -1364,6 +1615,12 @@ watch(
     :class="{ 'file-list-root--drop-target': currentDirectoryDropActive && viewMode !== 'columns' }"
     :data-drop-directory-path="activeColumnDirectory()"
     :aria-busy="loading"
+    @dragstart.capture="handleDelegatedDragStart"
+    @dragenter.capture="handleDelegatedDragOver"
+    @dragover.capture="handleDelegatedDragOver"
+    @dragleave.capture="handleDelegatedDragLeave"
+    @drop.capture="handleDelegatedDrop"
+    @dragend.capture="handleDelegatedDragEnd"
     @dragover="handleCurrentDirectoryDragOver"
     @dragleave="handleCurrentDirectoryDragLeave"
     @drop="handleCurrentDirectoryDrop"
@@ -1465,9 +1722,11 @@ watch(
           class="file-grid-item"
           :class="{ 'file-drop-target': entryDropPath === slot.entry.path }"
           :data-file-index="slot.index"
+          data-column-index="0"
           :data-drop-entry-path="slot.entry.path"
           :data-drop-entry-kind="slot.entry.kind"
           data-file-drag-source="true"
+          draggable="true"
           @pointerdown="handleEntryPointerDown(slot.entry, slot.index, 0, $event)"
           @dragstart.stop="handleEntryDragStart(slot.entry, slot.index, 0, $event)"
           @dragend="handleDragEnd"
@@ -1481,8 +1740,14 @@ watch(
             :selected="isEntrySelected(slot.index)"
             :date-format="dateFormat"
             variant="grid"
+            draggable
             @click="$emit('select', { index: slot.index, event: $event })"
             @open="$emit('open', slot.index)"
+            @drag-start="handleEntryDragStart(slot.entry, slot.index, 0, $event)"
+            @drag-end="handleDragEnd"
+            @drag-over="handleEntryDragOver(slot.entry, $event, directoryKey)"
+            @drag-leave="handleEntryDragLeave(slot.entry, $event)"
+            @drop="handleEntryDrop(slot.entry, $event, directoryKey)"
           />
         </div>
         </template>
@@ -1546,9 +1811,11 @@ watch(
                 'file-drop-target': entryDropPath === item.entry.path,
               }"
               :data-file-index="columnIndex === 0 ? item.index : null"
+              :data-column-index="columnIndex"
               :data-drop-entry-path="item.entry.path"
               :data-drop-entry-kind="item.entry.kind"
               data-file-drag-source="true"
+              draggable="true"
               :aria-selected="columnSelectionClass(column, columnIndex, item.index)"
               :title="item.entry.name"
               @pointerdown="handleEntryPointerDown(item.entry, item.index, columnIndex, $event)"
@@ -1691,9 +1958,11 @@ watch(
           class="file-list-item"
           :class="{ 'file-drop-target': entryDropPath === item.entry.path }"
           :data-file-index="item.index"
+          data-column-index="0"
           :data-drop-entry-path="item.entry.path"
           :data-drop-entry-kind="item.entry.kind"
           data-file-drag-source="true"
+          draggable="true"
           @pointerdown="handleEntryPointerDown(item.entry, item.index, 0, $event)"
           @dragstart.stop="handleEntryDragStart(item.entry, item.index, 0, $event)"
           @dragend="handleDragEnd"
@@ -1707,8 +1976,14 @@ watch(
             :selected="isEntrySelected(item.index)"
             :date-format="dateFormat"
             variant="list"
+            draggable
             @click="$emit('select', { index: item.index, event: $event })"
             @open="$emit('open', item.index)"
+            @drag-start="handleEntryDragStart(item.entry, item.index, 0, $event)"
+            @drag-end="handleDragEnd"
+            @drag-over="handleEntryDragOver(item.entry, $event, directoryKey)"
+            @drag-leave="handleEntryDragLeave(item.entry, $event)"
+            @drop="handleEntryDrop(item.entry, $event, directoryKey)"
           />
         </div>
 

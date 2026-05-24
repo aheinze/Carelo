@@ -24,9 +24,20 @@ const props = defineProps({
     type: String,
     default: 'system',
   },
+  draggable: {
+    type: Boolean,
+    default: false,
+  },
 });
 
-defineEmits(['open']);
+const emit = defineEmits([
+  'open',
+  'drag-start',
+  'drag-end',
+  'drag-over',
+  'drag-leave',
+  'drop',
+]);
 
 const cardElement = ref(null);
 const imageLoaded = ref(false);
@@ -146,7 +157,13 @@ onBeforeUnmount(stopThumbnailObserver);
       'file-card--selected': selected,
       'file-card--directory': entry.kind === 'directory',
     }"
-    @dblclick="$emit('open')"
+    :draggable="draggable"
+    @dblclick="emit('open')"
+    @dragstart.stop="emit('drag-start', $event)"
+    @dragend.stop="emit('drag-end', $event)"
+    @dragover="emit('drag-over', $event)"
+    @dragleave="emit('drag-leave', $event)"
+    @drop="emit('drop', $event)"
   >
     <span
       class="file-card-frame"
@@ -196,7 +213,13 @@ onBeforeUnmount(stopThumbnailObserver);
       'file-row--directory': entry.kind === 'directory',
       'file-row--archive': isArchiveEntry(entry),
     }"
-    @dblclick="$emit('open')"
+    :draggable="draggable"
+    @dblclick="emit('open')"
+    @dragstart.stop="emit('drag-start', $event)"
+    @dragend.stop="emit('drag-end', $event)"
+    @dragover="emit('drag-over', $event)"
+    @dragleave="emit('drag-leave', $event)"
+    @drop="emit('drop', $event)"
   >
     <span class="file-name">
       <span class="file-glyph" :class="[ `file-glyph--${entry.kind}`, fileTypeClass(entry, 'file-glyph') ]">

@@ -651,6 +651,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const columnRefreshRequests = ref({ left: null, right: null });
   const columnSelectionResetKeys = ref({ left: 0, right: 0 });
   const dragOperation = ref(null);
+  const fileDragTarget = ref(null);
   let initializePromise = null;
   let stopOperationProgressListener = null;
   let nextDirectoryRefreshId = 1;
@@ -2442,9 +2443,11 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   function startFileDrag(paneId, entries, requestedMode = null) {
     if (!panes.value[paneId] || !Array.isArray(entries) || entries.length === 0) {
       dragOperation.value = null;
+      fileDragTarget.value = null;
       return;
     }
 
+    fileDragTarget.value = null;
     dragOperation.value = {
       sourcePaneId: paneId,
       requestedMode,
@@ -2470,6 +2473,33 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
   function clearFileDrag() {
     dragOperation.value = null;
+    fileDragTarget.value = null;
+  }
+
+  function markFileDragTarget(target) {
+    if (!dragOperation.value || !target?.targetPaneId || !target?.targetDirectory) {
+      return;
+    }
+
+    fileDragTarget.value = {
+      targetPaneId: target.targetPaneId,
+      targetDirectory: target.targetDirectory,
+      timestamp: Date.now(),
+    };
+  }
+
+  function clearFileDragTarget() {
+    fileDragTarget.value = null;
+  }
+
+  function recentFileDragTarget(maxAgeMs = 300) {
+    if (!fileDragTarget.value) {
+      return null;
+    }
+
+    return Date.now() - fileDragTarget.value.timestamp <= maxAgeMs
+      ? fileDragTarget.value
+      : null;
   }
 
   function isFavoritePath(path) {
@@ -2848,6 +2878,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     startFileDrag,
     setFileDragMode,
     clearFileDrag,
+    markFileDragTarget,
+    clearFileDragTarget,
+    recentFileDragTarget,
     isFavoritePath,
     addFavoriteGroup,
     removeFavoriteGroup,
