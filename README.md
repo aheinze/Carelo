@@ -218,6 +218,9 @@ operations use native Rust libraries, including the `zip` crate.
 ## Useful Shortcuts
 
 - `Tab`: switch active pane
+- `Cmd/Ctrl + Shift + P`: command palette
+- `Cmd/Ctrl + P`: fuzzy file search in the current folder
+- `Cmd/Ctrl + Shift + F`: content search in the current folder
 - `Backspace` or `Cmd/Ctrl + Up`: go to parent folder
 - `Alt + Left` / `Alt + Right`: navigation history
 - `F2`: refresh

@@ -55,3 +55,7 @@ sevenz-rust2 = { version = "0.20.2", features = ["deflate", "lz4", "zstd", "brot
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gdk = "0.18.2"
+gtk = "0.18.2"

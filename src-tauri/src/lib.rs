@@ -7,6 +7,7 @@ pub mod store;
 pub mod window_state;
 
 use commands::app::quit_app;
+use commands::clipboard::{read_system_file_clipboard, write_system_file_clipboard};
 use commands::fs::{
     FileOperationState, FileSearchIndexState, MediaStreamState, RemoteEditSyncState,
 };
@@ -107,6 +108,8 @@ pub fn run() {
             get_window_dimensions,
             save_window_dimensions,
             create_oauth_tokens,
+            write_system_file_clipboard,
+            read_system_file_clipboard,
             terminal_start,
             terminal_write,
             terminal_resize,

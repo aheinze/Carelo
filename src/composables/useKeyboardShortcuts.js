@@ -5,6 +5,8 @@ import {
   editFile,
   getFileMetadata,
   openWithDefaultApp,
+  readSystemFileClipboard,
+  writeSystemFileClipboard,
 } from './useFileOperations';
 import { useDialog } from './useDialog';
 import {
@@ -74,8 +76,25 @@ function clipboardTextForEntries(mode, entries) {
   return ['x-special/gnome-copied-files', action, ...fileUris].join('\n');
 }
 
+function clipboardGnomePayloadForEntries(mode, entries) {
+  const action = mode === 'move' ? 'cut' : 'copy';
+  const fileUris = entries.map((entry) => clipboardUriForPath(entry.path));
+
+  return [action, ...fileUris].join('\n');
+}
+
 function clipboardUriListForEntries(entries) {
   return entries.map((entry) => clipboardUriForPath(entry.path)).join('\n');
+}
+
+function isLocalSystemClipboardPath(path) {
+  const value = String(path || '');
+
+  return value.startsWith('/') && !value.startsWith('remote://') && !isArchivePath(value);
+}
+
+function canUseSystemFileClipboard(entries) {
+  return entries.length > 0 && entries.every((entry) => isLocalSystemClipboardPath(entry.path));
 }
 
 function samePathList(paths, entries) {
@@ -507,7 +526,23 @@ export function useKeyboardShortcuts() {
 
   async function writeSystemClipboard(mode, entries) {
     const gnomeText = clipboardTextForEntries(mode, entries);
+    const gnomePayload = clipboardGnomePayloadForEntries(mode, entries);
     const uriList = clipboardUriListForEntries(entries);
+
+    if (canUseSystemFileClipboard(entries)) {
+      try {
+        const wroteNativeClipboard = await writeSystemFileClipboard(
+          mode,
+          entries.map((entry) => entry.path),
+        );
+
+        if (wroteNativeClipboard) {
+          return;
+        }
+      } catch {
+        // Fall back to Web Clipboard below.
+      }
+    }
 
     if (navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
       const clipboardTypes = {
@@ -517,7 +552,7 @@ export function useKeyboardShortcuts() {
 
       try {
         clipboardTypes['x-special/gnome-copied-files'] = new Blob(
-          [gnomeText],
+          [gnomePayload],
           { type: 'x-special/gnome-copied-files' },
         );
         await navigator.clipboard.write([new ClipboardItem(clipboardTypes)]);
@@ -602,7 +637,43 @@ export function useKeyboardShortcuts() {
     return clipboardPayloadForEntries(parsed.mode || 'copy', entries, null);
   }
 
+  async function clipboardPayloadFromSystemFiles(payload) {
+    if (!payload?.paths?.length) {
+      return null;
+    }
+
+    const stored = storedClipboard();
+
+    if (stored && samePathList(payload.paths, stored.entries)) {
+      return stored;
+    }
+
+    if (fileClipboard && samePathList(payload.paths, fileClipboard.entries)) {
+      return fileClipboard;
+    }
+
+    const entries = await entriesFromClipboardPaths(payload.paths);
+
+    if (entries.length === 0) {
+      return null;
+    }
+
+    return clipboardPayloadForEntries(payload.mode || 'copy', entries, null);
+  }
+
   async function currentClipboardPayload() {
+    try {
+      const systemFileClipboard = await readSystemFileClipboard();
+      const parsedSystemFileClipboard = await clipboardPayloadFromSystemFiles(systemFileClipboard);
+
+      if (parsedSystemFileClipboard) {
+        fileClipboard = parsedSystemFileClipboard;
+        return parsedSystemFileClipboard;
+      }
+    } catch {
+      // Fall back to text and internal clipboard below.
+    }
+
     const clipboardText = await readSystemClipboardText();
 
     if (clipboardText !== null) {

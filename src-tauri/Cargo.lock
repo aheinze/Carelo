@@ -568,6 +568,8 @@ version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
+ "gdk",
+ "gtk",
  "ignore",
  "libc",
  "notify",

@@ -309,6 +309,14 @@ export async function areSameVolume(paths, targetDirectory) {
   return invokeCommand('same_volume', { paths, targetDirectory });
 }
 
+export async function writeSystemFileClipboard(mode, paths) {
+  return invokeCommand('write_system_file_clipboard', { payload: { mode, paths } });
+}
+
+export async function readSystemFileClipboard() {
+  return invokeCommand('read_system_file_clipboard');
+}
+
 export async function addRemoteVolume(config) {
   return invokeCommand('add_remote_volume', { config });
 }
@@ -508,9 +516,11 @@ export function useFileOperations() {
     removeRemoteVolume,
     renameItem,
     readTextPreview,
+    readSystemFileClipboard,
     resumeFileOperation,
     revealInFileManager,
     unarchiveItems,
+    writeSystemFileClipboard,
     startTerminalSession,
     writeTerminalSession,
     resizeTerminalSession,
