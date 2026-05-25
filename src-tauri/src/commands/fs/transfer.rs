@@ -196,16 +196,6 @@ pub async fn delete_items(
         }
     }
 
-    if delete_mode == DeleteMode::Trash {
-        if let Some((path, _)) = remote_paths.first() {
-            return Err(FsError::new(
-                "trash_unsupported_remote",
-                "Moving remote storage items to Trash is not supported. Change deletion behavior to delete permanently.",
-                Some(path.clone()),
-            ));
-        }
-    }
-
     for (_, remote_path) in remote_paths {
         delete_remote_item(&remotes, remote_path).await?;
     }

@@ -4,7 +4,7 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { useFileManagerStore } from '../stores/fileManagerStore';
-import { COLOR_SCHEME_OPTIONS } from '../utils/colorSchemes';
+import { COLOR_SCHEME_OPTIONS, normalizeAccentColor } from '../utils/colorSchemes';
 import { DATE_FORMAT_OPTIONS, formatDate } from '../utils/dateFormat';
 import tauriConfig from '../../src-tauri/tauri.conf.json';
 import appIconUrl from '../../src-tauri/icons/128x128.png';
@@ -37,7 +37,7 @@ const sections = [
     id: 'appearance',
     label: 'Appearance',
     icon: 'monitor',
-    keywords: 'appearance theme color scheme dark light auto system material one dark pro tokyo night',
+    keywords: 'appearance theme color scheme accent color dark light auto system material one dark pro tokyo night',
   },
   {
     id: 'files',
@@ -83,6 +83,14 @@ const appearanceModes = [
   { value: 'dark', label: 'Dark', icon: 'moon' },
 ];
 const colorSchemeOptions = COLOR_SCHEME_OPTIONS;
+const accentPresets = [
+  { value: '#0a84ff', label: 'Blue' },
+  { value: '#30d158', label: 'Green' },
+  { value: '#ff9f0a', label: 'Amber' },
+  { value: '#ff453a', label: 'Red' },
+  { value: '#bf5af2', label: 'Violet' },
+  { value: '#64d2ff', label: 'Cyan' },
+];
 
 const viewModes = [
   { value: 'list', label: 'List', icon: 'list' },
@@ -167,6 +175,17 @@ const selectedEditorTemplate = computed(() => {
 
   return template?.id || 'custom';
 });
+const selectedColorScheme = computed(() =>
+  colorSchemeOptions.find((option) => option.value === store.appSettings.colorScheme) || colorSchemeOptions[0],
+);
+const defaultAccentColor = computed(() => selectedColorScheme.value?.preview?.accent || '#0a84ff');
+const customAccentColor = computed(() => normalizeAccentColor(store.appSettings.accentColor));
+const activeAccentColor = computed(() => customAccentColor.value || defaultAccentColor.value);
+const activeAccentLabel = computed(() => activeAccentColor.value.toUpperCase());
+const presetAccentSelected = computed(() =>
+  accentPresets.some((preset) => preset.value === customAccentColor.value),
+);
+const customAccentSelected = computed(() => Boolean(customAccentColor.value && !presetAccentSelected.value));
 
 const visibleSections = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
@@ -188,12 +207,26 @@ function setColorScheme(scheme) {
   store.setAppSetting('colorScheme', scheme);
 }
 
+function setAccentColor(color) {
+  store.setAppSetting('accentColor', normalizeAccentColor(color));
+}
+
+function resetAccentColor() {
+  store.setAppSetting('accentColor', '');
+}
+
 function colorSchemePreviewStyle(option) {
   return {
     '--scheme-sidebar': option.preview.sidebar,
     '--scheme-toolbar': option.preview.toolbar,
     '--scheme-pane': option.preview.pane,
     '--scheme-accent': option.preview.accent,
+  };
+}
+
+function accentPresetStyle(color) {
+  return {
+    '--accent-choice': color,
   };
 }
 
@@ -498,7 +531,7 @@ onUnmounted(() => {
               <section v-if="activeSectionId === 'appearance'" class="settings-page">
                 <div class="settings-section-heading">
                   <h3>Appearance</h3>
-                  <p>Choose how Carelo follows or overrides the system color scheme.</p>
+                  <p>Choose the mode, theme, and highlight color Carelo uses.</p>
                 </div>
 
                 <div class="settings-group">
@@ -570,6 +603,73 @@ onUnmounted(() => {
                           ></span>
                         </span>
                       </button>
+                    </div>
+                  </div>
+
+                  <div class="setting-row setting-row--stacked">
+                    <div class="setting-copy">
+                      <strong>Accent color</strong>
+                      <span>Sets the color for selections, focus rings, folders, and primary actions.</span>
+                    </div>
+
+                    <div class="accent-color-control">
+                      <div class="accent-color-grid" role="group" aria-label="Accent color">
+                        <button
+                          type="button"
+                          class="accent-color-option accent-color-option--default"
+                          :class="{ active: !customAccentColor }"
+                          :style="accentPresetStyle(defaultAccentColor)"
+                          :aria-pressed="!customAccentColor"
+                          @click="resetAccentColor"
+                        >
+                          <span class="accent-color-swatch" aria-hidden="true"></span>
+                          <span class="accent-color-option-copy">
+                            <strong>Theme default</strong>
+                            <span>{{ selectedColorScheme.label }}</span>
+                          </span>
+                        </button>
+
+                        <button
+                          v-for="preset in accentPresets"
+                          :key="preset.value"
+                          type="button"
+                          class="accent-color-option"
+                          :class="{ active: customAccentColor === preset.value }"
+                          :style="accentPresetStyle(preset.value)"
+                          :aria-pressed="customAccentColor === preset.value"
+                          @click="setAccentColor(preset.value)"
+                        >
+                          <span class="accent-color-swatch" aria-hidden="true"></span>
+                          <span class="accent-color-option-copy">
+                            <strong>{{ preset.label }}</strong>
+                            <span>{{ preset.value.toUpperCase() }}</span>
+                          </span>
+                        </button>
+                      </div>
+
+                      <label
+                        class="accent-color-custom"
+                        :class="{ active: customAccentSelected }"
+                      >
+                        <span class="accent-color-custom-copy">
+                          <strong>Custom color</strong>
+                          <span>{{ customAccentColor ? activeAccentLabel : 'Pick any color' }}</span>
+                        </span>
+                        <span class="accent-color-custom-picker">
+                          <input
+                            type="color"
+                            :value="activeAccentColor"
+                            aria-label="Choose custom accent color"
+                            @input="setAccentColor($event.target.value)"
+                          />
+                          <span
+                            class="accent-color-swatch"
+                            :style="{ '--accent-choice': activeAccentColor }"
+                            aria-hidden="true"
+                          ></span>
+                          <span>Choose</span>
+                        </span>
+                      </label>
                     </div>
                   </div>
                 </div>
@@ -1497,6 +1597,156 @@ onUnmounted(() => {
   box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.18);
 }
 
+.accent-color-control {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.accent-color-grid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.accent-color-option,
+.accent-color-custom {
+  display: grid;
+  min-width: 0;
+  min-height: 48px;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 2.5%, transparent);
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.accent-color-option {
+  cursor: pointer;
+}
+
+.accent-color-option--default {
+  grid-column: span 2;
+}
+
+.accent-color-option:hover,
+.accent-color-custom:hover {
+  border-color: var(--control-border);
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+.accent-color-option:focus-visible,
+.accent-color-custom:focus-within {
+  border-color: var(--accent-border);
+  box-shadow: var(--accent-focus-ring);
+  outline: 0;
+}
+
+.accent-color-option.active {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px rgb(var(--accent-rgb) / 0.22);
+  color: var(--text);
+}
+
+.accent-color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / 0.24), transparent 42%),
+    var(--accent-choice);
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.24),
+    0 3px 10px color-mix(in srgb, var(--accent-choice) 26%, transparent);
+}
+
+.accent-color-option-copy,
+.accent-color-custom-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.accent-color-option-copy strong,
+.accent-color-option-copy span,
+.accent-color-custom-copy strong,
+.accent-color-custom-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accent-color-option-copy strong,
+.accent-color-custom-copy strong {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.accent-color-option-copy span,
+.accent-color-custom-copy span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 560;
+  font-variant-numeric: tabular-nums;
+}
+
+.accent-color-custom {
+  grid-template-columns: minmax(0, 1fr) auto;
+  border-color: var(--input-border);
+  background: var(--input-bg);
+  box-shadow: var(--input-shadow);
+  cursor: pointer;
+}
+
+.accent-color-custom-picker {
+  position: relative;
+  display: inline-grid;
+  height: 32px;
+  grid-template-columns: 22px auto;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--input-border);
+  border-radius: 9px;
+  padding: 0 11px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 660;
+  white-space: nowrap;
+}
+
+.accent-color-custom-picker input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.accent-color-custom-picker:hover {
+  border-color: var(--control-border);
+  color: var(--text);
+}
+
+.accent-color-custom.active {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow:
+    inset 0 0 0 1px rgb(var(--accent-rgb) / 0.20),
+    var(--input-shadow);
+  color: var(--text);
+}
+
 .view-segment {
   display: inline-flex;
   width: fit-content;
@@ -2246,6 +2496,27 @@ onUnmounted(() => {
 
   .scheme-option {
     grid-template-columns: 80px minmax(0, 1fr) auto;
+  }
+
+  .accent-color-control {
+    gap: 9px;
+  }
+
+  .accent-color-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .accent-color-option--default {
+    grid-column: 1 / -1;
+  }
+
+  .accent-color-custom {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .accent-color-custom-picker {
+    width: 100%;
   }
 
   .view-segment {

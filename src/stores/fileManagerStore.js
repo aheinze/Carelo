@@ -30,7 +30,12 @@ import {
   isArchiveEntry,
   isArchivePath,
 } from '../utils/archivePaths';
-import { applyColorScheme, normalizeColorScheme } from '../utils/colorSchemes';
+import {
+  applyAccentColor,
+  applyColorScheme,
+  normalizeAccentColor,
+  normalizeColorScheme,
+} from '../utils/colorSchemes';
 import { normalizeDateFormat } from '../utils/dateFormat';
 
 let nextTabId = 1;
@@ -64,6 +69,7 @@ const ACTIVE_QUEUE_STATUSES = new Set(['running', 'paused', 'cancelling']);
 const DEFAULT_APP_SETTINGS = Object.freeze({
   appearanceMode: 'system',
   colorScheme: 'carelo',
+  accentColor: '',
   defaultViewMode: 'list',
   dateFormat: 'system',
   showHiddenFiles: false,
@@ -164,6 +170,7 @@ function normalizeAppSettings(settings = {}) {
     ...value,
     appearanceMode: normalizeAppearanceMode(value.appearanceMode),
     colorScheme: normalizeColorScheme(value.colorScheme),
+    accentColor: normalizeAccentColor(value.accentColor),
     defaultViewMode: normalizeViewMode(value.defaultViewMode),
     dateFormat: normalizeDateFormat(value.dateFormat),
     showHiddenFiles: value.showHiddenFiles === true,
@@ -618,6 +625,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
   applyAppearanceMode(appSettings.value.appearanceMode);
   applyColorScheme(appSettings.value.colorScheme);
+  applyAccentColor(appSettings.value.accentColor);
 
   const panes = ref({
     left: createPane(
@@ -2770,6 +2778,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       const normalizedSettings = normalizeAppSettings(settings);
       applyAppearanceMode(normalizedSettings.appearanceMode);
       applyColorScheme(normalizedSettings.colorScheme);
+      applyAccentColor(normalizedSettings.accentColor);
       saveUiSettings({ appSettings: normalizedSettings });
       saveStoredAppSettings(normalizedSettings).catch(() => {});
     },

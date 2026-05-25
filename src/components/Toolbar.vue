@@ -3,10 +3,14 @@ import { computed } from 'vue';
 import AppIcon from './AppIcon.vue';
 import SidebarSelector from './SidebarSelector.vue';
 import WorkIndicator from './WorkIndicator.vue';
-import { createFolder, deleteItems, isRemotePath } from '../composables/useFileOperations';
+import { createFolder, deleteItems } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveDisplayName, isArchivePath } from '../utils/archivePaths';
+import {
+  deleteConfirmationOptions,
+  shouldConfirmDelete,
+} from '../utils/deleteConfirmation';
 import {
   closeTauriWindow,
   getTauriWindow,
@@ -126,29 +130,19 @@ async function deleteSelection() {
     return;
   }
 
-  const useTrash = store.appSettings.deleteMode === 'trash';
-
-  if (useTrash && entries.some((entry) => isRemotePath(entry.path))) {
-    await dialog.alert({
-      title: 'Trash Not Available',
-      message: 'Remote storage items can only be deleted permanently. Change deletion behavior to Delete permanently to continue.',
-      variant: 'warning',
-    });
-    return;
-  }
-
   const label = entries.length === 1 ? `"${entries[0].name}"` : `${entries.length} selected items`;
-  const confirmed = store.appSettings.confirmDelete
-    ? await dialog.confirm({
-        title: useTrash ? 'Move to Trash' : (entries.length === 1 ? 'Delete Item' : 'Delete Items'),
-        message: useTrash ? `Move ${label} to Trash?` : `Delete ${label} permanently?`,
-        detail: useTrash
-          ? 'Local items can be restored from the system Trash.'
-          : 'This cannot be undone from inside the app.',
-        confirmLabel: useTrash ? 'Move to Trash' : 'Delete',
-        variant: useTrash ? 'warning' : 'danger',
-        destructive: !useTrash,
-      })
+  const confirmed = shouldConfirmDelete(
+    store.appSettings.confirmDelete,
+    store.appSettings.deleteMode,
+    entries,
+  )
+    ? await dialog.confirm(deleteConfirmationOptions({
+        entries,
+        deleteMode: store.appSettings.deleteMode,
+        label,
+        singleTitle: 'Delete Item',
+        pluralTitle: 'Delete Items',
+      }))
     : true;
 
   if (!confirmed) {

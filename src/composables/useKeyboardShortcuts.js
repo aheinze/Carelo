@@ -4,7 +4,6 @@ import {
   deleteItems,
   editFile,
   getFileMetadata,
-  isRemotePath,
   openWithDefaultApp,
   readSystemFileClipboard,
   writeSystemFileClipboard,
@@ -17,6 +16,10 @@ import {
 import { useShortcutsModal } from './useShortcutsModal';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveRootPath, isArchiveEntry, isArchivePath } from '../utils/archivePaths';
+import {
+  deleteConfirmationOptions,
+  shouldConfirmDelete,
+} from '../utils/deleteConfirmation';
 import {
   CREATE_SIDEBAR_GROUP_EVENT,
   OPEN_REMOTE_STORAGE_EVENT,
@@ -438,30 +441,19 @@ export function useKeyboardShortcuts() {
       return;
     }
 
-    const useTrash = store.appSettings.deleteMode === 'trash';
-
-    if (useTrash && entries.some((entry) => isRemotePath(entry.path))) {
-      await dialog.alert({
-        title: 'Trash Not Available',
-        message: 'Remote storage items can only be deleted permanently. Change deletion behavior to Delete permanently to continue.',
-        variant: 'warning',
-      });
-      return;
-    }
-
     const label = entries.length === 1 ? `"${entries[0].name}"` : `${entries.length} items`;
-
-    const confirmed = store.appSettings.confirmDelete
-      ? await dialog.confirm({
-          title: useTrash ? 'Move to Trash' : 'Delete Items',
-          message: useTrash ? `Move ${label} to Trash?` : `Delete ${label} permanently?`,
-          detail: useTrash
-            ? 'Local items can be restored from the system Trash.'
-            : 'This cannot be undone from inside the app.',
-          confirmLabel: useTrash ? 'Move to Trash' : 'Delete',
-          variant: useTrash ? 'warning' : 'danger',
-          destructive: !useTrash,
-        })
+    const confirmed = shouldConfirmDelete(
+      store.appSettings.confirmDelete,
+      store.appSettings.deleteMode,
+      entries,
+    )
+      ? await dialog.confirm(deleteConfirmationOptions({
+          entries,
+          deleteMode: store.appSettings.deleteMode,
+          label,
+          singleTitle: 'Delete Item',
+          pluralTitle: 'Delete Items',
+        }))
       : true;
 
     if (!confirmed) {

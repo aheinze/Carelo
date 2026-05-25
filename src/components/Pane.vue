@@ -8,7 +8,6 @@ import {
   archiveItems,
   deleteItems,
   editFile,
-  isRemotePath,
   listOpenWithApps,
   listDirectory,
   openWithApp,
@@ -31,6 +30,10 @@ import {
   isArchiveEntry,
   isArchivePath,
 } from '../utils/archivePaths';
+import {
+  deleteConfirmationOptions,
+  shouldConfirmDelete,
+} from '../utils/deleteConfirmation';
 import { extensionForName } from '../utils/fileTypes';
 
 const CreateArchiveDialog = defineAsyncComponent(() => import('./CreateArchiveDialog.vue'));
@@ -1979,29 +1982,19 @@ async function handleContextAction(action) {
 
     if (action === 'delete') {
       const deleteEntries = contextOperationEntries(menu);
-      const useTrash = store.appSettings.deleteMode === 'trash';
-
-      if (useTrash && deleteEntries.some((item) => isRemotePath(item.path))) {
-        await dialog.alert({
-          title: 'Trash Not Available',
-          message: 'Remote storage items can only be deleted permanently. Change deletion behavior to Delete permanently to continue.',
-          variant: 'warning',
-        });
-        return;
-      }
-
       const label = deleteEntries.length === 1 ? `"${deleteEntries[0].name}"` : `${deleteEntries.length} items`;
-      const confirmed = store.appSettings.confirmDelete
-        ? await dialog.confirm({
-            title: useTrash ? 'Move to Trash' : 'Delete Item',
-            message: useTrash ? `Move ${label} to Trash?` : `Delete ${label} permanently?`,
-            detail: useTrash
-              ? 'Local items can be restored from the system Trash.'
-              : 'This cannot be undone from inside the app.',
-            confirmLabel: useTrash ? 'Move to Trash' : 'Delete',
-            variant: useTrash ? 'warning' : 'danger',
-            destructive: !useTrash,
-          })
+      const confirmed = shouldConfirmDelete(
+        store.appSettings.confirmDelete,
+        store.appSettings.deleteMode,
+        deleteEntries,
+      )
+        ? await dialog.confirm(deleteConfirmationOptions({
+            entries: deleteEntries,
+            deleteMode: store.appSettings.deleteMode,
+            label,
+            singleTitle: 'Delete Item',
+            pluralTitle: 'Delete Items',
+          }))
         : true;
 
       if (confirmed) {

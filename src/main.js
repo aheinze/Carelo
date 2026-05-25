@@ -5,7 +5,7 @@ import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import App from './App.vue';
 import './assets/main.css';
 import { vTooltip } from './directives/vTooltip';
-import { applyColorScheme } from './utils/colorSchemes';
+import { applyAccentColor, applyColorScheme } from './utils/colorSchemes';
 
 const LEGACY_SETTINGS_KEY = 'carelo.phase1.settings';
 const MIN_WINDOW_WIDTH = 960;
@@ -82,9 +82,20 @@ function legacyColorScheme() {
   }
 }
 
+function legacyAccentColor() {
+  try {
+    const raw = window.localStorage.getItem(LEGACY_SETTINGS_KEY);
+    const settings = raw ? JSON.parse(raw) : {};
+    return settings.appSettings?.accentColor || null;
+  } catch {
+    return null;
+  }
+}
+
 async function applyStoredAppearanceMode() {
   applyAppearanceMode(legacyAppearanceMode());
   applyColorScheme(legacyColorScheme());
+  applyAccentColor(legacyAccentColor());
 
   if (!hasTauriRuntime()) {
     return;
@@ -93,6 +104,7 @@ async function applyStoredAppearanceMode() {
   const settings = await invoke('get_app_settings').catch(() => null);
   applyAppearanceMode(settings?.appearanceMode || legacyAppearanceMode());
   applyColorScheme(settings?.colorScheme || legacyColorScheme());
+  applyAccentColor(settings?.accentColor ?? legacyAccentColor());
 }
 
 async function migrateLegacyWindowDimensions() {
