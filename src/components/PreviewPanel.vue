@@ -5,6 +5,7 @@ import {
   cancelFileOperation,
   createMediaStreamUrl,
   getFileMetadata,
+  getGitFileInfo,
   isRemotePath,
   localFileAssetUrl,
   measureItemsSize,
@@ -174,14 +175,18 @@ const selectionCommonLocation = computed(() => {
 });
 const imageFailed = ref(false);
 const imageLoading = ref(false);
+const imageProperties = ref(null);
 const imagePreviewUrl = ref('');
 const audioFailed = ref(false);
 const audioLoading = ref(false);
+const audioProperties = ref(null);
 const audioReady = ref(false);
+const audioElementRef = ref(null);
 const audioPreviewUrl = ref('');
 const audioPreviewMimeType = ref('');
 const videoFailed = ref(false);
 const videoLoading = ref(false);
+const videoProperties = ref(null);
 const videoReady = ref(false);
 const videoElementRef = ref(null);
 const videoPreviewUrl = ref('');
@@ -192,6 +197,7 @@ const textPreviewTruncated = ref(false);
 const fileMetadata = ref(null);
 const metadataLoading = ref(false);
 const metadataError = ref('');
+const gitInfo = ref(null);
 const activeInspectorSection = ref('info');
 const mediaPreviewFallbackMaxBytes = 128 * 1024 * 1024;
 const mediaPreviewFallbackDelayMs = 1800;
@@ -203,6 +209,7 @@ let imagePreviewLoadVersion = 0;
 let audioPreviewLoadVersion = 0;
 let videoPreviewLoadVersion = 0;
 let textPreviewLoadVersion = 0;
+let gitInfoLoadVersion = 0;
 let audioPreviewFallbackTimer = null;
 let videoPreviewFallbackTimer = null;
 let videoReadyPollTimer = null;
@@ -252,6 +259,8 @@ const logSummary = computed(() => {
 
   return `${count} event${count === 1 ? '' : 's'}`;
 });
+const fileDetailRows = computed(() => detailsForEntry(inspectedEntry.value));
+const gitCardRows = computed(() => gitRowsForEntry(inspectedEntry.value));
 
 watch(
   () => selectedEntry.value?.path,
@@ -259,6 +268,9 @@ watch(
     imageFailed.value = false;
     audioFailed.value = false;
     videoFailed.value = false;
+    imageProperties.value = null;
+    audioProperties.value = null;
+    videoProperties.value = null;
     fileMetadata.value = null;
     metadataError.value = '';
     metadataLoadVersion += 1;
@@ -291,6 +303,32 @@ watch(
 );
 
 watch(
+  () => selectedEntry.value?.path,
+  async (path) => {
+    gitInfo.value = null;
+    gitInfoLoadVersion += 1;
+    const loadVersion = gitInfoLoadVersion;
+
+    if (!path || isArchivePath(path) || isRemotePath(path)) {
+      return;
+    }
+
+    try {
+      const info = await getGitFileInfo(path);
+
+      if (gitInfoLoadVersion === loadVersion) {
+        gitInfo.value = info || null;
+      }
+    } catch {
+      if (gitInfoLoadVersion === loadVersion) {
+        gitInfo.value = null;
+      }
+    }
+  },
+  { immediate: true },
+);
+
+watch(
   () => [store.previewPanelVisible, measurableFolderPaths.value.join('\0')],
   () => {
     startFolderSizeMeasurement();
@@ -305,6 +343,7 @@ watch(
     const loadVersion = audioPreviewLoadVersion;
     revokeAudioPreviewUrl();
     audioFailed.value = false;
+    audioProperties.value = null;
     audioReady.value = false;
     audioLoading.value = false;
     const entry = inspectedEntry.value;
@@ -356,6 +395,7 @@ watch(
     const loadVersion = imagePreviewLoadVersion;
     revokeImagePreviewUrl();
     imageFailed.value = false;
+    imageProperties.value = null;
     imageLoading.value = false;
     const entry = inspectedEntry.value;
 
@@ -440,6 +480,7 @@ watch(
     const loadVersion = videoPreviewLoadVersion;
     revokeVideoPreviewUrl();
     videoFailed.value = false;
+    videoProperties.value = null;
     videoReady.value = false;
     videoLoading.value = false;
     const entry = inspectedEntry.value;
@@ -681,6 +722,266 @@ function imageMimeType(name) {
   return '';
 }
 
+function numericMediaValue(value) {
+  const number = Number(value);
+
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function captureImageProperties(event) {
+  const image = event?.currentTarget;
+  const width = numericMediaValue(image?.naturalWidth);
+  const height = numericMediaValue(image?.naturalHeight);
+
+  imageProperties.value = width && height ? { width, height } : null;
+}
+
+function handleImageError() {
+  imageFailed.value = true;
+  imageProperties.value = null;
+}
+
+function captureAudioProperties(audio) {
+  const duration = numericMediaValue(audio?.duration);
+
+  audioProperties.value = duration ? { duration } : null;
+}
+
+function captureVideoProperties(video) {
+  const duration = numericMediaValue(video?.duration);
+  const width = numericMediaValue(video?.videoWidth);
+  const height = numericMediaValue(video?.videoHeight);
+
+  videoProperties.value = duration || (width && height)
+    ? { duration, width, height }
+    : null;
+}
+
+function formatInteger(value) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatDimensions(width, height) {
+  return `${formatInteger(width)} x ${formatInteger(height)} px`;
+}
+
+function greatestCommonDivisor(left, right) {
+  let a = Math.abs(Math.round(left));
+  let b = Math.abs(Math.round(right));
+
+  while (b > 0) {
+    const next = a % b;
+    a = b;
+    b = next;
+  }
+
+  return a || 1;
+}
+
+function formatAspectRatio(width, height) {
+  const divisor = greatestCommonDivisor(width, height);
+
+  return `${Math.round(width / divisor)}:${Math.round(height / divisor)}`;
+}
+
+function formatMegapixels(width, height) {
+  const megapixels = (width * height) / 1_000_000;
+
+  return `${megapixels >= 10 ? megapixels.toFixed(0) : megapixels.toFixed(1)} MP`;
+}
+
+function formatMediaDuration(seconds) {
+  const totalSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+  const paddedSeconds = String(remainingSeconds).padStart(2, '0');
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${paddedSeconds}`;
+  }
+
+  return `${minutes}:${paddedSeconds}`;
+}
+
+function textLineCount(value) {
+  if (!value) {
+    return 0;
+  }
+
+  return String(value).split(/\r\n|\r|\n/).length;
+}
+
+function detailRow(label, value, title = value) {
+  return value ? { label, value, title } : null;
+}
+
+function imageDetailRows(entry) {
+  if (!isImageEntry(entry)) {
+    return [];
+  }
+
+  const properties = imageProperties.value;
+
+  if (!properties) {
+    if (imageFailed.value) {
+      return [detailRow('Resolution', 'Unavailable')].filter(Boolean);
+    }
+
+    if (imageLoading.value || imagePreviewUrl.value) {
+      return [detailRow('Resolution', 'Loading...')].filter(Boolean);
+    }
+
+    return [];
+  }
+
+  const { width, height } = properties;
+
+  return [
+    detailRow('Dimensions', formatDimensions(width, height)),
+    detailRow('Pixels', formatMegapixels(width, height)),
+    detailRow('Aspect', formatAspectRatio(width, height)),
+  ].filter(Boolean);
+}
+
+function videoDetailRows(entry) {
+  if (!isVideoEntry(entry)) {
+    return [];
+  }
+
+  const properties = videoProperties.value;
+
+  if (!properties) {
+    if (videoFailed.value) {
+      return [detailRow('Media info', 'Unavailable')].filter(Boolean);
+    }
+
+    if (videoLoading.value || videoPreviewUrl.value) {
+      return [detailRow('Media info', 'Loading...')].filter(Boolean);
+    }
+
+    return [];
+  }
+
+  return [
+    properties.width && properties.height
+      ? detailRow('Resolution', formatDimensions(properties.width, properties.height))
+      : null,
+    properties.duration
+      ? detailRow('Duration', formatMediaDuration(properties.duration))
+      : null,
+  ].filter(Boolean);
+}
+
+function audioDetailRows(entry) {
+  if (!isAudioEntry(entry)) {
+    return [];
+  }
+
+  const properties = audioProperties.value;
+
+  if (!properties) {
+    if (audioFailed.value) {
+      return [detailRow('Duration', 'Unavailable')].filter(Boolean);
+    }
+
+    if (audioLoading.value || audioPreviewUrl.value) {
+      return [detailRow('Duration', 'Loading...')].filter(Boolean);
+    }
+
+    return [];
+  }
+
+  return [detailRow('Duration', formatMediaDuration(properties.duration))].filter(Boolean);
+}
+
+function textDetailRows(entry) {
+  if (!shouldShowTextPreview(entry)) {
+    return [];
+  }
+
+  if (textPreviewLoading.value) {
+    return [detailRow('Text', 'Loading...')].filter(Boolean);
+  }
+
+  if (textPreviewError.value) {
+    return [detailRow('Text', 'Unavailable')].filter(Boolean);
+  }
+
+  if (!textPreview.value && !hasKnownSize(entry)) {
+    return [];
+  }
+
+  const suffix = textPreviewTruncated.value ? '+' : '';
+
+  return [
+    detailRow('Lines', `${formatInteger(textLineCount(textPreview.value))}${suffix}`),
+    detailRow('Characters', `${formatInteger(String(textPreview.value || '').length)}${suffix}`),
+    textPreviewTruncated.value
+      ? detailRow('Preview', `First ${formatBytes(96 * 1024)}`)
+      : null,
+  ].filter(Boolean);
+}
+
+function folderDetailRows(entry) {
+  if (entry?.kind !== 'directory' || !isMeasurableFolderEntry(entry)) {
+    return [];
+  }
+
+  if (folderSizeMeasurementLoading.value) {
+    return [detailRow('Contents', 'Scanning...')].filter(Boolean);
+  }
+
+  if (!folderSizeMeasurement.value) {
+    return [];
+  }
+
+  return [
+    detailRow(
+      'Contents',
+      `${formatInteger(measuredFolderEntryCount.value)} ${measuredFolderEntryCount.value === 1 ? 'item' : 'items'}`,
+    ),
+    folderSizeMeasurement.value.skipped
+      ? detailRow('Skipped', countLabel(folderSizeMeasurement.value.skipped, 'item'))
+      : null,
+  ].filter(Boolean);
+}
+
+function gitRowsForEntry(entry) {
+  if (!entry || isArchivePath(entry.path) || isRemotePath(entry.path)) {
+    return [];
+  }
+
+  const info = gitInfo.value;
+
+  if (!info) {
+    return [];
+  }
+
+  return [
+    detailRow('Branch', info.branch || info.commit || ''),
+    detailRow('Commit', info.commit || ''),
+    info.changedEntries > 0
+      ? detailRow('Changes', formatInteger(info.changedEntries))
+      : null,
+    detailRow('Root', info.root),
+  ].filter(Boolean);
+}
+
+function detailsForEntry(entry) {
+  if (!entry) {
+    return [];
+  }
+
+  return [
+    ...folderDetailRows(entry),
+    ...imageDetailRows(entry),
+    ...videoDetailRows(entry),
+    ...audioDetailRows(entry),
+    ...textDetailRows(entry),
+  ];
+}
+
 async function createMediaPreviewObjectUrl(entry, mimeType) {
   if (!canUseMediaBlobFallback(entry)) {
     throw new Error('Media preview size limit exceeded.');
@@ -867,8 +1168,9 @@ async function loadVideoBlobFallback() {
   }
 }
 
-function handleAudioReady() {
+function handleAudioReady(event = null) {
   clearAudioPreviewFallbackTimer();
+  captureAudioProperties(event?.currentTarget || audioElementRef.value);
   audioReady.value = true;
   audioFailed.value = false;
   audioLoading.value = false;
@@ -878,7 +1180,7 @@ async function handleAudioError(event) {
   const audio = event.currentTarget;
 
   if (audio?.readyState > 0) {
-    handleAudioReady();
+    handleAudioReady(event);
     return;
   }
 
@@ -891,9 +1193,10 @@ async function handleAudioError(event) {
   audioLoading.value = false;
 }
 
-function handleVideoReady() {
+function handleVideoReady(event = null) {
   clearVideoPreviewFallbackTimer();
   clearVideoReadyPolling();
+  captureVideoProperties(event?.currentTarget || videoElementRef.value);
   videoReady.value = true;
   videoFailed.value = false;
   videoLoading.value = false;
@@ -916,7 +1219,7 @@ function checkVideoReadyState(event) {
   const video = event?.currentTarget || videoElementRef.value;
 
   if (hasLoadedVideoMetadata(video)) {
-    handleVideoReady();
+    handleVideoReady(event);
     return true;
   }
 
@@ -952,7 +1255,7 @@ async function handleVideoError(event) {
   const video = event.currentTarget;
 
   if (video?.readyState > 0) {
-    handleVideoReady();
+    handleVideoReady(event);
     return;
   }
 
@@ -1287,7 +1590,8 @@ function logDetail(entry) {
             :src="imagePreviewUrl"
             :alt="inspectedEntry.name"
             decoding="async"
-            @error="imageFailed = true"
+            @load="captureImageProperties"
+            @error="handleImageError"
           />
           <span
             v-else-if="isVideoEntry(inspectedEntry)"
@@ -1333,6 +1637,7 @@ function logDetail(entry) {
             </span>
             <audio
               v-if="audioPreviewUrl"
+              ref="audioElementRef"
               :key="audioPreviewUrl"
               class="preview-audio"
               controls
@@ -1391,6 +1696,45 @@ function logDetail(entry) {
             </span>
           </div>
         </div>
+
+        <!-- Git -->
+        <section v-if="gitInfo && gitCardRows.length" class="inspector-section inspector-section--git">
+          <article class="git-card" aria-label="Git information">
+            <header class="git-card-header">
+              <div class="git-card-heading">
+                <AppIcon name="git-branch" :size="16" :stroke-width="1.9" />
+                <span>Git</span>
+              </div>
+              <span class="git-card-status">{{ gitInfo.status }}</span>
+            </header>
+            <dl class="git-card-list">
+              <div
+                v-for="row in gitCardRows"
+                :key="row.label"
+              >
+                <dt>{{ row.label }}</dt>
+                <dd :title="row.title">{{ row.value }}</dd>
+              </div>
+            </dl>
+          </article>
+        </section>
+
+        <!-- Details -->
+        <section v-if="fileDetailRows.length" class="inspector-section">
+          <h3 class="section-title">
+            <span>Details</span>
+            <AppIcon name="chevron-down" :size="18" :stroke-width="1.9" />
+          </h3>
+          <dl class="details-list">
+            <div
+              v-for="row in fileDetailRows"
+              :key="row.label"
+            >
+              <dt>{{ row.label }}</dt>
+              <dd :title="row.title">{{ row.value }}</dd>
+            </div>
+          </dl>
+        </section>
 
         <!-- ── General ─────────────────────────────────── -->
         <section class="inspector-section">
@@ -2179,6 +2523,90 @@ h2 {
 .inspector-section--fill {
   min-height: 0;
   padding-top: 20px;
+}
+
+.inspector-section--git {
+  padding-top: 15px;
+}
+
+.git-card {
+  display: grid;
+  gap: 10px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--hairline));
+  border-radius: 7px;
+  padding: 12px 13px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent) 7%, transparent),
+      transparent 46%
+    ),
+    color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.git-card-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.git-card-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+}
+
+.git-card-heading .app-icon {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.git-card-heading span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 690;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.git-card-status {
+  display: inline-flex;
+  max-width: 116px;
+  min-width: 0;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 740;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-card-list {
+  border-radius: 0;
+  background: transparent;
+}
+
+.git-card-list > div {
+  grid-template-columns: 74px minmax(0, 1fr);
+  min-height: 26px;
+  padding: 4px 0;
+}
+
+.git-card-list > div:first-child {
+  border-top: 1px solid var(--hairline);
 }
 
 .section-title {

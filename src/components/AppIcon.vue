@@ -243,6 +243,14 @@ defineProps({
       <path d="M6.4 20.2v-3.3h3.3" />
     </template>
 
+    <template v-else-if="name === 'git-branch'">
+      <circle cx="6.5" cy="5.8" r="2.1" />
+      <circle cx="6.5" cy="18.2" r="2.1" />
+      <circle cx="17.5" cy="12" r="2.1" />
+      <path d="M6.5 7.9v8.2" />
+      <path d="M8.6 5.8h2.8a6.1 6.1 0 0 1 6.1 6.1" />
+    </template>
+
     <template v-else-if="name === 'activity-list'">
       <path d="M5 6.4h4.2" />
       <path d="M14.8 6.4H19" />

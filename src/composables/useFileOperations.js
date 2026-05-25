@@ -254,6 +254,10 @@ export async function getFileMetadata(path) {
   return invokeCommand('get_file_metadata', { path }, { sudo: true });
 }
 
+export async function getGitFileInfo(path) {
+  return invokeCommand('get_git_file_info', { path });
+}
+
 export async function compareFileChecksums(leftPath, rightPath) {
   return invokeCommand('compare_file_checksums', { leftPath, rightPath });
 }
@@ -494,6 +498,7 @@ export function useFileOperations() {
     deleteItems,
     editFile,
     getFileMetadata,
+    getGitFileInfo,
     getHomeDirectory,
     addFavorite,
     addFavoriteGroup,
