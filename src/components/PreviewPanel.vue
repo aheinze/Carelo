@@ -1860,8 +1860,20 @@ function logDetail(entry) {
 
       <!-- ── Empty ───────────────────────────────────── -->
       <div v-else class="empty-state">
-        <AppIcon name="file" :size="36" :stroke-width="1.4" />
-        <p>Select a file to inspect</p>
+        <div class="empty-state-visual" aria-hidden="true">
+          <span class="empty-state-file">
+            <AppIcon name="file" :size="34" :stroke-width="1.35" />
+          </span>
+          <span class="empty-state-lines">
+            <span></span>
+            <span></span>
+            <span></span>
+          </span>
+        </div>
+        <div class="empty-state-copy">
+          <strong>Nothing selected</strong>
+          <p>Select a file or folder to inspect</p>
+        </div>
       </div>
     </template>
 
@@ -3041,15 +3053,97 @@ dd {
   flex: 1;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 40px 20px;
+  justify-content: flex-start;
+  gap: 15px;
+  padding: 78px 20px 40px;
   color: var(--text-faint);
+  text-align: center;
+}
+
+.empty-state-visual {
+  position: relative;
+  display: grid;
+  width: 98px;
+  height: 80px;
+  place-items: center;
+  color: color-mix(in srgb, var(--text-muted) 82%, var(--accent));
+}
+
+.empty-state-visual::before {
+  content: '';
+  position: absolute;
+  inset: 18px 10px 7px;
+  border: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--pane-glass) 70%, var(--footer-bg));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent),
+    0 8px 18px color-mix(in srgb, #000 12%, transparent);
+}
+
+.empty-state-file {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 48px;
+  height: 54px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--popover-bg) 94%, currentColor 6%);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #fff 5%, transparent),
+    0 5px 12px color-mix(in srgb, #000 12%, transparent);
+}
+
+.empty-state-lines {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  z-index: 2;
+  display: grid;
+  width: 38px;
+  gap: 4px;
+  border: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: color-mix(in srgb, var(--popover-bg) 93%, var(--pane-glass));
+  box-shadow: 0 5px 12px color-mix(in srgb, #000 10%, transparent);
+  opacity: 0.82;
+}
+
+.empty-state-lines span {
+  display: block;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-faint) 34%, transparent);
+}
+
+.empty-state-lines span:nth-child(2) {
+  width: 78%;
+}
+
+.empty-state-lines span:nth-child(3) {
+  width: 58%;
+}
+
+.empty-state-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.empty-state-copy strong {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 680;
+  letter-spacing: 0;
 }
 
 .empty-state p {
   margin: 0;
+  max-width: 190px;
   font-size: 12px;
+  line-height: 1.45;
 }
 
 @keyframes inspector-progress-slide {
