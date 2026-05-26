@@ -65,6 +65,9 @@ const DIRECTORY_RELOAD_BATCH_DELAY_MS = 120;
 const INACTIVE_TAB_ENTRY_CACHE_LIMIT = 2;
 const LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT = 1500;
 const OPERATION_LOG_LIMIT = 120;
+const WORKSPACE_LIMIT = 32;
+const WORKSPACE_TAB_LIMIT = 64;
+const WORKSPACE_NAME_LIMIT = 80;
 const ACTIVE_QUEUE_STATUSES = new Set(['running', 'paused', 'cancelling']);
 const DEFAULT_APP_SETTINGS = Object.freeze({
   appearanceMode: 'system',
@@ -492,6 +495,180 @@ function savedTabsFor(settings, paneId, fallbackPath, fallbackViewMode) {
   return [{ path: fallbackPath, viewMode: fallbackViewMode }];
 }
 
+function normalizeWorkspaceName(name) {
+  return String(name || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, WORKSPACE_NAME_LIMIT);
+}
+
+function workspaceIdForName(name, timestamp = Date.now()) {
+  const slug = normalizeWorkspaceName(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 42);
+
+  return `workspace-${slug || 'saved'}-${Number(timestamp || Date.now()).toString(36)}`;
+}
+
+function normalizeWorkspaceHistory(history, path) {
+  const normalizedPath = String(path || '~').trim() || '~';
+  const entries = (Array.isArray(history) ? history : [])
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean)
+    .slice(-NAV_HISTORY_LIMIT);
+
+  return entries.length > 0 ? entries : [normalizedPath];
+}
+
+function normalizeWorkspaceTab(tab = {}, fallbackPath = '~', fallbackViewMode = 'list') {
+  const value = tab && typeof tab === 'object' ? tab : {};
+  const path = String(value.path || value.currentPath || fallbackPath || '~').trim() || fallbackPath || '~';
+  let history = normalizeWorkspaceHistory(value.history, path);
+  let historyIndex = Number.isInteger(value.historyIndex)
+    ? Math.min(Math.max(value.historyIndex, 0), history.length - 1)
+    : history.length - 1;
+
+  if (history[historyIndex] !== path) {
+    const existingIndex = history.lastIndexOf(path);
+
+    if (existingIndex >= 0) {
+      historyIndex = existingIndex;
+    } else {
+      history = [...history.slice(0, historyIndex + 1), path].slice(-NAV_HISTORY_LIMIT);
+      historyIndex = history.length - 1;
+    }
+  }
+
+  return {
+    path: history[historyIndex] || path,
+    viewMode: normalizeViewMode(value.viewMode || fallbackViewMode),
+    sortKey: normalizeSortKey(value.sortKey),
+    sortDirection: normalizeSortDirection(value.sortDirection),
+    history,
+    historyIndex,
+  };
+}
+
+function normalizeWorkspacePane(pane = {}, fallbackPath = '~', fallbackViewMode = 'list') {
+  const value = pane && typeof pane === 'object' ? pane : {};
+  const rawTabs = Array.isArray(value.tabs) ? value.tabs : [];
+  const tabs = rawTabs
+    .slice(0, WORKSPACE_TAB_LIMIT)
+    .map((tab) => normalizeWorkspaceTab(tab, fallbackPath, fallbackViewMode));
+  const normalizedTabs = tabs.length
+    ? tabs
+    : [normalizeWorkspaceTab({ path: fallbackPath, viewMode: fallbackViewMode }, fallbackPath, fallbackViewMode)];
+  const rawActiveIndex = Number(value.activeIndex);
+  const activeIndex = Number.isFinite(rawActiveIndex)
+    ? Math.min(Math.max(Math.trunc(rawActiveIndex), 0), normalizedTabs.length - 1)
+    : 0;
+
+  return {
+    activeIndex,
+    tabs: normalizedTabs,
+  };
+}
+
+function normalizeWorkspace(workspace, index = 0) {
+  const value = workspace && typeof workspace === 'object' ? workspace : {};
+  const name = normalizeWorkspaceName(value.name) || `Workspace ${index + 1}`;
+  const createdAt = Number.isFinite(Number(value.createdAt)) ? Number(value.createdAt) : Date.now();
+  const updatedAt = Number.isFinite(Number(value.updatedAt)) ? Number(value.updatedAt) : createdAt;
+  const id = String(value.id || workspaceIdForName(name, createdAt)).trim().slice(0, 120)
+    || workspaceIdForName(name, createdAt);
+
+  return {
+    id,
+    name,
+    createdAt,
+    updatedAt,
+    activePaneId: value.activePaneId === 'left' ? 'left' : 'right',
+    left: normalizeWorkspacePane(value.left, '~', DEFAULT_APP_SETTINGS.defaultViewMode),
+    right: normalizeWorkspacePane(value.right, '~', DEFAULT_APP_SETTINGS.defaultViewMode),
+  };
+}
+
+function normalizeWorkspaces(workspaces) {
+  if (!Array.isArray(workspaces)) {
+    return [];
+  }
+
+  const seenIds = new Set();
+
+  return workspaces
+    .slice(0, WORKSPACE_LIMIT)
+    .map((workspace, index) => normalizeWorkspace(workspace, index))
+    .map((workspace, index) => {
+      let id = workspace.id;
+
+      if (seenIds.has(id)) {
+        id = `${id}-${index + 1}`;
+      }
+
+      seenIds.add(id);
+      return {
+        ...workspace,
+        id,
+      };
+    });
+}
+
+function cloneSerializedPane(pane) {
+  return {
+    activeIndex: Number.isInteger(pane?.activeIndex) ? pane.activeIndex : 0,
+    tabs: (Array.isArray(pane?.tabs) ? pane.tabs : []).map((tab) => ({
+      ...tab,
+      history: Array.isArray(tab.history) ? [...tab.history] : [],
+    })),
+  };
+}
+
+function createPaneFromSerializedPane(id, serializedPane, fallbackPath, fallbackViewMode) {
+  const normalizedPane = normalizeWorkspacePane(serializedPane, fallbackPath, fallbackViewMode);
+  const initialTabs = normalizedPane.tabs.map((tab) => ({
+    ...tab,
+    history: [...tab.history],
+  }));
+
+  initialTabs.activeIndex = normalizedPane.activeIndex;
+  return createPane(id, initialTabs, fallbackPath, fallbackViewMode);
+}
+
+function historiesEqual(left = [], right = []) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((path, index) => path === right[index]);
+}
+
+function workspaceTabsEqual(left, right) {
+  return left?.path === right?.path
+    && normalizeViewMode(left?.viewMode) === normalizeViewMode(right?.viewMode)
+    && normalizeSortKey(left?.sortKey) === normalizeSortKey(right?.sortKey)
+    && normalizeSortDirection(left?.sortDirection) === normalizeSortDirection(right?.sortDirection)
+    && left?.historyIndex === right?.historyIndex
+    && historiesEqual(left?.history || [], right?.history || []);
+}
+
+function workspacePanesEqual(leftPane, rightPane) {
+  const left = normalizeWorkspacePane(leftPane);
+  const right = normalizeWorkspacePane(rightPane);
+
+  if (left.activeIndex !== right.activeIndex || left.tabs.length !== right.tabs.length) {
+    return false;
+  }
+
+  return left.tabs.every((tab, index) => workspaceTabsEqual(tab, right.tabs[index]));
+}
+
+function workspaceMatchesPaneState(workspace, paneState) {
+  return workspacePanesEqual(workspace?.left, paneState?.left)
+    && workspacePanesEqual(workspace?.right, paneState?.right);
+}
+
 function activeTabFromPane(pane) {
   if (!pane) {
     return null;
@@ -653,6 +830,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   );
   const terminalPanelHeight = ref(savedSettings.terminalPanelHeight ?? 280);
   const showHiddenFiles = ref(appSettings.value.showHiddenFiles);
+  const workspaces = ref(normalizeWorkspaces(savedSettings.workspaces));
+  const activeWorkspaceId = ref(
+    workspaces.value.some((workspace) => workspace.id === savedSettings.activeWorkspaceId)
+      ? savedSettings.activeWorkspaceId
+      : '',
+  );
   const settingsVisible = ref(false);
   const fileSearchVisible = ref(false);
   const fileSearchMode = ref('files');
@@ -788,6 +971,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     left: serializePane(panes.value.left),
     right: serializePane(panes.value.right),
   }));
+  const activeWorkspace = computed(() =>
+    workspaces.value.find((workspace) => workspace.id === activeWorkspaceId.value) || null,
+  );
 
   const activeRemoteVolumeIds = computed(() => {
     const ids = new Set();
@@ -817,6 +1003,160 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     return [...ids].sort();
   });
+
+  function resetPaneTransientState() {
+    columnPreviewEntries.value = { left: null, right: null };
+    columnSelectionStates.value = { left: null, right: null };
+    columnTargetDirectories.value = { left: null, right: null };
+    columnRefreshRequests.value = { left: null, right: null };
+    columnSelectionResetKeys.value = {
+      left: (columnSelectionResetKeys.value.left || 0) + 1,
+      right: (columnSelectionResetKeys.value.right || 0) + 1,
+    };
+  }
+
+  function saveCurrentWorkspace(name, options = {}) {
+    const workspaceName = normalizeWorkspaceName(name);
+
+    if (!workspaceName) {
+      return null;
+    }
+
+    const now = Date.now();
+    const existingWorkspace = options.updateExisting === false
+      ? null
+      : activeWorkspace.value
+        || workspaces.value.find((workspace) => workspace.name.toLowerCase() === workspaceName.toLowerCase())
+        || null;
+    const paneState = persistedPaneState.value;
+    const workspace = normalizeWorkspace({
+      id: existingWorkspace?.id || workspaceIdForName(workspaceName, now),
+      name: workspaceName,
+      createdAt: existingWorkspace?.createdAt || now,
+      updatedAt: now,
+      activePaneId: activePaneId.value,
+      left: cloneSerializedPane(paneState.left),
+      right: cloneSerializedPane(paneState.right),
+    }, workspaces.value.length);
+
+    if (existingWorkspace) {
+      workspaces.value = workspaces.value.map((candidate) =>
+        candidate.id === existingWorkspace.id ? workspace : candidate,
+      );
+    } else {
+      workspaces.value = [workspace, ...workspaces.value].slice(0, WORKSPACE_LIMIT);
+    }
+
+    activeWorkspaceId.value = workspace.id;
+    return workspace;
+  }
+
+  function updateWorkspaceFromCurrent(workspaceId) {
+    const existingWorkspace = workspaces.value.find((workspace) => workspace.id === workspaceId);
+
+    if (!existingWorkspace) {
+      return null;
+    }
+
+    const now = Date.now();
+    const paneState = persistedPaneState.value;
+    const workspace = normalizeWorkspace({
+      ...existingWorkspace,
+      updatedAt: now,
+      activePaneId: activePaneId.value,
+      left: cloneSerializedPane(paneState.left),
+      right: cloneSerializedPane(paneState.right),
+    });
+
+    workspaces.value = workspaces.value.map((candidate) =>
+      candidate.id === existingWorkspace.id ? workspace : candidate,
+    );
+    activeWorkspaceId.value = workspace.id;
+    return workspace;
+  }
+
+  function renameWorkspace(workspaceId, name) {
+    const existingWorkspace = workspaces.value.find((workspace) => workspace.id === workspaceId);
+    const workspaceName = normalizeWorkspaceName(name);
+
+    if (!existingWorkspace || !workspaceName) {
+      return null;
+    }
+
+    const workspace = normalizeWorkspace({
+      ...existingWorkspace,
+      name: workspaceName,
+      updatedAt: Date.now(),
+    });
+
+    workspaces.value = workspaces.value.map((candidate) =>
+      candidate.id === existingWorkspace.id ? workspace : candidate,
+    );
+    return workspace;
+  }
+
+  async function applyWorkspace(workspaceId) {
+    const workspace = workspaces.value.find((candidate) => candidate.id === workspaceId);
+
+    if (!workspace) {
+      if (activeWorkspaceId.value === workspaceId) {
+        activeWorkspaceId.value = '';
+      }
+
+      return false;
+    }
+
+    const normalizedWorkspace = normalizeWorkspace(workspace);
+    workspaces.value = workspaces.value.map((candidate) =>
+      candidate.id === workspace.id ? normalizedWorkspace : candidate,
+    );
+    panes.value = {
+      left: createPaneFromSerializedPane(
+        'left',
+        normalizedWorkspace.left,
+        normalizedWorkspace.left.tabs[normalizedWorkspace.left.activeIndex]?.path || '~',
+        appSettings.value.defaultViewMode,
+      ),
+      right: createPaneFromSerializedPane(
+        'right',
+        normalizedWorkspace.right,
+        normalizedWorkspace.right.tabs[normalizedWorkspace.right.activeIndex]?.path || '~',
+        appSettings.value.defaultViewMode,
+      ),
+    };
+    resetPaneTransientState();
+    activePaneId.value = normalizedWorkspace.activePaneId;
+    activeWorkspaceId.value = normalizedWorkspace.id;
+
+    await Promise.all([
+      loadPane('left'),
+      loadPane('right'),
+    ]);
+
+    return true;
+  }
+
+  function removeWorkspace(workspaceId) {
+    const id = String(workspaceId || '').trim();
+
+    if (!id) {
+      return false;
+    }
+
+    const nextWorkspaces = workspaces.value.filter((workspace) => workspace.id !== id);
+
+    if (nextWorkspaces.length === workspaces.value.length) {
+      return false;
+    }
+
+    workspaces.value = nextWorkspaces;
+
+    if (activeWorkspaceId.value === id) {
+      activeWorkspaceId.value = '';
+    }
+
+    return true;
+  }
 
   async function initialize() {
     if (initializePromise) {
@@ -2750,6 +3090,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       terminalPanelHeight.value,
       showHiddenFiles.value,
       persistedPaneState.value,
+      workspaces.value,
+      activeWorkspaceId.value,
     ],
     () => {
       saveUiSettings({
@@ -2767,9 +3109,23 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         rightActiveTabIndex: persistedPaneState.value.right.activeIndex,
         leftTabs: persistedPaneState.value.left.tabs,
         rightTabs: persistedPaneState.value.right.tabs,
+        workspaces: workspaces.value,
+        activeWorkspaceId: activeWorkspaceId.value,
       });
     },
     { deep: true },
+  );
+
+  watch(
+    () => persistedPaneState.value,
+    (paneState) => {
+      const workspace = activeWorkspace.value;
+
+      if (workspace && !workspaceMatchesPaneState(workspace, paneState)) {
+        activeWorkspaceId.value = '';
+      }
+    },
+    { deep: true, immediate: true },
   );
 
   watch(
@@ -2807,6 +3163,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     terminalPanelVisible,
     terminalPanelHeight,
     showHiddenFiles,
+    workspaces,
+    activeWorkspaceId,
+    activeWorkspace,
     settingsVisible,
     fileSearchVisible,
     fileSearchMode,
@@ -2830,6 +3189,11 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     tabTitle,
     visibleEntriesFor,
     selectedEntryFor,
+    saveCurrentWorkspace,
+    updateWorkspaceFromCurrent,
+    renameWorkspace,
+    applyWorkspace,
+    removeWorkspace,
     setColumnPreviewEntry,
     setColumnSelectionState,
     setColumnTargetDirectory,

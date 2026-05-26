@@ -3,6 +3,7 @@ import { computed } from 'vue';
 import AppIcon from './AppIcon.vue';
 import SidebarSelector from './SidebarSelector.vue';
 import WorkIndicator from './WorkIndicator.vue';
+import WorkspaceSelector from './WorkspaceSelector.vue';
 import { createFolder, deleteItems } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
@@ -208,6 +209,8 @@ async function deleteSelection() {
       </div>
 
       <SidebarSelector v-if="!store.sidebarVisible" />
+
+      <WorkspaceSelector v-if="!store.sidebarVisible" />
 
       <div class="nav-cluster" aria-label="Navigation" @mousedown.stop>
         <button

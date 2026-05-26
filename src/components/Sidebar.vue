@@ -1,6 +1,7 @@
 <script setup>
 import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue';
 import AppIcon from './AppIcon.vue';
+import WorkspaceSelector from './WorkspaceSelector.vue';
 import { getFileMetadata, mountVolume, removeRemoteVolume } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
@@ -880,6 +881,12 @@ onUnmounted(() => {
         <AppIcon name="plus" :size="16" :stroke-width="2.1" />
       </button>
 
+      <WorkspaceSelector
+        v-if="store.sidebarVisible"
+        placement="above"
+        variant="sidebar"
+      />
+
       <Transition name="sidebar-add-menu">
         <div
           v-if="sidebarAddMenuOpen"
@@ -1250,7 +1257,7 @@ h2 {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 8px;
   padding: 8px 10px 12px;
   border-top: 1px solid var(--separator);
 }

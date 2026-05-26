@@ -303,6 +303,11 @@ defineProps({
       <path d="m5 12.4 4.2 4.2L19 6.8" />
     </template>
 
+    <template v-else-if="name === 'pencil'">
+      <path d="m4.8 16.9-.8 3.1 3.1-.8L18.6 7.7a2 2 0 0 0-2.8-2.8Z" />
+      <path d="m14.4 6.3 3.3 3.3" />
+    </template>
+
     <template v-else-if="name === 'plus'">
       <path d="M12 5v14" />
       <path d="M5 12h14" />
@@ -426,6 +431,14 @@ defineProps({
       <rect x="4" y="7" width="16" height="12" rx="2" />
       <path d="M9 7V5.6A1.6 1.6 0 0 1 10.6 4h2.8A1.6 1.6 0 0 1 15 5.6V7" />
       <path d="M4 12h16" />
+    </template>
+
+    <template v-else-if="name === 'briefcase-plus'">
+      <rect x="3.8" y="7" width="16.4" height="12" rx="2" />
+      <path d="M9 7V5.6A1.6 1.6 0 0 1 10.6 4h2.8A1.6 1.6 0 0 1 15 5.6V7" />
+      <path d="M3.8 12h8.2" />
+      <path d="M16.6 10.7v5.2" />
+      <path d="M14 13.3h5.2" />
     </template>
 
     <template v-else-if="name === 'app'">
