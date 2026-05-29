@@ -55,6 +55,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  operationCount: {
+    type: Number,
+    default: 1,
+  },
 });
 
 const emit = defineEmits(['action', 'close']);
@@ -77,6 +81,7 @@ const toolsMenuStyle = ref({
 });
 
 const canOpenInNewTab = computed(() => props.entry?.kind === 'directory');
+const hasSingleOperation = computed(() => props.operationCount === 1);
 const itemType = computed(() => (props.entry?.kind === 'directory' ? 'Folder' : 'File'));
 const isDirectoryContext = computed(() => !props.entry && Boolean(props.targetDirectory));
 const hasMenuTarget = computed(() => Boolean(props.entry) || isDirectoryContext.value);
@@ -114,6 +119,7 @@ const actionGroups = computed(() => {
           action: 'newFolder',
           label: 'New Folder',
           icon: 'folder-plus',
+          shortcut: props.canModify ? 'F7' : undefined,
           disabled: !props.canModify,
           keywords: ['create directory f7'],
         },
@@ -122,6 +128,7 @@ const actionGroups = computed(() => {
           action: 'refreshDirectory',
           label: 'Refresh Folder',
           icon: 'refresh',
+          shortcut: 'F2',
           keywords: ['reload update'],
         },
       ],
@@ -177,6 +184,7 @@ const actionGroups = computed(() => {
         action: 'open',
         label: 'Open',
         icon: entryKind === 'directory' ? 'folder' : 'file',
+        shortcut: 'Enter',
         keywords: ['default'],
       },
       ...(props.canEditFile
@@ -185,6 +193,7 @@ const actionGroups = computed(() => {
             action: 'editFile',
             label: 'Edit File',
             icon: 'file-code',
+            shortcut: 'F4',
             keywords: ['editor f4 modify'],
           }]
         : []),
@@ -201,6 +210,7 @@ const actionGroups = computed(() => {
         action: 'openInNewTab',
         label: 'Open in New Tab',
         icon: 'plus',
+        shortcut: canOpenInNewTab.value ? 'Ctrl Up' : undefined,
         disabled: !canOpenInNewTab.value,
         keywords: ['tab'],
       },
@@ -222,6 +232,7 @@ const actionGroups = computed(() => {
         action: 'copyPath',
         label: 'Copy Path',
         icon: 'copy',
+        shortcut: hasSingleOperation.value ? 'Ctrl Shift Enter' : undefined,
         keywords: ['clipboard pathname location'],
       },
       {
@@ -229,6 +240,7 @@ const actionGroups = computed(() => {
         action: 'rename',
         label: 'Rename',
         icon: 'file',
+        shortcut: props.canModify ? 'Shift F6' : undefined,
         disabled: !props.canModify,
         keywords: ['name move'],
       },
@@ -273,6 +285,7 @@ const actionGroups = computed(() => {
         action: 'copyToOtherPane',
         label: 'Copy to Other Pane',
         icon: 'copy',
+        shortcut: props.canTransfer ? 'F5' : undefined,
         disabled: !props.canTransfer,
         keywords: ['duplicate transfer other panel'],
       },
@@ -281,6 +294,7 @@ const actionGroups = computed(() => {
         action: 'moveToOtherPane',
         label: 'Move to Other Pane',
         icon: 'chevron-right',
+        shortcut: props.canMove ? 'F6' : undefined,
         disabled: !props.canMove,
         keywords: ['transfer other panel'],
       },
@@ -295,6 +309,7 @@ const actionGroups = computed(() => {
         action: 'delete',
         label: 'Delete',
         icon: 'trash',
+        shortcut: props.canModify ? 'F8' : undefined,
         disabled: !props.canModify,
         danger: true,
         keywords: ['remove trash'],
@@ -364,7 +379,7 @@ function matchesQuery(value, query) {
 }
 
 function itemMatchesFilter(item, query) {
-  return matchesQuery([item.label, ...(item.keywords || [])].join(' '), query);
+  return matchesQuery([item.label, item.shortcut, ...(item.keywords || [])].join(' '), query);
 }
 
 function customToolMatchesFilter(tool, query) {
@@ -731,6 +746,7 @@ onUnmounted(() => {
             class="context-menu-item"
             :class="{
               'context-menu-item--submenu': item.type === 'submenu',
+              'context-menu-item--shortcut': item.shortcut,
               'context-menu-item--open': item.type === 'submenu' && toolsSubmenuOpen,
               'context-menu-item--danger': item.danger,
             }"
@@ -743,7 +759,8 @@ onUnmounted(() => {
             @click="handleMenuItemClick(item)"
           >
             <AppIcon :name="item.icon" :size="16" />
-            <span>{{ item.label }}</span>
+            <span class="context-menu-item-label">{{ item.label }}</span>
+            <kbd v-if="item.shortcut" class="kbd context-menu-shortcut">{{ item.shortcut }}</kbd>
             <AppIcon
               v-if="item.type === 'submenu'"
               class="context-submenu-chevron"
@@ -778,7 +795,7 @@ onUnmounted(() => {
         @click="emitAction(`customTool:${tool.id}`)"
       >
         <AppIcon name="tool" :size="16" />
-        <span>{{ tool.name }}</span>
+        <span class="context-menu-item-label">{{ tool.name }}</span>
       </button>
     </div>
   </Teleport>
@@ -945,14 +962,24 @@ onUnmounted(() => {
   transition: none;
 }
 
-.context-menu-item span {
+.context-menu-item-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.context-menu-item--shortcut {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+}
+
 .context-menu-item--submenu {
   grid-template-columns: 18px minmax(0, 1fr) 14px;
+}
+
+.context-menu-shortcut {
+  justify-self: end;
+  min-width: max-content;
+  pointer-events: none;
 }
 
 .context-submenu-chevron {
@@ -973,6 +1000,15 @@ onUnmounted(() => {
   color: #fff;
   outline: 0;
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
+}
+
+.context-menu-item:hover:not(:disabled) .context-menu-shortcut,
+.context-menu-item:focus-visible .context-menu-shortcut,
+.context-menu-item--open:not(:disabled) .context-menu-shortcut {
+  border-color: rgb(255 255 255 / 0.28);
+  background: rgb(255 255 255 / 0.14);
+  box-shadow: none;
+  color: rgb(255 255 255 / 0.82);
 }
 
 .context-menu-item:disabled {

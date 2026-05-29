@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 
 const props = defineProps({
@@ -23,6 +23,10 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  isActive: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 const emit = defineEmits(['action', 'close']);
@@ -33,6 +37,47 @@ const menuStyle = ref({
   top: `${props.position.y}px`,
   maxHeight: 'calc(100vh - 16px)',
 });
+const menuGroups = computed(() => [
+  [
+    {
+      action: 'copyPath',
+      icon: 'copy',
+      label: 'Copy Path',
+    },
+    {
+      action: 'duplicate',
+      icon: 'plus',
+      label: 'Duplicate Tab',
+    },
+  ],
+  [
+    {
+      action: 'openInOtherPane',
+      icon: 'open-other-pane',
+      label: 'Open in Other Pane',
+    },
+    {
+      action: 'moveToOtherPane',
+      icon: 'chevron-right',
+      label: 'Move to Other Pane',
+    },
+  ],
+  [
+    {
+      action: 'close',
+      icon: 'x',
+      label: 'Close Tab',
+      shortcut: props.isActive && props.canClose ? 'Ctrl W' : undefined,
+      disabled: !props.canClose,
+    },
+    {
+      action: 'closeOthers',
+      icon: 'x',
+      label: 'Close Other Tabs',
+      disabled: !props.canCloseOthers,
+    },
+  ],
+]);
 
 function updatePosition() {
   nextTick(() => {
@@ -123,48 +168,24 @@ onUnmounted(() => {
         <small>{{ tab.currentPath }}</small>
       </div>
 
-      <button type="button" role="menuitem" class="tab-context-menu-item" @click="emitAction('copyPath')">
-        <AppIcon name="copy" :size="16" />
-        <span>Copy Path</span>
-      </button>
-      <button type="button" role="menuitem" class="tab-context-menu-item" @click="emitAction('duplicate')">
-        <AppIcon name="plus" :size="16" />
-        <span>Duplicate Tab</span>
-      </button>
+      <template v-for="(group, groupIndex) in menuGroups" :key="groupIndex">
+        <div v-if="groupIndex > 0" class="tab-context-menu-separator"></div>
 
-      <div class="tab-context-menu-separator"></div>
-
-      <button type="button" role="menuitem" class="tab-context-menu-item" @click="emitAction('openInOtherPane')">
-        <AppIcon name="open-other-pane" :size="16" />
-        <span>Open in Other Pane</span>
-      </button>
-      <button type="button" role="menuitem" class="tab-context-menu-item" @click="emitAction('moveToOtherPane')">
-        <AppIcon name="chevron-right" :size="16" />
-        <span>Move to Other Pane</span>
-      </button>
-
-      <div class="tab-context-menu-separator"></div>
-
-      <button
-        type="button"
-        role="menuitem"
-        class="tab-context-menu-item"
-        :disabled="!canClose"
-        @click="emitAction('close')"
-      >
-        <AppIcon name="x" :size="16" />
-        <span>Close Tab</span>
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        class="tab-context-menu-item"
-        :disabled="!canCloseOthers"
-        @click="emitAction('closeOthers')"
-      >
-        <AppIcon name="x" :size="16" />
-        <span>Close Other Tabs</span>
-      </button>
+        <button
+          v-for="item in group"
+          :key="item.action"
+          type="button"
+          role="menuitem"
+          class="tab-context-menu-item"
+          :class="{ 'tab-context-menu-item--shortcut': item.shortcut }"
+          :disabled="item.disabled"
+          @click="emitAction(item.action)"
+        >
+          <AppIcon :name="item.icon" :size="16" />
+          <span class="tab-context-menu-item-label">{{ item.label }}</span>
+          <kbd v-if="item.shortcut" class="kbd tab-context-menu-shortcut">{{ item.shortcut }}</kbd>
+        </button>
+      </template>
     </div>
   </Teleport>
 </template>
@@ -260,12 +281,36 @@ onUnmounted(() => {
   transition: none;
 }
 
+.tab-context-menu-item--shortcut {
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+}
+
+.tab-context-menu-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-context-menu-shortcut {
+  justify-self: end;
+  min-width: max-content;
+  pointer-events: none;
+}
+
 .tab-context-menu-item:hover:not(:disabled),
 .tab-context-menu-item:focus-visible {
   background: var(--btn-primary-bg);
   color: #fff;
   outline: 0;
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
+}
+
+.tab-context-menu-item:hover:not(:disabled) .tab-context-menu-shortcut,
+.tab-context-menu-item:focus-visible .tab-context-menu-shortcut {
+  border-color: rgb(255 255 255 / 0.28);
+  background: rgb(255 255 255 / 0.14);
+  box-shadow: none;
+  color: rgb(255 255 255 / 0.82);
 }
 
 .tab-context-menu-item:disabled {

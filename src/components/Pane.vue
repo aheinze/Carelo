@@ -2717,6 +2717,7 @@ async function handleContextAction(action) {
       :can-modify="canModifyContext"
       :can-move="canMoveContext"
       :can-batch-rename="canBatchRenameContext"
+      :operation-count="contextOperationEntries(contextMenu).length"
       @action="handleContextAction"
       @close="closeContextMenu"
     />
@@ -2728,6 +2729,7 @@ async function handleContextAction(action) {
       :position="tabContextMenu.position"
       :can-close="pane.tabs.length > 1"
       :can-close-others="pane.tabs.length > 1"
+      :is-active="tabContextMenu.tabId === pane.activeTabId"
       @action="handleTabContextAction"
       @close="closeTabContextMenu"
     />
