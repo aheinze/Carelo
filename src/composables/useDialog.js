@@ -61,6 +61,7 @@ function normalizeDialog(options = {}) {
     inputLabel: options.inputLabel || '',
     inputType: options.inputType || 'text',
     inputValue: options.inputValue ?? options.defaultValue ?? '',
+    inputSelection: options.inputSelection || null,
     inputPlaceholder: options.inputPlaceholder || options.placeholder || '',
     inputRequired: Boolean(options.inputRequired),
     facts: Array.isArray(options.facts) ? options.facts : [],

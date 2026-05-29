@@ -38,7 +38,9 @@ function clearPromptFocusRequests() {
 }
 
 function focusPromptInput(dialogId, shouldSelect = true) {
-  if (activeDialog.value?.id !== dialogId || activeDialog.value?.type !== 'prompt') {
+  const current = activeDialog.value;
+
+  if (current?.id !== dialogId || current.type !== 'prompt') {
     return false;
   }
 
@@ -51,10 +53,37 @@ function focusPromptInput(dialogId, shouldSelect = true) {
   input.focus({ preventScroll: true });
 
   if (document.activeElement === input && shouldSelect) {
-    input.select();
+    selectPromptInputText(input, current);
   }
 
   return document.activeElement === input;
+}
+
+function selectPromptInputText(input, dialogConfig) {
+  const valueLength = input.value.length;
+  const selection = dialogConfig?.inputSelection;
+
+  try {
+    if (
+      selection &&
+      Number.isFinite(selection.start) &&
+      Number.isFinite(selection.end)
+    ) {
+      input.setSelectionRange(
+        clampSelectionOffset(selection.start, valueLength),
+        clampSelectionOffset(selection.end, valueLength),
+      );
+      return;
+    }
+
+    input.select();
+  } catch {
+    input.select();
+  }
+}
+
+function clampSelectionOffset(value, max) {
+  return Math.max(0, Math.min(max, Number(value) || 0));
 }
 
 function requestPromptInputFocus(dialogId) {
@@ -82,7 +111,7 @@ watch(
       return;
     }
 
-    inputValue.value = nextDialog.inputValue || '';
+    inputValue.value = nextDialog.inputValue ?? '';
     checkboxValue.value = Boolean(nextDialog.checkboxValue);
     await nextTick();
 
@@ -92,7 +121,7 @@ watch(
       dialogPanel.value?.focus();
     }
   },
-  { flush: 'post' },
+  { flush: 'post', immediate: true },
 );
 
 onUnmounted(clearPromptFocusRequests);

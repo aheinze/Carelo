@@ -20,6 +20,7 @@ import {
   deleteConfirmationOptions,
   shouldConfirmDelete,
 } from '../utils/deleteConfirmation';
+import { renamePromptInputSelection } from '../utils/renamePrompt';
 import {
   OPEN_BATCH_RENAME_EVENT,
   CREATE_SIDEBAR_GROUP_EVENT,
@@ -382,6 +383,7 @@ export function useKeyboardShortcuts() {
       message: entry.name,
       inputLabel: 'Name',
       inputValue: entry.name,
+      inputSelection: renamePromptInputSelection(entry),
       confirmLabel: 'Rename',
     }))?.trim();
 
@@ -412,7 +414,8 @@ export function useKeyboardShortcuts() {
       title: 'Create Folder',
       icon: 'folder',
       inputLabel: 'Folder name',
-      inputValue: seedName,
+      inputValue: '',
+      inputPlaceholder: seedName,
       confirmLabel: 'Create',
       inputRequired: true,
     }))?.trim();

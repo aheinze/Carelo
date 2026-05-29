@@ -103,8 +103,10 @@ async function createFolderInActivePane() {
     icon: 'folder',
     message: targetDirectory,
     inputLabel: 'Name',
-    inputValue: 'Untitled Folder',
+    inputValue: '',
+    inputPlaceholder: 'New Folder',
     confirmLabel: 'Create',
+    inputRequired: true,
   }))?.trim();
 
   if (!name) {

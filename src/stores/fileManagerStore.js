@@ -584,7 +584,7 @@ function normalizeWorkspace(workspace, index = 0) {
     name,
     createdAt,
     updatedAt,
-    activePaneId: value.activePaneId === 'left' ? 'left' : 'right',
+    activePaneId: value.activePaneId === 'right' ? 'right' : 'left',
     left: normalizeWorkspacePane(value.left, '~', DEFAULT_APP_SETTINGS.defaultViewMode),
     right: normalizeWorkspacePane(value.right, '~', DEFAULT_APP_SETTINGS.defaultViewMode),
   };
@@ -819,7 +819,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     ),
   });
 
-  const activePaneId = ref('right');
+  const activePaneId = ref('left');
   const sidebarVisible = ref(savedSettings.sidebarVisible ?? true);
   const sidebarWidth = ref(savedSettings.sidebarWidth ?? 310);
   const previewPanelVisible = ref(savedSettings.previewPanelVisible ?? true);

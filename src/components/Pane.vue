@@ -38,6 +38,7 @@ import {
 } from '../utils/deleteConfirmation';
 import { extensionForName } from '../utils/fileTypes';
 import { OPEN_BATCH_RENAME_EVENT } from '../utils/appEvents';
+import { renamePromptInputSelection } from '../utils/renamePrompt';
 
 const BatchRenameDialog = defineAsyncComponent(() => import('./BatchRenameDialog.vue'));
 const CreateArchiveDialog = defineAsyncComponent(() => import('./CreateArchiveDialog.vue'));
@@ -1633,7 +1634,8 @@ async function createFolderInDirectory(directory) {
     icon: 'folder',
     message: directory,
     inputLabel: 'Folder name',
-    inputValue: 'New Folder',
+    inputValue: '',
+    inputPlaceholder: 'New Folder',
     confirmLabel: 'Create',
     inputRequired: true,
   }))?.trim();
@@ -2422,6 +2424,7 @@ async function handleContextAction(action) {
         message: entry.name,
         inputLabel: 'Name',
         inputValue: entry.name,
+        inputSelection: renamePromptInputSelection(entry),
         confirmLabel: 'Rename',
       }))?.trim();
 
