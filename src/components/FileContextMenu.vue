@@ -7,6 +7,10 @@ const props = defineProps({
     type: Object,
     default: null,
   },
+  targetDirectory: {
+    type: String,
+    default: '',
+  },
   position: {
     type: Object,
     required: true,
@@ -47,6 +51,10 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  canBatchRename: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 const emit = defineEmits(['action', 'close']);
@@ -70,6 +78,8 @@ const toolsMenuStyle = ref({
 
 const canOpenInNewTab = computed(() => props.entry?.kind === 'directory');
 const itemType = computed(() => (props.entry?.kind === 'directory' ? 'Folder' : 'File'));
+const isDirectoryContext = computed(() => !props.entry && Boolean(props.targetDirectory));
+const hasMenuTarget = computed(() => Boolean(props.entry) || isDirectoryContext.value);
 const visibleCustomTools = computed(() =>
   props.customTools.filter((tool) => tool?.enabled !== false && tool?.name && tool?.command),
 );
@@ -94,6 +104,51 @@ const visibleSubmenuTools = computed(() => {
 const actionGroups = computed(() => {
   const entryKind = props.entry?.kind;
   const groups = [];
+
+  if (isDirectoryContext.value) {
+    groups.push({
+      id: 'directory',
+      items: [
+        {
+          id: 'newFolder',
+          action: 'newFolder',
+          label: 'New Folder',
+          icon: 'folder-plus',
+          disabled: !props.canModify,
+          keywords: ['create directory f7'],
+        },
+        {
+          id: 'refreshDirectory',
+          action: 'refreshDirectory',
+          label: 'Refresh Folder',
+          icon: 'refresh',
+          keywords: ['reload update'],
+        },
+      ],
+    });
+
+    groups.push({
+      id: 'path',
+      items: [
+        {
+          id: 'openDirectoryInNewTab',
+          action: 'openDirectoryInNewTab',
+          label: 'Open in New Tab',
+          icon: 'plus',
+          keywords: ['tab duplicate'],
+        },
+        {
+          id: 'copyDirectoryPath',
+          action: 'copyDirectoryPath',
+          label: 'Copy Folder Path',
+          icon: 'copy',
+          keywords: ['clipboard pathname location current directory'],
+        },
+      ],
+    });
+
+    return groups;
+  }
 
   if (visibleCustomTools.value.length > 0) {
     groups.push({
@@ -177,6 +232,14 @@ const actionGroups = computed(() => {
         disabled: !props.canModify,
         keywords: ['name move'],
       },
+      {
+        id: 'batchRename',
+        action: 'batchRename',
+        label: 'Batch Rename...',
+        icon: 'file-text',
+        disabled: !props.canBatchRename,
+        keywords: ['bulk multiple rename pattern replace number'],
+      },
     ],
   });
 
@@ -257,6 +320,34 @@ const firstEnabledFilteredItem = computed(() => (
     .flatMap((group) => group.items)
     .find((item) => !item.disabled) || null
 ));
+const titleLabel = computed(() => {
+  if (props.entry?.name) {
+    return props.entry.name;
+  }
+
+  return directoryName(props.targetDirectory) || 'Current Folder';
+});
+const titleDetail = computed(() => (isDirectoryContext.value ? 'Folder' : itemType.value));
+const menuAriaLabel = computed(() =>
+  isDirectoryContext.value
+    ? `${titleLabel.value} folder context menu`
+    : `${titleLabel.value} context menu`,
+);
+
+function directoryName(path) {
+  const value = String(path || '').replace(/\/+$/, '');
+
+  if (!value || value === '/' || value === '~') {
+    return value || 'Current Folder';
+  }
+
+  if (value.startsWith('remote://')) {
+    const parts = value.slice('remote://'.length).split('/').filter(Boolean);
+    return parts.at(-1) || parts[0] || value;
+  }
+
+  return value.split('/').filter(Boolean).at(-1)?.replace(/!$/, '') || value;
+}
 
 function normalizeMenuText(value) {
   return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -551,6 +642,11 @@ watch(() => props.entry, () => {
   toolsSubmenuOpen.value = false;
   focusFilter();
 });
+watch(() => props.targetDirectory, () => {
+  actionFilter.value = '';
+  toolsSubmenuOpen.value = false;
+  focusFilter();
+});
 watch(actionFilter, () => {
   toolsSubmenuOpen.value = false;
   updatePosition();
@@ -581,12 +677,12 @@ onUnmounted(() => {
 <template>
   <Teleport to="body">
     <div
-      v-if="entry"
+      v-if="hasMenuTarget"
       ref="menuRef"
       class="context-menu"
       :style="menuStyle"
       role="menu"
-      :aria-label="`${entry.name} context menu`"
+      :aria-label="menuAriaLabel"
       @contextmenu.prevent
     >
       <label class="context-menu-filter">
@@ -615,8 +711,8 @@ onUnmounted(() => {
       </label>
 
       <div class="context-menu-title">
-        <span>{{ entry.name }}</span>
-        <small>{{ itemType }}</small>
+        <span>{{ titleLabel }}</span>
+        <small>{{ titleDetail }}</small>
       </div>
 
       <template v-if="hasVisibleActions">

@@ -925,29 +925,34 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       };
     });
 
+    const deviceItems = volumeItems.filter((item) => !item.isRemote);
+    const remoteItems = volumeItems.filter((item) => item.isRemote);
+
     sections.splice(
       1,
       0,
       {
         title: 'Devices',
-        items: volumeItems.filter((item) => !item.isRemote),
+        items: deviceItems,
       },
     );
 
+    const favoriteSections = fallbackGroups.map((group) => ({
+      id: group.id,
+      title: group.name,
+      favoriteGroupId: group.id,
+      isFavoriteGroup: true,
+      isDefaultFavoriteGroup: group.id === DEFAULT_FAVORITE_GROUP_ID,
+      items: groupedFavorites.get(group.id) || [],
+    }));
+
     return [
       ...sections,
-      ...fallbackGroups.map((group) => ({
-        id: group.id,
-        title: group.name,
-        favoriteGroupId: group.id,
-        isFavoriteGroup: true,
-        isDefaultFavoriteGroup: group.id === DEFAULT_FAVORITE_GROUP_ID,
-        items: groupedFavorites.get(group.id) || [],
-      })),
-      {
+      ...favoriteSections,
+      ...(remoteItems.length > 0 ? [{
         title: 'Remote Storage',
-        items: volumeItems.filter((item) => item.isRemote),
-      },
+        items: remoteItems,
+      }] : []),
     ];
   });
 

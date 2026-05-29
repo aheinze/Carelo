@@ -21,6 +21,7 @@ import {
   shouldConfirmDelete,
 } from '../utils/deleteConfirmation';
 import {
+  OPEN_BATCH_RENAME_EVENT,
   CREATE_SIDEBAR_GROUP_EVENT,
   OPEN_REMOTE_STORAGE_EVENT,
   RUN_COMMAND_EVENT,
@@ -792,6 +793,11 @@ export function useKeyboardShortcuts() {
           return;
         case 'file.rename':
           await renameFocused();
+          return;
+        case 'file.batchRename':
+          window.dispatchEvent(new CustomEvent(OPEN_BATCH_RENAME_EVENT, {
+            detail: { paneId },
+          }));
           return;
         case 'file.newFolder':
           await createDirectory();

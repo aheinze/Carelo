@@ -1489,6 +1489,20 @@ function handleBackgroundClick(event) {
   emit('background-click', { event });
 }
 
+function handleBackgroundContext(event) {
+  if (event.defaultPrevented || isFileRowTarget(event) || event.target?.closest?.('button, input, textarea, select, [contenteditable="true"]')) {
+    return;
+  }
+
+  event.preventDefault();
+  emit('context', {
+    target: 'directory',
+    targetDirectory: directoryFromDragElement(event.target),
+    x: event.clientX,
+    y: event.clientY,
+  });
+}
+
 function syncBaseColumnSelection() {
   if (props.viewMode !== 'columns' || (props.loading && !props.loaded)) {
     return;
@@ -1697,6 +1711,7 @@ watch(
     @dragleave.capture="handleDelegatedDragLeave"
     @drop.capture="handleDelegatedDrop"
     @dragend.capture="handleDelegatedDragEnd"
+    @contextmenu="handleBackgroundContext"
     @dragover="handleCurrentDirectoryDragOver"
     @dragleave="handleCurrentDirectoryDragLeave"
     @drop="handleCurrentDirectoryDrop"

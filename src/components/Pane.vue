@@ -6,6 +6,7 @@ import FileList from './FileList.vue';
 import TabContextMenu from './TabContextMenu.vue';
 import {
   archiveItems,
+  createFolder,
   deleteItems,
   editFile,
   listOpenWithApps,
@@ -13,6 +14,7 @@ import {
   openWithApp,
   openWithDefaultApp,
   revealInFileManager,
+  renameItem,
   runCustomTool,
   unarchiveItems,
 } from '../composables/useFileOperations';
@@ -35,7 +37,9 @@ import {
   shouldConfirmDelete,
 } from '../utils/deleteConfirmation';
 import { extensionForName } from '../utils/fileTypes';
+import { OPEN_BATCH_RENAME_EVENT } from '../utils/appEvents';
 
+const BatchRenameDialog = defineAsyncComponent(() => import('./BatchRenameDialog.vue'));
 const CreateArchiveDialog = defineAsyncComponent(() => import('./CreateArchiveDialog.vue'));
 const OpenWithDialog = defineAsyncComponent(() => import('./OpenWithDialog.vue'));
 
@@ -135,6 +139,45 @@ function remoteBreadcrumbs(path) {
   }
 
   return crumbs;
+}
+
+function remoteVolumeIdForPath(path) {
+  const value = String(path || '');
+
+  if (!value.startsWith('remote://')) {
+    return '';
+  }
+
+  return value.slice('remote://'.length).split('/').filter(Boolean)[0] || '';
+}
+
+function remoteVolumeForPath(path) {
+  const volumeId = remoteVolumeIdForPath(path);
+
+  if (!volumeId) {
+    return null;
+  }
+
+  const rootPath = `remote://${volumeId}/`;
+  const volumes = Array.isArray(store.volumes) ? store.volumes : [];
+
+  return volumes.find((candidate) => candidate.path === rootPath) || null;
+}
+
+function canRenamePath(path) {
+  if (!path || isArchivePath(path)) {
+    return false;
+  }
+
+  const volume = remoteVolumeForPath(path);
+
+  return !volume || volume.capabilities?.canRename !== false;
+}
+
+function unsupportedRenameRemoteVolume(entries) {
+  return entries
+    .map((entry) => remoteVolumeForPath(entry.path))
+    .find((volume) => volume?.capabilities?.canRename === false) || null;
 }
 
 const breadcrumbs = computed(() => {
@@ -258,6 +301,11 @@ const archiveDialog = ref({
   directory: '',
   existingNames: [],
 });
+const batchRenameDialog = ref({
+  visible: false,
+  entries: [],
+  existingNamesByDirectory: {},
+});
 const openWithDialog = ref({
   visible: false,
   entry: null,
@@ -290,8 +338,15 @@ const canTransferToOtherPane = computed(() => {
 const isFileDragActive = computed(() => Boolean(store.dragOperation?.entries?.length));
 const draggedPaths = computed(() => store.dragOperation?.entries?.map((entry) => entry.path) || []);
 const canModifyContext = computed(() =>
-  contextOperationEntries(contextMenu.value).every((item) => !isArchivePath(item.path)),
+  contextMenu.value?.targetDirectory && !contextMenu.value?.entry
+    ? !isArchivePath(contextMenu.value.targetDirectory)
+    : contextOperationEntries(contextMenu.value).every((item) => !isArchivePath(item.path)),
 );
+const canBatchRenameContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  return operationEntries.length > 1 && operationEntries.every((item) => canRenamePath(item.path));
+});
 const canMoveContext = computed(() =>
   canTransferToOtherPane.value
     && contextOperationEntries(contextMenu.value).every((item) => !isArchivePath(item.path)),
@@ -376,11 +431,13 @@ function updateColumnSummary(summary) {
 }
 
 onMounted(async () => {
+  window.addEventListener(OPEN_BATCH_RENAME_EVENT, handleOpenBatchRenameEvent);
   await store.initialize();
   store.loadPane(props.paneId);
 });
 
 onUnmounted(() => {
+  window.removeEventListener(OPEN_BATCH_RENAME_EVENT, handleOpenBatchRenameEvent);
   cleanupPointerDrag();
   clearFileDragNow();
 });
@@ -695,6 +752,21 @@ function handleBackgroundClick(payload) {
 function showContextMenu(payload) {
   store.setActivePane(props.paneId);
   closeTabContextMenu();
+
+  if (payload?.target === 'directory') {
+    store.selectEntry(props.paneId, -1);
+    contextMenu.value = {
+      entry: null,
+      index: null,
+      operationEntries: [],
+      targetDirectory: payload.targetDirectory || effectiveDirectory(),
+      position: {
+        x: payload.x,
+        y: payload.y,
+      },
+    };
+    return;
+  }
 
   if (Number.isInteger(payload.index)) {
     if (!store.isEntrySelected(props.paneId, payload.index)) {
@@ -1546,6 +1618,34 @@ async function existingNamesInDirectory(directory) {
   return new Set(directoryEntries.map((item) => item.name.toLocaleLowerCase()));
 }
 
+async function createFolderInDirectory(directory) {
+  if (!directory || isArchivePath(directory)) {
+    await dialog.alert({
+      title: 'New Folder Not Available',
+      message: 'Archive contents are read-only while browsing.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  const name = (await dialog.prompt({
+    title: 'Create Folder',
+    icon: 'folder',
+    message: directory,
+    inputLabel: 'Folder name',
+    inputValue: 'New Folder',
+    confirmLabel: 'Create',
+    inputRequired: true,
+  }))?.trim();
+
+  if (!name) {
+    return;
+  }
+
+  await createFolder(pathJoin(directory, name));
+  await refreshDirectories([directory], [props.paneId]);
+}
+
 async function runQueuedArchive({ paths, destination, options, overwrite, label, refreshPaths, successDetail }) {
   const retryAction = () => runQueuedArchive({
     paths,
@@ -1721,6 +1821,343 @@ async function extractArchive(menu) {
   });
 }
 
+function normalizedBatchRenameEntries(entries) {
+  const seen = new Set();
+
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry?.path && entry?.name)
+    .filter((entry) => {
+      if (seen.has(entry.path)) {
+        return false;
+      }
+
+      seen.add(entry.path);
+      return true;
+    })
+    .map((entry) => ({
+      ...entry,
+      directory: store.parentDirectoryFor(entry.path),
+    }));
+}
+
+async function openBatchRenameDialog(entries = store.operationEntriesFor(props.paneId)) {
+  const operationEntries = normalizedBatchRenameEntries(entries);
+
+  if (operationEntries.length < 2) {
+    await dialog.alert({
+      title: 'Batch Rename Needs a Selection',
+      message: 'Select at least two items to rename together.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  if (operationEntries.some((entry) => isArchivePath(entry.path))) {
+    await dialog.alert({
+      title: 'Batch Rename Not Available',
+      message: 'Archive contents are read-only while browsing.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  const unsupportedRemote = unsupportedRenameRemoteVolume(operationEntries);
+
+  if (unsupportedRemote) {
+    await dialog.alert({
+      title: 'Batch Rename Not Available',
+      message: `${unsupportedRemote.name || 'This remote storage'} does not support rename operations.`,
+      detail: 'Copy or move items to a rename-capable location first.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  const selectedPaths = new Set(operationEntries.map((entry) => entry.path));
+  const directories = [...new Set(operationEntries.map((entry) => entry.directory).filter(Boolean))];
+  const existingNamesByDirectory = {};
+
+  await Promise.all(directories.map(async (directory) => {
+    const directoryEntries = await listDirectory(directory);
+    existingNamesByDirectory[directory] = directoryEntries
+      .filter((entry) => !selectedPaths.has(entry.path))
+      .map((entry) => entry.name);
+  }));
+
+  batchRenameDialog.value = {
+    visible: true,
+    entries: operationEntries,
+    existingNamesByDirectory,
+  };
+}
+
+function closeBatchRenameDialog() {
+  batchRenameDialog.value = {
+    ...batchRenameDialog.value,
+    visible: false,
+  };
+}
+
+function handleOpenBatchRenameEvent(event) {
+  const paneId = event?.detail?.paneId;
+
+  if (paneId && paneId !== props.paneId) {
+    return;
+  }
+
+  if (!paneId && store.activePaneId !== props.paneId) {
+    return;
+  }
+
+  openBatchRenameDialog().catch(async (error) => {
+    console.error(error);
+    await dialog.alert({
+      title: 'Batch Rename Not Available',
+      message: error?.message || 'Unable to prepare the selected items.',
+      variant: 'warning',
+    });
+  });
+}
+
+function normalizeRenameName(value) {
+  return String(value || '').toLocaleLowerCase();
+}
+
+function batchRenameKey(directory, name) {
+  return `${String(directory || '')}\u0000${normalizeRenameName(name)}`;
+}
+
+function batchRenameNameError(name) {
+  const value = String(name || '');
+
+  if (!value.trim()) {
+    return 'Name is empty.';
+  }
+
+  if (/[\\/]/.test(value)) {
+    return 'Folder separators are not allowed in item names.';
+  }
+
+  if (value === '.' || value === '..') {
+    return 'Reserved names cannot be used.';
+  }
+
+  if (value.length > 255) {
+    return 'One of the new names is too long.';
+  }
+
+  return '';
+}
+
+async function validateBatchRenamePlan(items) {
+  const originalPaths = new Set(items.map((item) => item.originalPath));
+  const finalKeys = new Set();
+
+  for (const item of items) {
+    const nameError = batchRenameNameError(item.nextName);
+
+    if (nameError) {
+      throw new Error(nameError);
+    }
+
+    const key = batchRenameKey(item.directory, item.nextName);
+
+    if (finalKeys.has(key)) {
+      throw new Error(`"${item.nextName}" would be used more than once.`);
+    }
+
+    finalKeys.add(key);
+  }
+
+  const directories = [...new Set(items.map((item) => item.directory).filter(Boolean))];
+
+  await Promise.all(directories.map(async (directory) => {
+    const directoryEntries = await listDirectory(directory);
+
+    for (const entry of directoryEntries) {
+      if (originalPaths.has(entry.path)) {
+        continue;
+      }
+
+      if (finalKeys.has(batchRenameKey(directory, entry.name))) {
+        throw new Error(`"${entry.name}" already exists.`);
+      }
+    }
+  }));
+}
+
+async function reservedNamesForBatch(renames) {
+  const directories = [...new Set(renames.map((item) => item.directory).filter(Boolean))];
+  const reservedByDirectory = new Map();
+
+  await Promise.all(directories.map(async (directory) => {
+    const directoryEntries = await listDirectory(directory);
+    const names = new Set(directoryEntries.map((entry) => normalizeRenameName(entry.name)));
+    reservedByDirectory.set(directory, names);
+  }));
+
+  for (const item of renames) {
+    reservedByDirectory.get(item.directory)?.add(normalizeRenameName(item.nextName));
+  }
+
+  return reservedByDirectory;
+}
+
+function uniqueBatchTempName(item, index, reservedByDirectory) {
+  const reserved = reservedByDirectory.get(item.directory) || new Set();
+  const stamp = Date.now();
+
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const suffix = attempt === 0 ? '' : `-${attempt}`;
+    const candidate = `.carelo-renaming-${stamp}-${index}${suffix}.tmp`;
+    const normalized = normalizeRenameName(candidate);
+
+    if (!reserved.has(normalized)) {
+      reserved.add(normalized);
+      return candidate;
+    }
+  }
+
+  throw new Error('Unable to reserve a temporary rename name.');
+}
+
+async function rollbackStagedBatchRename(stagedItems) {
+  const finalizedItems = stagedItems.filter((item) => item.finalized);
+  const stagedOnlyItems = stagedItems.filter((item) => !item.finalized);
+
+  for (const item of finalizedItems) {
+    try {
+      await renameItem(item.finalPath, item.originalPath);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  for (const item of stagedOnlyItems.slice().reverse()) {
+    try {
+      await renameItem(item.tempPath, item.originalPath);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+}
+
+async function runBatchRename(renames) {
+  const items = normalizedBatchRenameEntries(renames.map((item) => ({
+    ...item.entry,
+    name: item.name,
+    path: item.path,
+    directory: item.directory,
+  }))).map((entry) => {
+    const source = renames.find((item) => item.path === entry.path);
+
+    return {
+      entry,
+      directory: source?.directory || entry.directory,
+      name: source?.name || entry.name,
+      nextName: String(source?.nextName || '').trim(),
+      originalPath: entry.path,
+      finalPath: pathJoin(source?.directory || entry.directory, String(source?.nextName || '').trim()),
+    };
+  }).filter((item) =>
+    item.nextName &&
+    item.nextName !== item.name &&
+    !/[\\/]/.test(item.nextName) &&
+    !isArchivePath(item.originalPath),
+  );
+
+  if (items.length === 0) {
+    return;
+  }
+
+  await validateBatchRenamePlan(items);
+
+  const totalSteps = items.length * 2;
+  const touchedDirectories = [...new Set(items.map((item) => item.directory).filter(Boolean))];
+  const jobId = store.startQueueJob({
+    operation: 'rename',
+    label: items.length === 1 ? 'Renaming 1 item' : `Renaming ${items.length} items`,
+    detail: 'Preparing names',
+    remotePaths: items.flatMap((item) => [item.originalPath, item.finalPath]),
+    cancelable: false,
+    pausable: false,
+  });
+  const stagedItems = [];
+
+  store.updateQueueJob(jobId, {
+    totalEntries: totalSteps,
+    processedEntries: 0,
+  });
+
+  try {
+    const reservedByDirectory = await reservedNamesForBatch(items);
+
+    for (const [index, item] of items.entries()) {
+      const tempName = uniqueBatchTempName(item, index, reservedByDirectory);
+      const tempPath = pathJoin(item.directory, tempName);
+
+      store.updateQueueJob(jobId, {
+        currentPath: item.originalPath,
+        detail: `Staging ${item.name}`,
+        processedEntries: index,
+      });
+
+      await renameItem(item.originalPath, tempPath);
+      stagedItems.push({
+        ...item,
+        tempPath,
+        finalized: false,
+      });
+
+      store.updateQueueJob(jobId, {
+        processedEntries: index + 1,
+      });
+    }
+
+    for (const [index, item] of stagedItems.entries()) {
+      store.updateQueueJob(jobId, {
+        currentPath: item.finalPath,
+        detail: `Renaming to ${item.nextName}`,
+        processedEntries: items.length + index,
+      });
+
+      await renameItem(item.tempPath, item.finalPath);
+      item.finalized = true;
+
+      store.updateQueueJob(jobId, {
+        processedEntries: items.length + index + 1,
+      });
+    }
+
+    await refreshDirectories(touchedDirectories);
+    store.completeQueueJob(jobId, items.length === 1 ? '1 item renamed' : `${items.length} items renamed`);
+  } catch (error) {
+    await rollbackStagedBatchRename(stagedItems);
+    store.failQueueJob(jobId, error?.message || 'Batch rename failed.', {
+      failedItems: items.map((item) => ({
+        path: item.originalPath,
+        message: error?.message || 'Failed',
+      })),
+    });
+    throw error;
+  }
+}
+
+async function handleBatchRename(payload) {
+  closeBatchRenameDialog();
+
+  try {
+    await runBatchRename(payload?.renames || []);
+  } catch (error) {
+    console.error(error);
+    await dialog.alert({
+      title: 'Batch Rename Failed',
+      message: error?.message || 'The selected items could not be renamed.',
+      variant: 'warning',
+    });
+  }
+}
+
 async function runContextCustomTool(menu, toolId) {
   const tool = configuredCustomTools.value.find((candidate) => candidate.id === toolId);
   const operationEntries = contextOperationEntries(menu);
@@ -1894,14 +2331,39 @@ function openSelectedEntry() {
 async function handleContextAction(action) {
   const menu = contextMenu.value;
   const entry = menu?.entry;
+  const targetDirectory = menu?.targetDirectory || effectiveDirectory();
 
   closeContextMenu();
 
-  if (!entry) {
-    return;
-  }
-
   try {
+    if (!entry) {
+      if (!targetDirectory) {
+        return;
+      }
+
+      if (action === 'newFolder') {
+        await createFolderInDirectory(targetDirectory);
+        return;
+      }
+
+      if (action === 'refreshDirectory') {
+        await refreshDirectories([targetDirectory], [props.paneId]);
+        return;
+      }
+
+      if (action === 'copyDirectoryPath') {
+        await copyPathToClipboard(targetDirectory);
+        return;
+      }
+
+      if (action === 'openDirectoryInNewTab') {
+        store.addPaneTab(props.paneId, targetDirectory);
+        return;
+      }
+
+      return;
+    }
+
     if (action === 'open') {
       if (entry.kind === 'directory') {
         if (Number.isInteger(menu.index)) {
@@ -1946,6 +2408,11 @@ async function handleContextAction(action) {
 
     if (typeof action === 'string' && action.startsWith('customTool:')) {
       await runContextCustomTool(menu, action.slice('customTool:'.length));
+      return;
+    }
+
+    if (action === 'batchRename') {
+      await openBatchRenameDialog(contextOperationEntries(menu));
       return;
     }
 
@@ -2238,6 +2705,7 @@ async function handleContextAction(action) {
     <FileContextMenu
       v-if="contextMenu"
       :entry="contextMenu.entry"
+      :target-directory="contextMenu.targetDirectory"
       :position="contextMenu.position"
       :can-archive="canArchiveContext"
       :can-unarchive="canUnarchiveContext"
@@ -2248,6 +2716,7 @@ async function handleContextAction(action) {
       :can-transfer="canTransferToOtherPane"
       :can-modify="canModifyContext"
       :can-move="canMoveContext"
+      :can-batch-rename="canBatchRenameContext"
       @action="handleContextAction"
       @close="closeContextMenu"
     />
@@ -2271,6 +2740,15 @@ async function handleContextAction(action) {
       :existing-names="archiveDialog.existingNames"
       @cancel="closeArchiveDialog"
       @create="handleCreateArchive"
+    />
+
+    <BatchRenameDialog
+      v-if="batchRenameDialog.visible"
+      :visible="batchRenameDialog.visible"
+      :entries="batchRenameDialog.entries"
+      :existing-names-by-directory="batchRenameDialog.existingNamesByDirectory"
+      @cancel="closeBatchRenameDialog"
+      @rename="handleBatchRename"
     />
 
     <OpenWithDialog

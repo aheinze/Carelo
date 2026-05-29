@@ -51,12 +51,44 @@ const hasFocusedEntry = computed(() => Boolean(selectedEntry.value));
 const hasArchiveOperationEntries = computed(() => (
   operationEntries.value.some((entry) => isArchivePath(entry.path))
 ));
+const canBatchRenameOperationEntries = computed(() => (
+  operationEntries.value.length > 1 &&
+  operationEntries.value.every((entry) => canRenamePath(entry.path))
+));
 const canSearchRoot = computed(() => {
   const root = activeRoot.value;
   return isCommandMode.value || (canUseLocalFileAssets()
     && root
     && !isArchivePath(root));
 });
+
+function remoteVolumeIdForPath(path) {
+  const value = String(path || '');
+
+  if (!value.startsWith('remote://')) {
+    return '';
+  }
+
+  return value.slice('remote://'.length).split('/').filter(Boolean)[0] || '';
+}
+
+function canRenamePath(path) {
+  if (!path || isArchivePath(path)) {
+    return false;
+  }
+
+  const volumeId = remoteVolumeIdForPath(path);
+
+  if (!volumeId) {
+    return true;
+  }
+
+  const rootPath = `remote://${volumeId}/`;
+  const volume = (store.volumes || []).find((candidate) => candidate.path === rootPath);
+
+  return !volume || volume.capabilities?.canRename !== false;
+}
+
 const commandDefinitions = [
   {
     id: 'palette.files',
@@ -145,6 +177,15 @@ const commandDefinitions = [
     shortcut: 'Shift F6',
     when: () => hasFocusedEntry.value && !isArchivePath(selectedEntry.value?.path),
     keywords: 'name',
+  },
+  {
+    id: 'file.batchRename',
+    section: 'File',
+    title: 'Batch rename selected items',
+    detail: () => `${operationEntries.value.length} items selected`,
+    icon: 'file-text',
+    when: () => canBatchRenameOperationEntries.value && !hasArchiveOperationEntries.value,
+    keywords: 'bulk rename multiple pattern replace number',
   },
   {
     id: 'file.newFolder',
