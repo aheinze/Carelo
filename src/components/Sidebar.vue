@@ -1,5 +1,5 @@
 <script setup>
-import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue';
+import { computed, defineAsyncComponent, nextTick, ref, onMounted, onUnmounted } from 'vue';
 import AppIcon from './AppIcon.vue';
 import WorkspaceSelector from './WorkspaceSelector.vue';
 import { getFileMetadata, mountVolume, removeRemoteVolume } from '../composables/useFileOperations';
@@ -26,11 +26,157 @@ const dialog = useDialog();
 const remoteModalVisible = ref(false);
 const sidebarFooter = ref(null);
 const sidebarAddMenuOpen = ref(false);
+const sidebarItemMenu = ref(null);
+const sidebarItemMenuRef = ref(null);
+const sidebarItemMenuStyle = ref({
+  left: '0px',
+  top: '0px',
+  maxHeight: 'calc(100vh - 16px)',
+});
 const draggedFavoriteId = ref(null);
 const favoriteDropIndex = ref(null);
 const favoriteDropGroupId = ref('');
 const mountingDevicePath = ref('');
 let volumeRefreshTimer = null;
+
+const favoriteGroupsForMenu = computed(() => {
+  if (store.favoriteGroups.length > 0) {
+    return store.favoriteGroups;
+  }
+
+  return [{
+    id: DEFAULT_FAVORITE_GROUP_ID,
+    name: 'Favorites',
+  }];
+});
+
+const sidebarItemMenuTitle = computed(() => sidebarItemMenu.value?.item?.name || 'Sidebar Item');
+const sidebarItemMenuDetail = computed(() => {
+  const item = sidebarItemMenu.value?.item;
+
+  if (!item) {
+    return '';
+  }
+
+  if (item.isFavorite) {
+    return 'Sidebar Shortcut';
+  }
+
+  if (item.isRemote) {
+    return 'Remote Storage';
+  }
+
+  if (item.isMountable) {
+    return 'Device';
+  }
+
+  return item.detail || 'Location';
+});
+const sidebarItemMenuGroups = computed(() => {
+  const item = sidebarItemMenu.value?.item;
+
+  if (!item) {
+    return [];
+  }
+
+  const groups = [];
+  const canOpen = Boolean(item.path || item.isMountable);
+  const openDisabled = item.disabled || (item.devicePath && mountingDevicePath.value === item.devicePath);
+
+  groups.push({
+    id: 'open',
+    items: [
+      {
+        id: 'open',
+        action: 'open',
+        label: item.isMountable ? 'Mount and Open' : 'Open',
+        icon: item.icon || (item.isMountable ? 'drive' : 'folder'),
+        disabled: !canOpen || openDisabled,
+      },
+      {
+        id: 'openInNewTab',
+        action: 'openInNewTab',
+        label: 'Open in New Tab',
+        icon: 'plus',
+        disabled: !item.path || item.disabled,
+      },
+      {
+        id: 'copyPath',
+        action: 'copyPath',
+        label: 'Copy Path',
+        icon: 'copy',
+        disabled: !item.path,
+      },
+    ],
+  });
+
+  if (item.isFavorite) {
+    const currentGroupId = favoriteGroupIdForItem(item);
+    const moveItems = favoriteGroupsForMenu.value.map((group) => {
+      const isCurrentGroup = group.id === currentGroupId;
+
+      return {
+        id: `move:${group.id}`,
+        action: 'moveFavoriteToGroup',
+        targetGroupId: group.id,
+        label: group.name,
+        icon: isCurrentGroup ? 'check' : 'folder',
+        disabled: isCurrentGroup,
+      };
+    });
+
+    moveItems.push({
+      id: 'move:new',
+      action: 'moveFavoriteToNewGroup',
+      label: 'New Group...',
+      icon: 'folder-plus',
+    });
+
+    groups.push({
+      id: 'move',
+      label: 'Move to Group',
+      items: moveItems,
+    });
+
+    groups.push({
+      id: 'favorite-danger',
+      items: [
+        {
+          id: 'removeFavorite',
+          action: 'removeFavorite',
+          label: 'Remove from Sidebar',
+          icon: 'x',
+          danger: true,
+        },
+      ],
+    });
+  }
+
+  if (item.isRemote) {
+    groups.push({
+      id: 'remote',
+      items: [
+        {
+          id: 'refreshRemote',
+          action: 'refreshRemote',
+          label: 'Check Connection',
+          icon: 'refresh',
+          disabled: !item.remoteId,
+        },
+        {
+          id: 'disconnectRemote',
+          action: 'disconnectRemote',
+          label: 'Disconnect',
+          icon: 'x',
+          danger: true,
+          disabled: !item.remoteId,
+        },
+      ],
+    });
+  }
+
+  return groups.filter((group) => group.items.length > 0);
+});
 
 async function openSidebarItem(item) {
   if (item.disabled || (item.devicePath && mountingDevicePath.value === item.devicePath)) {
@@ -306,6 +452,246 @@ function favoriteDropTargetForEvent(item, event) {
   };
 }
 
+function updateSidebarItemMenuPosition() {
+  nextTick(() => {
+    const menu = sidebarItemMenuRef.value;
+    const position = sidebarItemMenu.value?.position;
+
+    if (!menu || !position) {
+      return;
+    }
+
+    const margin = 8;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const rect = menu.getBoundingClientRect();
+    const maxHeight = Math.max(1, viewportHeight - margin * 2);
+    const menuHeight = Math.min(menu.scrollHeight, maxHeight);
+    const wouldOverflowRight = position.x + rect.width + margin > viewportWidth;
+    const wouldOverflowBottom = position.y + menuHeight + margin > viewportHeight;
+    const left = Math.min(
+      Math.max(margin, wouldOverflowRight ? position.x - rect.width : position.x),
+      Math.max(margin, viewportWidth - rect.width - margin),
+    );
+    const top = Math.min(
+      Math.max(margin, wouldOverflowBottom ? position.y - menuHeight : position.y),
+      Math.max(margin, viewportHeight - menuHeight - margin),
+    );
+
+    sidebarItemMenuStyle.value = {
+      left: `${left}px`,
+      top: `${top}px`,
+      maxHeight: `${maxHeight}px`,
+    };
+  });
+}
+
+function openSidebarItemContextMenu(section, item, event) {
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  closeSidebarAddMenu();
+  sidebarItemMenu.value = {
+    section,
+    item,
+    position: {
+      x: event?.clientX ?? 0,
+      y: event?.clientY ?? 0,
+    },
+  };
+  sidebarItemMenuStyle.value = {
+    left: `${event?.clientX ?? 0}px`,
+    top: `${event?.clientY ?? 0}px`,
+    maxHeight: 'calc(100vh - 16px)',
+  };
+  updateSidebarItemMenuPosition();
+  focusFirstSidebarContextMenuItem();
+}
+
+function openSidebarItemKeyboardContextMenu(section, item, event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+
+  openSidebarItemContextMenu(section, item, {
+    preventDefault: () => event.preventDefault(),
+    stopPropagation: () => event.stopPropagation(),
+    clientX: rect.left + Math.min(rect.width - 12, 32),
+    clientY: rect.top + Math.min(rect.height - 4, 28),
+  });
+}
+
+function closeSidebarItemContextMenu() {
+  sidebarItemMenu.value = null;
+}
+
+function focusFirstSidebarContextMenuItem() {
+  nextTick(() => {
+    sidebarItemMenuRef.value?.querySelector('.sidebar-context-menu-item:not(:disabled)')?.focus?.({
+      preventScroll: true,
+    });
+  });
+}
+
+function sidebarContextMenuItems() {
+  return Array.from(sidebarItemMenuRef.value?.querySelectorAll('.sidebar-context-menu-item:not(:disabled)') || []);
+}
+
+function focusSidebarContextMenuItemAt(index) {
+  const items = sidebarContextMenuItems();
+
+  if (items.length === 0) {
+    return;
+  }
+
+  const nextIndex = (index + items.length) % items.length;
+  items[nextIndex]?.focus?.({ preventScroll: true });
+}
+
+function focusRelativeSidebarContextMenuItem(delta) {
+  const items = sidebarContextMenuItems();
+
+  if (items.length === 0) {
+    return;
+  }
+
+  const currentIndex = items.indexOf(document.activeElement);
+  focusSidebarContextMenuItemAt(currentIndex < 0 ? (delta < 0 ? items.length - 1 : 0) : currentIndex + delta);
+}
+
+function handleSidebarItemContextKeydown(event) {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeSidebarItemContextMenu();
+    return;
+  }
+
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    focusRelativeSidebarContextMenuItem(1);
+    return;
+  }
+
+  if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    focusRelativeSidebarContextMenuItem(-1);
+    return;
+  }
+
+  if (event.key === 'Home') {
+    event.preventDefault();
+    focusSidebarContextMenuItemAt(0);
+    return;
+  }
+
+  if (event.key === 'End') {
+    event.preventDefault();
+    focusSidebarContextMenuItemAt(-1);
+  }
+}
+
+function handleSidebarItemKeydown(section, item, event) {
+  if ((event.key === 'F10' && event.shiftKey) || event.key === 'ContextMenu') {
+    openSidebarItemKeyboardContextMenu(section, item, event);
+  }
+}
+
+function copySidebarPathToClipboard(path) {
+  navigator.clipboard?.writeText(path).catch(() => {});
+}
+
+async function moveFavoriteItemToGroup(item, targetGroupId) {
+  if (!item?.isFavorite || !targetGroupId || favoriteGroupIdForItem(item) === targetGroupId) {
+    return;
+  }
+
+  await store.moveFavorite(item.id, favoriteCountForGroup(targetGroupId), targetGroupId);
+}
+
+async function moveFavoriteItemToNewGroup(item) {
+  if (!item?.isFavorite) {
+    return;
+  }
+
+  const name = (await dialog.prompt({
+    title: 'New Sidebar Group',
+    message: 'Create a section and move this shortcut into it.',
+    inputLabel: 'Group name',
+    inputValue: 'New Group',
+    inputRequired: true,
+    confirmLabel: 'Create and Move',
+    icon: 'folder-plus',
+  }))?.trim();
+
+  if (!name) {
+    return;
+  }
+
+  const group = await store.addFavoriteGroup(name);
+  await moveFavoriteItemToGroup(item, group.id);
+}
+
+async function runSidebarItemContextAction(menuItem) {
+  if (!menuItem || menuItem.disabled) {
+    return;
+  }
+
+  const item = sidebarItemMenu.value?.item;
+  closeSidebarItemContextMenu();
+
+  if (!item) {
+    return;
+  }
+
+  try {
+    if (menuItem.action === 'open') {
+      await openSidebarItem(item);
+      return;
+    }
+
+    if (menuItem.action === 'openInNewTab') {
+      if (item.path && !item.disabled) {
+        store.addPaneTab(store.activePaneId, item.path);
+      }
+      return;
+    }
+
+    if (menuItem.action === 'copyPath') {
+      if (item.path) {
+        copySidebarPathToClipboard(item.path);
+      }
+      return;
+    }
+
+    if (menuItem.action === 'moveFavoriteToGroup') {
+      await moveFavoriteItemToGroup(item, menuItem.targetGroupId);
+      return;
+    }
+
+    if (menuItem.action === 'moveFavoriteToNewGroup') {
+      await moveFavoriteItemToNewGroup(item);
+      return;
+    }
+
+    if (menuItem.action === 'removeFavorite') {
+      await store.removeFavorite(item.id);
+      return;
+    }
+
+    if (menuItem.action === 'refreshRemote') {
+      await refreshRemoteItem(item);
+      return;
+    }
+
+    if (menuItem.action === 'disconnectRemote') {
+      await disconnectRemoteItem(item);
+    }
+  } catch (error) {
+    await dialog.alert({
+      title: 'Sidebar Action Failed',
+      message: error?.message || 'The sidebar action could not be completed.',
+      variant: 'warning',
+    });
+  }
+}
+
 function closestFromElements(elements, selector) {
   for (const element of elements) {
     const match = element?.closest?.(selector);
@@ -529,12 +915,12 @@ async function handleFavoriteSectionDrop(section, event) {
 }
 
 async function removeFavoriteItem(item, event) {
-  event.stopPropagation();
+  event?.stopPropagation?.();
   await store.removeFavorite(item.id);
 }
 
 async function removeFavoriteGroup(section, event) {
-  event.stopPropagation();
+  event?.stopPropagation?.();
 
   if (!section?.favoriteGroupId || section.isDefaultFavoriteGroup) {
     return;
@@ -567,7 +953,7 @@ async function removeFavoriteGroup(section, event) {
 }
 
 async function disconnectRemoteItem(item, event) {
-  event.stopPropagation();
+  event?.stopPropagation?.();
 
   const remoteId = remoteIdFromPath(item.path);
 
@@ -603,7 +989,7 @@ async function disconnectRemoteItem(item, event) {
 }
 
 async function refreshRemoteItem(item, event) {
-  event.stopPropagation();
+  event?.stopPropagation?.();
 
   if (!item.remoteId) {
     return;
@@ -618,10 +1004,19 @@ function closeSidebarAddMenu() {
 
 function toggleSidebarAddMenu(event) {
   event?.stopPropagation();
+  closeSidebarItemContextMenu();
   sidebarAddMenuOpen.value = !sidebarAddMenuOpen.value;
 }
 
 function handleDocumentPointerDown(event) {
+  if (sidebarItemMenu.value) {
+    if (sidebarItemMenuRef.value?.contains(event.target)) {
+      return;
+    }
+
+    closeSidebarItemContextMenu();
+  }
+
   if (!sidebarAddMenuOpen.value) {
     return;
   }
@@ -631,6 +1026,29 @@ function handleDocumentPointerDown(event) {
   }
 
   closeSidebarAddMenu();
+}
+
+function handleWindowKeydown(event) {
+  if (event.key !== 'Escape') {
+    return;
+  }
+
+  if (sidebarItemMenu.value) {
+    event.preventDefault();
+    closeSidebarItemContextMenu();
+    return;
+  }
+
+  if (sidebarAddMenuOpen.value) {
+    event.preventDefault();
+    closeSidebarAddMenu();
+  }
+}
+
+function handleWindowResize() {
+  if (sidebarItemMenu.value) {
+    updateSidebarItemMenuPosition();
+  }
 }
 
 async function createFavoriteGroup() {
@@ -687,6 +1105,8 @@ onMounted(() => {
   document.addEventListener('pointerdown', handleDocumentPointerDown, true);
   window.addEventListener(OPEN_REMOTE_STORAGE_EVENT, openRemoteModal);
   window.addEventListener(CREATE_SIDEBAR_GROUP_EVENT, createFavoriteGroup);
+  window.addEventListener('keydown', handleWindowKeydown);
+  window.addEventListener('resize', handleWindowResize);
   window.addEventListener('pointermove', handlePointerFileDragMove, true);
   window.addEventListener('pointerup', clearPointerFileDragIndicator, true);
   window.addEventListener('pointercancel', clearPointerFileDragIndicator, true);
@@ -699,6 +1119,8 @@ onUnmounted(() => {
   document.removeEventListener('pointerdown', handleDocumentPointerDown, true);
   window.removeEventListener(OPEN_REMOTE_STORAGE_EVENT, openRemoteModal);
   window.removeEventListener(CREATE_SIDEBAR_GROUP_EVENT, createFavoriteGroup);
+  window.removeEventListener('keydown', handleWindowKeydown);
+  window.removeEventListener('resize', handleWindowResize);
   window.removeEventListener('pointermove', handlePointerFileDragMove, true);
   window.removeEventListener('pointerup', clearPointerFileDragIndicator, true);
   window.removeEventListener('pointercancel', clearPointerFileDragIndicator, true);
@@ -814,6 +1236,7 @@ onUnmounted(() => {
           @dragenter="handleFavoriteItemDragOver(item, $event)"
           @dragover="handleFavoriteItemDragOver(item, $event)"
           @drop="handleFavoriteItemDrop(item, $event)"
+          @contextmenu.prevent.stop="openSidebarItemContextMenu(section, item, $event)"
         >
           <button
             type="button"
@@ -826,6 +1249,7 @@ onUnmounted(() => {
             }"
             :disabled="item.disabled || mountingDevicePath === item.devicePath"
             @click="openSidebarItem(item)"
+            @keydown="handleSidebarItemKeydown(section, item, $event)"
           >
             <span class="sidebar-symbol" :style="{ '--item-color': item.color }" aria-hidden="true">
               <AppIcon :name="item.icon || 'folder'" :size="18" :stroke-width="1.9" />
@@ -921,6 +1345,47 @@ onUnmounted(() => {
       :visible="remoteModalVisible"
       @close="closeRemoteModal"
     />
+
+    <Teleport to="body">
+      <div
+        v-if="sidebarItemMenu"
+        ref="sidebarItemMenuRef"
+        class="sidebar-context-menu"
+        :style="sidebarItemMenuStyle"
+        role="menu"
+        :aria-label="`${sidebarItemMenuTitle} sidebar item menu`"
+        @click.stop
+        @contextmenu.prevent
+        @keydown.stop="handleSidebarItemContextKeydown"
+      >
+        <div class="sidebar-context-menu-title">
+          <span>{{ sidebarItemMenuTitle }}</span>
+          <small>{{ sidebarItemMenuDetail }}</small>
+        </div>
+
+        <template
+          v-for="(group, groupIndex) in sidebarItemMenuGroups"
+          :key="group.id"
+        >
+          <div v-if="groupIndex > 0" class="sidebar-context-menu-separator"></div>
+          <div v-if="group.label" class="sidebar-context-menu-section-label">{{ group.label }}</div>
+
+          <button
+            v-for="menuItem in group.items"
+            :key="menuItem.id"
+            type="button"
+            role="menuitem"
+            class="sidebar-context-menu-item"
+            :class="{ 'sidebar-context-menu-item--danger': menuItem.danger }"
+            :disabled="menuItem.disabled"
+            @click="runSidebarItemContextAction(menuItem)"
+          >
+            <AppIcon :name="menuItem.icon" :size="16" />
+            <span>{{ menuItem.label }}</span>
+          </button>
+        </template>
+      </div>
+    </Teleport>
   </aside>
 </template>
 
@@ -1249,6 +1714,141 @@ h2 {
 .sidebar-item-action:focus-visible {
   background: var(--btn-hover);
   color: var(--text);
+}
+
+/* ── Context menu ────────────────────────────────────────── */
+.sidebar-context-menu {
+  position: fixed;
+  z-index: 2100;
+  width: min(276px, calc(100vw - 16px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--control-border);
+  border-radius: 13px;
+  padding: 5px;
+  background: var(--popover-bg);
+  box-shadow: var(--shadow-overlay);
+  color: var(--text);
+  animation: sidebar-context-appear 130ms cubic-bezier(0.2, 0, 0, 1) both;
+  transform-origin: top left;
+  scrollbar-width: thin;
+  scrollbar-color: var(--control-border) transparent;
+}
+
+.sidebar-context-menu::-webkit-scrollbar {
+  width: 9px;
+}
+
+.sidebar-context-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-context-menu::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--control-border);
+  background-clip: padding-box;
+}
+
+@keyframes sidebar-context-appear {
+  from {
+    opacity: 0;
+    transform: scale(0.93);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.sidebar-context-menu-title {
+  display: grid;
+  gap: 1px;
+  padding: 5px 10px 8px;
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: 4px;
+}
+
+.sidebar-context-menu-title span,
+.sidebar-context-menu-title small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-context-menu-title span {
+  font-size: 12.5px;
+  font-weight: 660;
+}
+
+.sidebar-context-menu-title small {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 620;
+}
+
+.sidebar-context-menu-section-label {
+  padding: 4px 10px 3px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.sidebar-context-menu-item {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 26px;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  transition: none;
+}
+
+.sidebar-context-menu-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-context-menu-item:hover:not(:disabled),
+.sidebar-context-menu-item:focus-visible {
+  background: var(--btn-primary-bg);
+  color: #fff;
+  outline: 0;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
+}
+
+.sidebar-context-menu-item:disabled {
+  cursor: default;
+  color: var(--text-faint);
+  opacity: 0.45;
+}
+
+.sidebar-context-menu-item--danger {
+  color: var(--danger);
+}
+
+.sidebar-context-menu-item--danger:hover:not(:disabled),
+.sidebar-context-menu-item--danger:focus-visible {
+  background: var(--btn-danger-bg);
+  color: #fff;
+}
+
+.sidebar-context-menu-separator {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--hairline);
 }
 
 /* ── Footer ──────────────────────────────────────────────── */
