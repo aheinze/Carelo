@@ -1467,7 +1467,7 @@ onUnmounted(() => {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-  border-radius: 12px 0 0 12px;
+  border-radius: 0;
   background: var(--sidebar-bg);
   box-shadow:
     inset -1px 0 0 var(--separator),

@@ -2064,7 +2064,7 @@ function logDetail(entry) {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-radius: 0 0 12px 0;
+  border-radius: 0;
   background: var(--footer-bg);
   box-shadow: inset -1px 0 0 var(--hairline);
   transition: opacity 180ms ease;

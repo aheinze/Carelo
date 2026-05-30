@@ -39,11 +39,11 @@ body,
 #app {
   height: 100%;
   margin: 0;
+  background: var(--pane-glass);
 }
 
 body {
   min-width: 1100px;
-  background: transparent;
   color: var(--text);
   overflow: hidden;
 }
@@ -62,7 +62,7 @@ body.is-file-pointer-dragging * {
 body::before {
   position: fixed;
   inset: 0;
-  background: transparent;
+  background: var(--pane-glass);
   content: "";
   pointer-events: none;
 }
@@ -118,8 +118,7 @@ input:focus-visible {
   transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
   height: 100%;
   overflow: hidden;
-  border-radius: 12px;
-  clip-path: inset(0 round 12px);
+  border-radius: 0;
   padding: 0;
   background: var(--pane-glass);
   box-shadow:
