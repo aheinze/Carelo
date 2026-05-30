@@ -1799,7 +1799,7 @@ watch(
           <button
             type="button"
             class="file-parent-card"
-            :title="`Go to ${parentDirectory}`"
+            v-tooltip="{ text: `Go to ${parentDirectory}`, shortcut: 'Backspace' }"
             @dblclick="openParentDirectory"
             @keydown.stop
           >
@@ -2030,11 +2030,10 @@ watch(
           <button
             type="button"
             class="file-parent-row"
-            :title="`Go to ${parentDirectory}`"
             @dblclick="openParentDirectory"
             @keydown.stop
           >
-            <span class="file-parent-name">
+            <span class="file-parent-name" v-tooltip="{ text: `Go to ${parentDirectory}`, shortcut: 'Backspace' }">
               <span class="file-parent-glyph" aria-hidden="true">
                 <AppIcon name="folder" :size="18" :stroke-width="1.8" />
               </span>
@@ -2246,6 +2245,7 @@ watch(
 .file-parent-name {
   display: flex;
   min-width: 0;
+  justify-self: start;
   align-items: center;
   gap: 7px;
   font-size: 14px;

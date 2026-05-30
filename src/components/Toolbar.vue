@@ -216,7 +216,7 @@ async function deleteSelection() {
 
       <div class="nav-cluster" aria-label="Navigation" @mousedown.stop>
         <button
-          v-tooltip="'Go back'"
+          v-tooltip="{ text: 'Go back', shortcut: 'Alt Left' }"
           type="button"
           class="nav-button"
           aria-label="Back"
@@ -226,7 +226,7 @@ async function deleteSelection() {
           <AppIcon name="chevron-left" :size="18" :stroke-width="2.2" />
         </button>
         <button
-          v-tooltip="'Go forward'"
+          v-tooltip="{ text: 'Go forward', shortcut: 'Alt Right' }"
           type="button"
           class="nav-button"
           aria-label="Forward"
@@ -244,7 +244,7 @@ async function deleteSelection() {
     <div class="toolbar-right" @mousedown.stop>
       <div class="seg-control" role="group" aria-label="View mode">
         <button
-          v-tooltip="'List view'"
+          v-tooltip="{ text: 'List view', shortcut: 'Ctrl F2' }"
           type="button"
           class="seg-btn"
           :class="{ active: store.activePane?.viewMode === 'list' }"
@@ -254,7 +254,7 @@ async function deleteSelection() {
           <AppIcon name="list" :size="15" :stroke-width="1.9" />
         </button>
         <button
-          v-tooltip="'Grid view'"
+          v-tooltip="{ text: 'Grid view', shortcut: 'Ctrl F1' }"
           type="button"
           class="seg-btn"
           :class="{ active: store.activePane?.viewMode === 'grid' }"
@@ -279,7 +279,7 @@ async function deleteSelection() {
 
       <div class="icon-group status-action-group" role="toolbar" aria-label="Display actions">
         <button
-          v-tooltip="store.showHiddenFiles ? 'Hide hidden files' : 'Show hidden files'"
+          v-tooltip="{ text: store.showHiddenFiles ? 'Hide hidden files' : 'Show hidden files', shortcut: 'Ctrl .' }"
           type="button"
           class="icon-btn"
           :class="{ active: store.showHiddenFiles }"
@@ -294,7 +294,7 @@ async function deleteSelection() {
 
       <div class="icon-group pane-action-group" role="toolbar" aria-label="Pane actions">
         <button
-          v-tooltip="'Open in other pane'"
+          v-tooltip="{ text: 'Open in other pane', shortcut: 'Ctrl Right' }"
           type="button"
           class="icon-btn"
           aria-label="Open focused directory in other pane"
@@ -302,7 +302,13 @@ async function deleteSelection() {
         >
           <AppIcon name="open-other-pane" :size="19" :stroke-width="1.7" />
         </button>
-        <button v-tooltip="'Refresh'" type="button" class="icon-btn" aria-label="Refresh" @click="refreshActivePane">
+        <button
+          v-tooltip="{ text: 'Refresh', shortcut: 'Ctrl R' }"
+          type="button"
+          class="icon-btn"
+          aria-label="Refresh"
+          @click="refreshActivePane"
+        >
           <AppIcon name="refresh" :size="19" :stroke-width="1.8" />
         </button>
       </div>
@@ -311,7 +317,7 @@ async function deleteSelection() {
 
       <div class="icon-group file-action-group" role="toolbar" aria-label="File actions">
         <button
-          v-tooltip="'Copy path'"
+          v-tooltip="{ text: 'Copy path', shortcut: 'Ctrl Shift Enter' }"
           type="button"
           class="icon-btn"
           aria-label="Copy selected path"
@@ -320,7 +326,7 @@ async function deleteSelection() {
           <AppIcon name="copy" :size="19" :stroke-width="1.8" />
         </button>
         <button
-          v-tooltip="'New folder'"
+          v-tooltip="{ text: 'New folder', shortcut: 'F7' }"
           type="button"
           class="icon-btn"
           aria-label="New folder"
@@ -330,7 +336,7 @@ async function deleteSelection() {
           <AppIcon name="folder-plus" :size="19" :stroke-width="1.8" />
         </button>
         <button
-          v-tooltip="'Delete'"
+          v-tooltip="{ text: 'Delete', shortcut: 'F8' }"
           type="button"
           class="icon-btn"
           aria-label="Delete selected items"
@@ -350,7 +356,7 @@ async function deleteSelection() {
 
       <div class="icon-group panel-toggle-group" role="toolbar" aria-label="Panel toggles">
         <button
-          v-tooltip="'Toggle terminal'"
+          v-tooltip="{ text: 'Toggle terminal', shortcut: 'Ctrl `' }"
           type="button"
           class="icon-btn"
           :class="{ active: store.terminalPanelVisible }"
@@ -360,7 +366,7 @@ async function deleteSelection() {
           <AppIcon name="terminal" :size="19" :stroke-width="1.8" />
         </button>
         <button
-          v-tooltip="store.sidebarVisible ? 'Hide sidebar' : 'Show sidebar'"
+          v-tooltip="{ text: store.sidebarVisible ? 'Hide sidebar' : 'Show sidebar', shortcut: 'Ctrl B' }"
           type="button"
           class="icon-btn"
           :class="{ active: store.sidebarVisible }"
@@ -370,7 +376,7 @@ async function deleteSelection() {
           <AppIcon name="sidebar" :size="19" :stroke-width="1.8" />
         </button>
         <button
-          v-tooltip="store.previewPanelVisible ? 'Hide preview' : 'Show preview'"
+          v-tooltip="{ text: store.previewPanelVisible ? 'Hide preview' : 'Show preview', shortcut: 'Ctrl I' }"
           type="button"
           class="icon-btn"
           :class="{ active: store.previewPanelVisible }"
@@ -385,7 +391,7 @@ async function deleteSelection() {
 
       <div class="icon-group settings-action-group" role="toolbar" aria-label="Settings">
         <button
-          v-tooltip="'Settings'"
+          v-tooltip="{ text: 'Settings', shortcut: 'Ctrl ,' }"
           type="button"
           class="icon-btn"
           :class="{ active: store.settingsVisible }"

@@ -440,6 +440,14 @@ export async function unarchiveItems(paths, destinationDirectory, jobId = null) 
   return invokeCommand('unarchive_items', { paths, destinationDirectory, jobId }, { sudo: true });
 }
 
+export async function convertImages(paths, options = {}, jobId = null) {
+  return invokeCommand('convert_images', { paths, options, jobId });
+}
+
+export async function compressPdfs(paths, options = {}, jobId = null) {
+  return invokeCommand('compress_pdfs', { paths, options, jobId });
+}
+
 export async function measureItemsSize(paths, jobId = null) {
   return invokeCommand('measure_items_size', { paths, jobId });
 }
@@ -507,6 +515,8 @@ export function useFileOperations() {
     compareFileChecksums,
     copyItems,
     createFolder,
+    convertImages,
+    compressPdfs,
     deleteItems,
     editFile,
     getFileMetadata,

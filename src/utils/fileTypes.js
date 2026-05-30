@@ -50,6 +50,18 @@ const AUDIO_EXTENSIONS = new Set([
 ]);
 
 const PDF_EXTENSIONS = new Set(['pdf']);
+const CONVERTIBLE_IMAGE_EXTENSIONS = new Set([
+  'avif',
+  'bmp',
+  'gif',
+  'ico',
+  'jpeg',
+  'jpg',
+  'png',
+  'tif',
+  'tiff',
+  'webp',
+]);
 
 const TEXT_EXTENSIONS = new Set([
   'bash',
@@ -106,6 +118,10 @@ export function isImageEntry(entry) {
   return entry?.kind === 'file' && IMAGE_EXTENSIONS.has(extensionForName(entry.name));
 }
 
+export function isConvertibleImageEntry(entry) {
+  return entry?.kind === 'file' && CONVERTIBLE_IMAGE_EXTENSIONS.has(extensionForName(entry.name));
+}
+
 export function isVideoEntry(entry) {
   return entry?.kind === 'file' && VIDEO_EXTENSIONS.has(extensionForName(entry.name));
 }
@@ -116,6 +132,10 @@ export function isAudioEntry(entry) {
 
 export function isPdfEntry(entry) {
   return entry?.kind === 'file' && PDF_EXTENSIONS.has(extensionForName(entry.name));
+}
+
+export function isCompressiblePdfEntry(entry) {
+  return isPdfEntry(entry);
 }
 
 export function isTextEntry(entry) {

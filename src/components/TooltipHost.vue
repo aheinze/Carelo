@@ -37,7 +37,14 @@ function resolvePosition() {
 
 // Reset positioned state before each re-render so we re-measure
 watch(
-  () => [tooltipState.visible, tooltipState.x, tooltipState.y, tooltipState.text, tooltipState.description],
+  () => [
+    tooltipState.visible,
+    tooltipState.x,
+    tooltipState.y,
+    tooltipState.text,
+    tooltipState.description,
+    tooltipState.shortcut,
+  ],
   () => { positioned.value = false; },
   { flush: 'pre' },
 );
@@ -57,13 +64,20 @@ onUpdated(() => {
       v-if="tooltipState.visible && tooltipState.text"
       ref="tooltipEl"
       class="app-tooltip"
-      :class="{ 'app-tooltip--ready': positioned, 'app-tooltip--rich': tooltipState.description }"
+      :class="{
+        'app-tooltip--ready': positioned,
+        'app-tooltip--rich': tooltipState.description,
+        'app-tooltip--shortcut': tooltipState.shortcut,
+      }"
       :style="{
         left: `${positioned ? resolvedLeft : tooltipState.x}px`,
         top: positioned ? `${resolvedTop}px` : '-9999px',
       }"
     >
-      <span class="app-tooltip-text">{{ tooltipState.text }}</span>
+      <span class="app-tooltip-row">
+        <span class="app-tooltip-text">{{ tooltipState.text }}</span>
+        <kbd v-if="tooltipState.shortcut" class="kbd app-tooltip-key">{{ tooltipState.shortcut }}</kbd>
+      </span>
       <span v-if="tooltipState.description" class="app-tooltip-description">{{ tooltipState.description }}</span>
     </div>
   </Teleport>
@@ -96,11 +110,25 @@ onUpdated(() => {
   padding: 6px 10px 7px;
 }
 
+.app-tooltip-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .app-tooltip-text {
   color: var(--text);
   font-size: 12px;
   font-weight: 580;
   line-height: 1;
+}
+
+.app-tooltip-key {
+  height: 16px;
+  min-width: 18px;
+  padding: 0 5px;
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
 .app-tooltip-description {

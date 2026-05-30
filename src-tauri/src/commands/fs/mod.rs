@@ -167,6 +167,8 @@ fn default_content_search_max_file_bytes() -> u64 {
 
 pub(crate) mod archives;
 pub(crate) mod git;
+pub(crate) mod image_tools;
+pub(crate) mod pdf_tools;
 pub(crate) mod preview;
 pub(crate) mod remotes;
 pub(crate) mod search;
@@ -179,6 +181,8 @@ pub(crate) mod watcher;
 
 pub use archives::{archive_items, unarchive_items};
 pub use git::get_git_file_info;
+pub use image_tools::convert_images;
+pub use pdf_tools::compress_pdfs;
 pub use preview::{
     compare_file_checksums, create_media_stream_url, read_media_preview, read_text_preview,
     MediaStreamState,

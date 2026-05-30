@@ -6,6 +6,8 @@ import FileList from './FileList.vue';
 import TabContextMenu from './TabContextMenu.vue';
 import {
   archiveItems,
+  compressPdfs,
+  convertImages,
   createFolder,
   deleteItems,
   editFile,
@@ -36,13 +38,15 @@ import {
   deleteConfirmationOptions,
   shouldConfirmDelete,
 } from '../utils/deleteConfirmation';
-import { extensionForName } from '../utils/fileTypes';
+import { extensionForName, isCompressiblePdfEntry, isConvertibleImageEntry } from '../utils/fileTypes';
 import { OPEN_BATCH_RENAME_EVENT } from '../utils/appEvents';
 import { renamePromptInputSelection } from '../utils/renamePrompt';
 
 const BatchRenameDialog = defineAsyncComponent(() => import('./BatchRenameDialog.vue'));
 const CreateArchiveDialog = defineAsyncComponent(() => import('./CreateArchiveDialog.vue'));
+const ImageConvertDialog = defineAsyncComponent(() => import('./ImageConvertDialog.vue'));
 const OpenWithDialog = defineAsyncComponent(() => import('./OpenWithDialog.vue'));
+const PdfCompressDialog = defineAsyncComponent(() => import('./PdfCompressDialog.vue'));
 
 const FILE_DRAG_MIME = 'application/x-carelo-files';
 const TAB_DRAG_MIME = 'application/x-carelo-tab';
@@ -307,6 +311,18 @@ const batchRenameDialog = ref({
   entries: [],
   existingNamesByDirectory: {},
 });
+const imageConvertDialog = ref({
+  visible: false,
+  entries: [],
+  existingNamesByDirectory: {},
+  otherPaneDirectory: '',
+});
+const pdfCompressDialog = ref({
+  visible: false,
+  entries: [],
+  existingNamesByDirectory: {},
+  otherPaneDirectory: '',
+});
 const openWithDialog = ref({
   visible: false,
   entry: null,
@@ -382,6 +398,18 @@ const canEditFileContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
 
   return operationEntries.length === 1 && operationEntries[0]?.kind === 'file' && !isArchivePath(operationEntries[0].path);
+});
+const canConvertImagesContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  return operationEntries.length > 0
+    && operationEntries.every((entry) => !isArchivePath(entry.path) && isConvertibleImageEntry(entry));
+});
+const canCompressPdfsContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  return operationEntries.length > 0
+    && operationEntries.every((entry) => !isArchivePath(entry.path) && isCompressiblePdfEntry(entry));
 });
 const configuredCustomTools = computed(() =>
   (store.appSettings.customTools || []).filter((tool) => tool?.enabled !== false && tool?.name && tool?.command),
@@ -2171,6 +2199,271 @@ async function handleBatchRename(payload) {
   }
 }
 
+function normalizedImageConvertEntries(entries) {
+  const seen = new Set();
+
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry?.path && entry?.name && isConvertibleImageEntry(entry))
+    .filter((entry) => {
+      if (seen.has(entry.path)) {
+        return false;
+      }
+
+      seen.add(entry.path);
+      return true;
+    })
+    .map((entry) => ({
+      ...entry,
+      directory: store.parentDirectoryFor(entry.path),
+    }));
+}
+
+function normalizedPdfCompressEntries(entries) {
+  const seen = new Set();
+
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry?.path && entry?.name && isCompressiblePdfEntry(entry))
+    .filter((entry) => {
+      if (seen.has(entry.path)) {
+        return false;
+      }
+
+      seen.add(entry.path);
+      return true;
+    })
+    .map((entry) => ({
+      ...entry,
+      directory: store.parentDirectoryFor(entry.path),
+    }));
+}
+
+async function existingNamesByDirectory(directories) {
+  const result = {};
+
+  await Promise.all([...new Set(directories.filter(Boolean))].map(async (directory) => {
+    const directoryEntries = await listDirectory(directory);
+    result[directory] = directoryEntries.map((entry) => entry.name);
+  }));
+
+  return result;
+}
+
+async function openImageConvertDialog(entries = store.operationEntriesFor(props.paneId)) {
+  const operationEntries = normalizedImageConvertEntries(entries);
+
+  if (operationEntries.length === 0) {
+    await dialog.alert({
+      title: 'Convert Images Not Available',
+      message: 'Select one or more supported image files.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  if (operationEntries.some((entry) => isArchivePath(entry.path))) {
+    await dialog.alert({
+      title: 'Convert Images Not Available',
+      message: 'Archive contents are read-only while browsing.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  const otherPaneDirectory = effectiveDirectory(otherPaneId.value);
+  const canUseOtherPane = otherPaneDirectory && !isArchivePath(otherPaneDirectory);
+  const directories = [
+    ...operationEntries.map((entry) => entry.directory),
+    ...(canUseOtherPane ? [otherPaneDirectory] : []),
+  ];
+
+  imageConvertDialog.value = {
+    visible: true,
+    entries: operationEntries,
+    existingNamesByDirectory: await existingNamesByDirectory(directories),
+    otherPaneDirectory: canUseOtherPane ? otherPaneDirectory : '',
+  };
+}
+
+function closeImageConvertDialog() {
+  imageConvertDialog.value = {
+    ...imageConvertDialog.value,
+    visible: false,
+  };
+}
+
+async function runImageConvert(paths, options, sourceEntries = []) {
+  const sourcePaths = Array.isArray(paths) ? paths.filter(Boolean) : [];
+  const targetDirectory = options?.destinationDirectory || '';
+  const label = sourcePaths.length === 1
+    ? 'Converting image'
+    : `Converting ${sourcePaths.length} images`;
+  const retryAction = () => runImageConvert(sourcePaths, options, sourceEntries);
+  const jobId = store.startQueueJob({
+    operation: 'image-convert',
+    label,
+    remotePaths: [targetDirectory, ...sourcePaths],
+    retryAction,
+  });
+
+  try {
+    const results = await convertImages(sourcePaths, options, jobId);
+    const converted = results.filter((result) => result.status === 'converted');
+    const skipped = results.filter((result) => result.status === 'skipped');
+    const refreshPaths = [
+      ...converted.map((result) => result.outputPath ? store.parentDirectoryFor(result.outputPath) : ''),
+      ...(targetDirectory ? [targetDirectory] : parentDirectoriesForEntries(sourceEntries)),
+    ];
+
+    await refreshDirectories(refreshPaths);
+    store.completeQueueJob(
+      jobId,
+      skipped.length > 0
+        ? `${converted.length} converted, ${skipped.length} skipped`
+        : converted.length === 1
+          ? '1 image converted'
+          : `${converted.length} images converted`,
+    );
+  } catch (error) {
+    if (error?.code === 'operation_cancelled') {
+      store.cancelQueueJobDone(jobId);
+      return;
+    }
+
+    store.failQueueJob(jobId, error?.message || 'Image conversion failed.', {
+      failedItems: sourcePaths.map((path) => ({
+        path,
+        message: error?.message || 'Failed',
+      })),
+    });
+    throw error;
+  }
+}
+
+async function handleImageConvert(payload) {
+  const sourceEntries = imageConvertDialog.value.entries;
+
+  closeImageConvertDialog();
+
+  try {
+    await runImageConvert(payload?.paths || [], payload?.options || {}, sourceEntries);
+  } catch (error) {
+    console.error(error);
+    await dialog.alert({
+      title: 'Image Conversion Failed',
+      message: error?.message || 'The selected images could not be converted.',
+      variant: 'warning',
+    });
+  }
+}
+
+async function openPdfCompressDialog(entries = store.operationEntriesFor(props.paneId)) {
+  const operationEntries = normalizedPdfCompressEntries(entries);
+
+  if (operationEntries.length === 0) {
+    await dialog.alert({
+      title: 'Compress PDFs Not Available',
+      message: 'Select one or more PDF files.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  if (operationEntries.some((entry) => isArchivePath(entry.path))) {
+    await dialog.alert({
+      title: 'Compress PDFs Not Available',
+      message: 'Archive contents are read-only while browsing.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  const otherPaneDirectory = effectiveDirectory(otherPaneId.value);
+  const canUseOtherPane = otherPaneDirectory && !isArchivePath(otherPaneDirectory);
+  const directories = [
+    ...operationEntries.map((entry) => entry.directory),
+    ...(canUseOtherPane ? [otherPaneDirectory] : []),
+  ];
+
+  pdfCompressDialog.value = {
+    visible: true,
+    entries: operationEntries,
+    existingNamesByDirectory: await existingNamesByDirectory(directories),
+    otherPaneDirectory: canUseOtherPane ? otherPaneDirectory : '',
+  };
+}
+
+function closePdfCompressDialog() {
+  pdfCompressDialog.value = {
+    ...pdfCompressDialog.value,
+    visible: false,
+  };
+}
+
+async function runPdfCompress(paths, options, sourceEntries = []) {
+  const sourcePaths = Array.isArray(paths) ? paths.filter(Boolean) : [];
+  const targetDirectory = options?.destinationDirectory || '';
+  const label = sourcePaths.length === 1
+    ? 'Compressing PDF'
+    : `Compressing ${sourcePaths.length} PDFs`;
+  const retryAction = () => runPdfCompress(sourcePaths, options, sourceEntries);
+  const jobId = store.startQueueJob({
+    operation: 'pdf-compress',
+    label,
+    remotePaths: [targetDirectory, ...sourcePaths],
+    retryAction,
+  });
+
+  try {
+    const results = await compressPdfs(sourcePaths, options, jobId);
+    const compressed = results.filter((result) => result.status === 'compressed');
+    const skipped = results.filter((result) => result.status === 'skipped');
+    const refreshPaths = [
+      ...compressed.map((result) => result.outputPath ? store.parentDirectoryFor(result.outputPath) : ''),
+      ...(targetDirectory ? [targetDirectory] : parentDirectoriesForEntries(sourceEntries)),
+    ];
+
+    await refreshDirectories(refreshPaths);
+    store.completeQueueJob(
+      jobId,
+      skipped.length > 0
+        ? `${compressed.length} compressed, ${skipped.length} skipped`
+        : compressed.length === 1
+          ? '1 PDF compressed'
+          : `${compressed.length} PDFs compressed`,
+    );
+  } catch (error) {
+    if (error?.code === 'operation_cancelled') {
+      store.cancelQueueJobDone(jobId);
+      return;
+    }
+
+    store.failQueueJob(jobId, error?.message || 'PDF compression failed.', {
+      failedItems: sourcePaths.map((path) => ({
+        path,
+        message: error?.message || 'Failed',
+      })),
+    });
+    throw error;
+  }
+}
+
+async function handlePdfCompress(payload) {
+  const sourceEntries = pdfCompressDialog.value.entries;
+
+  closePdfCompressDialog();
+
+  try {
+    await runPdfCompress(payload?.paths || [], payload?.options || {}, sourceEntries);
+  } catch (error) {
+    console.error(error);
+    await dialog.alert({
+      title: 'PDF Compression Failed',
+      message: error?.message || 'The selected PDFs could not be compressed.',
+      variant: 'warning',
+    });
+  }
+}
+
 async function runContextCustomTool(menu, toolId) {
   const tool = configuredCustomTools.value.find((candidate) => candidate.id === toolId);
   const operationEntries = contextOperationEntries(menu);
@@ -2421,6 +2714,16 @@ async function handleContextAction(action) {
 
     if (typeof action === 'string' && action.startsWith('customTool:')) {
       await runContextCustomTool(menu, action.slice('customTool:'.length));
+      return;
+    }
+
+    if (action === 'convertImages') {
+      await openImageConvertDialog(contextOperationEntries(menu));
+      return;
+    }
+
+    if (action === 'compressPdfs') {
+      await openPdfCompressDialog(contextOperationEntries(menu));
       return;
     }
 
@@ -2741,6 +3044,8 @@ async function handleContextAction(action) {
       :can-edit-file="canEditFileContext"
       :can-custom-tools="canRunCustomToolContext"
       :custom-tools="availableCustomTools"
+      :can-convert-images="canConvertImagesContext"
+      :can-compress-pdfs="canCompressPdfsContext"
       :can-transfer="canTransferToOtherPane"
       :can-modify="canModifyContext"
       :can-rename="canRenameContext"
@@ -2780,6 +3085,26 @@ async function handleContextAction(action) {
       :existing-names-by-directory="batchRenameDialog.existingNamesByDirectory"
       @cancel="closeBatchRenameDialog"
       @rename="handleBatchRename"
+    />
+
+    <ImageConvertDialog
+      v-if="imageConvertDialog.visible"
+      :visible="imageConvertDialog.visible"
+      :entries="imageConvertDialog.entries"
+      :existing-names-by-directory="imageConvertDialog.existingNamesByDirectory"
+      :other-pane-directory="imageConvertDialog.otherPaneDirectory"
+      @cancel="closeImageConvertDialog"
+      @convert="handleImageConvert"
+    />
+
+    <PdfCompressDialog
+      v-if="pdfCompressDialog.visible"
+      :visible="pdfCompressDialog.visible"
+      :entries="pdfCompressDialog.entries"
+      :existing-names-by-directory="pdfCompressDialog.existingNamesByDirectory"
+      :other-pane-directory="pdfCompressDialog.otherPaneDirectory"
+      @cancel="closePdfCompressDialog"
+      @compress="handlePdfCompress"
     />
 
     <OpenWithDialog

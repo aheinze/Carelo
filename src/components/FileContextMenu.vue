@@ -63,6 +63,14 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  canConvertImages: {
+    type: Boolean,
+    default: false,
+  },
+  canCompressPdfs: {
+    type: Boolean,
+    default: false,
+  },
   operationCount: {
     type: Number,
     default: 1,
@@ -166,10 +174,28 @@ const actionGroups = computed(() => {
     return groups;
   }
 
-  if (visibleCustomTools.value.length > 0) {
+  if (props.canCompressPdfs || props.canConvertImages || visibleCustomTools.value.length > 0) {
     groups.push({
       id: 'tools',
       items: [
+        ...(props.canCompressPdfs
+          ? [{
+              id: 'compressPdfs',
+              action: 'compressPdfs',
+              label: props.operationCount === 1 ? 'Compress PDF...' : 'Compress PDFs...',
+              icon: 'archive',
+              keywords: ['pdf compress shrink optimize reduce size ghostscript'],
+            }]
+          : []),
+        ...(props.canConvertImages
+          ? [{
+              id: 'convertImages',
+              action: 'convertImages',
+              label: props.operationCount === 1 ? 'Convert Image...' : 'Convert Images...',
+              icon: 'image',
+              keywords: ['image convert format avif png jpeg jpg webp tiff bmp ico'],
+            }]
+          : []),
         {
           id: 'tools',
           type: 'submenu',

@@ -3,18 +3,23 @@ import { tooltipState } from '../composables/useTooltipState';
 let showTimer = null;
 
 function parseBinding(value) {
-  if (!value) return { text: '', description: '' };
-  if (typeof value === 'string') return { text: value, description: '' };
-  return { text: value.text || '', description: value.description || '' };
+  if (!value) return { text: '', description: '', shortcut: '' };
+  if (typeof value === 'string') return { text: value, description: '', shortcut: '' };
+  return {
+    text: value.text || '',
+    description: value.description || '',
+    shortcut: value.shortcut || '',
+  };
 }
 
 function showTooltip(el) {
   clearTimeout(showTimer);
   showTimer = setTimeout(() => {
     const rect = el.getBoundingClientRect();
-    const { text, description } = el._vTooltipBinding;
+    const { text, description, shortcut } = el._vTooltipBinding;
     tooltipState.text = text;
     tooltipState.description = description;
+    tooltipState.shortcut = shortcut;
     tooltipState.x = rect.left + rect.width / 2;
     tooltipState.y = rect.top;
     tooltipState.targetBottom = rect.bottom;

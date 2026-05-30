@@ -92,6 +92,8 @@ pub fn run() {
             commands::fs::size::measure_items_size,
             commands::fs::archives::archive_items,
             commands::fs::archives::unarchive_items,
+            commands::fs::image_tools::convert_images,
+            commands::fs::pdf_tools::compress_pdfs,
             commands::fs::state::cancel_file_operation,
             commands::fs::state::pause_file_operation,
             commands::fs::state::resume_file_operation,

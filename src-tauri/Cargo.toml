@@ -52,6 +52,9 @@ zstd = "0.13"
 notify = "6"
 sevenz-rust2 = { version = "0.20.2", features = ["deflate", "lz4", "zstd", "brotli"] }
 trash = "5.2.6"
+image = { version = "=0.25.9", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico", "avif-native"] }
+ravif = { version = "0.13.0", default-features = false }
+webp = { version = "0.3.1", default-features = false }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-process = "2"
