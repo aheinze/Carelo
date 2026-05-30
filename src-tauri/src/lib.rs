@@ -9,7 +9,8 @@ pub mod window_state;
 use commands::app::quit_app;
 use commands::clipboard::{read_system_file_clipboard, write_system_file_clipboard};
 use commands::fs::{
-    FileOperationState, FileSearchIndexState, MediaStreamState, RemoteEditSyncState,
+    DirectoryWatchState, FileOperationState, FileSearchIndexState, MediaStreamState,
+    RemoteEditSyncState,
 };
 use commands::oauth::create_oauth_tokens;
 use commands::store::{
@@ -41,6 +42,7 @@ pub fn run() {
         .manage(FileSearchIndexState::default())
         .manage(FileOperationState::default())
         .manage(MediaStreamState::default())
+        .manage(DirectoryWatchState::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let store = AppStoreState::initialize()
@@ -73,6 +75,7 @@ pub fn run() {
             commands::fs::transfer::get_home_directory,
             commands::fs::volumes::list_volumes,
             commands::fs::volumes::mount_volume,
+            commands::fs::watcher::watch_active_directories,
             commands::fs::transfer::same_volume,
             commands::fs::remotes::add_remote_volume,
             commands::fs::remotes::remove_remote_volume,

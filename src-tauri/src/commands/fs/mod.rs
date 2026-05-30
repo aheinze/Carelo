@@ -175,6 +175,7 @@ pub(crate) mod state;
 pub(crate) mod tools;
 pub(crate) mod transfer;
 pub(crate) mod volumes;
+pub(crate) mod watcher;
 
 pub use archives::{archive_items, unarchive_items};
 pub use git::get_git_file_info;
@@ -198,6 +199,7 @@ pub use transfer::{
     move_items, rename_item, same_volume,
 };
 pub use volumes::{list_volumes, mount_volume};
+pub use watcher::{watch_active_directories, DirectoryWatchState};
 
 use search::{expand_local_search_root, is_probably_binary};
 use state::{

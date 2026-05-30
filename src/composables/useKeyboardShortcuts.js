@@ -61,6 +61,16 @@ function nameFromPath(path) {
   return value.split('/').filter(Boolean).at(-1) || value;
 }
 
+function remoteVolumeIdForPath(path) {
+  const value = String(path || '');
+
+  if (!value.startsWith('remote://')) {
+    return '';
+  }
+
+  return value.slice('remote://'.length).split('/').filter(Boolean)[0] || '';
+}
+
 function normalizeClipboardPath(path) {
   return String(path || '').trim().replace(/\/+$/, '') || '/';
 }
@@ -253,7 +263,7 @@ function dispatchSelectedContextMenu(store) {
 
 function shortcutHelpText() {
   return [
-    'F3 Preview, F4 Edit, F5 Copy, F6 Move, F7 New Folder, F8/Delete Delete',
+    'F2 Rename, F3 Preview, F4 Edit, F5 Copy, F6 Move, F7 New Folder, F8/Delete Delete',
     'Ctrl+Shift+P Commands, Ctrl+P Fuzzy Search, Ctrl+Shift+F Content Search, Ctrl+C Copy, Ctrl+X Cut, Ctrl+V Paste',
     'Tab Switch Pane, Alt+Left/Right History, Ctrl+\\ Root, Ctrl+PageUp Parent',
     'Insert/Space Toggle Selection, Ctrl+A/Num+ Select All, Num- Clear, Num* Invert',
@@ -281,6 +291,29 @@ export function useKeyboardShortcuts() {
 
   function operationEntries() {
     return store.operationEntriesFor(activePane());
+  }
+
+  function remoteVolumeForPath(path) {
+    const volumeId = remoteVolumeIdForPath(path);
+
+    if (!volumeId) {
+      return null;
+    }
+
+    const rootPath = `remote://${volumeId}/`;
+    const volumes = Array.isArray(store.volumes) ? store.volumes : [];
+
+    return volumes.find((volume) => volume.path === rootPath) || null;
+  }
+
+  function canRenamePath(path) {
+    if (!path || isArchivePath(path)) {
+      return false;
+    }
+
+    const volume = remoteVolumeForPath(path);
+
+    return !volume || volume.capabilities?.canRename !== false;
   }
 
   async function reloadPane(paneId = activePane()) {
@@ -375,6 +408,19 @@ export function useKeyboardShortcuts() {
     const entry = store.selectedEntryFor(paneId);
 
     if (!entry) {
+      return;
+    }
+
+    if (!canRenamePath(entry.path)) {
+      const volume = remoteVolumeForPath(entry.path);
+      await dialog.alert({
+        title: 'Rename Not Available',
+        message: isArchivePath(entry.path)
+          ? 'Archive contents are read-only while browsing.'
+          : `${volume?.name || 'This remote storage'} does not support rename operations.`,
+        detail: isArchivePath(entry.path) ? '' : 'Copy or move the item to a rename-capable location first.',
+        variant: 'warning',
+      });
       return;
     }
 
@@ -1101,7 +1147,13 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      if (key === 'F2' || (onlyCommand && lowerKey === 'r')) {
+      if (key === 'F2' && !command && !event.altKey && !event.shiftKey) {
+        event.preventDefault();
+        await renameFocused();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'r') {
         event.preventDefault();
         await reloadPane();
         return;

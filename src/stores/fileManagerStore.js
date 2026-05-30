@@ -14,6 +14,7 @@ import {
   listFavoriteGroups as listStoredFavoriteGroups,
   listFavorites as listStoredFavorites,
   listVolumes,
+  mountVolume,
   moveFavorite as moveStoredFavorite,
   removeFavoriteGroup as removeStoredFavoriteGroup,
   pauseFileOperation,
@@ -21,6 +22,7 @@ import {
   resumeFileOperation,
   saveAppSettings as saveStoredAppSettings,
   setActiveRemoteVolumes,
+  watchActiveDirectories,
 } from '../composables/useFileOperations';
 import { loadUiSettings, saveUiSettings } from '../composables/useSettings';
 import {
@@ -46,9 +48,12 @@ let remoteHealthRefreshInFlight = false;
 let activeRemoteSyncTimer = null;
 let lastReportedRemoteVolumeIds = '';
 let stopRemoteEditSyncListener = null;
+let stopDirectoryWatchListener = null;
 let scheduledDirectoryReloadTimer = null;
 let scheduledDirectoryReloadPaths = new Set();
 let remoteHealthBackoff = new Map();
+let activeDirectoryWatchSyncTimer = null;
+let lastWatchedDirectoryPaths = '';
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
 const SORT_DIRECTIONS = ['asc', 'desc'];
 const VIEW_MODES = ['list', 'grid', 'columns'];
@@ -69,6 +74,7 @@ const WORKSPACE_LIMIT = 32;
 const WORKSPACE_TAB_LIMIT = 64;
 const WORKSPACE_NAME_LIMIT = 80;
 const ACTIVE_QUEUE_STATUSES = new Set(['running', 'paused', 'cancelling']);
+const MISSING_PATH_ERROR_PATTERN = /(no such file or directory|not found|os error 2|cannot find the path)/i;
 const DEFAULT_APP_SETTINGS = Object.freeze({
   appearanceMode: 'system',
   colorScheme: 'carelo',
@@ -446,6 +452,219 @@ function normalizeComparablePath(path) {
   }
 
   return value.replace(/\/+$/, '');
+}
+
+function isLikelyMissingPathError(error) {
+  const code = String(error?.code || '').toLowerCase();
+  const message = normalizeError(error);
+
+  return code === 'not_found'
+    || code === 'file_not_found'
+    || (code === 'io_error' && MISSING_PATH_ERROR_PATTERN.test(message))
+    || MISSING_PATH_ERROR_PATTERN.test(message);
+}
+
+function localMountCandidatesForPath(path, options = {}) {
+  const cleanPath = String(path || '').trim().replace(/\/+$/, '');
+
+  if (
+    !cleanPath
+    || cleanPath === '~'
+    || !cleanPath.startsWith('/')
+    || cleanPath.startsWith('remote://')
+    || isArchivePath(cleanPath)
+  ) {
+    return [];
+  }
+
+  const parts = cleanPath.split('/').filter(Boolean);
+  const homeUserName = String(options.homeUserName || '').trim();
+  const candidates = [];
+  const seenRoots = new Set();
+  const addCandidate = (volumeIndex) => {
+    if (volumeIndex < 0 || volumeIndex >= parts.length) {
+      return;
+    }
+
+    const root = `/${parts.slice(0, volumeIndex + 1).join('/')}`;
+
+    if (seenRoots.has(root)) {
+      return;
+    }
+
+    seenRoots.add(root);
+    candidates.push({
+      root,
+      volumeName: parts[volumeIndex],
+      suffix: parts.slice(volumeIndex + 1).join('/'),
+    });
+  };
+
+  if (parts[0] === 'run' && parts[1] === 'media' && parts.length >= 4) {
+    addCandidate(3);
+  }
+
+  if (parts[0] === 'media') {
+    const secondSegmentIsCurrentUser = homeUserName && mountNamesMatch(parts[1], homeUserName);
+
+    if (secondSegmentIsCurrentUser && parts.length >= 3) {
+      addCandidate(2);
+    }
+
+    if (parts.length >= 2) {
+      addCandidate(1);
+    }
+
+    if (!secondSegmentIsCurrentUser && parts.length >= 3) {
+      addCandidate(2);
+    }
+  }
+
+  if (parts[0] === 'mnt' && parts.length >= 2) {
+    addCandidate(1);
+  }
+
+  if (parts[0] === 'Volumes' && parts.length >= 2) {
+    addCandidate(1);
+  }
+
+  return candidates;
+}
+
+function safeDecodePathName(name) {
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
+function mountNameKeys(name) {
+  const normalizedName = String(name || '').trim().toLocaleLowerCase();
+
+  if (!normalizedName) {
+    return new Set();
+  }
+
+  const decodedName = safeDecodePathName(normalizedName);
+  const keys = new Set([normalizedName, decodedName]);
+
+  for (const key of [...keys]) {
+    keys.add(key.replace(/[_-]+/g, ' '));
+    keys.add(key.replace(/\s+/g, '_'));
+    keys.add(key.replace(/\s+/g, '-'));
+    keys.add(key.replace(/[\s_-]+/g, ''));
+  }
+
+  return keys;
+}
+
+function mountNamesMatch(left, right) {
+  const leftKeys = mountNameKeys(left);
+  const rightKeys = mountNameKeys(right);
+
+  if (leftKeys.size === 0 || rightKeys.size === 0) {
+    return false;
+  }
+
+  return [...leftKeys].some((key) => rightKeys.has(key));
+}
+
+function volumeMatchesMountCandidate(volume, candidate) {
+  if (!volume || !candidate || String(volume.path || '').startsWith('remote://')) {
+    return false;
+  }
+
+  const mountedPath = normalizeComparablePath(volume.path || '');
+  const candidateRoot = normalizeComparablePath(candidate.root);
+
+  if (mountedPath && mountedPath === candidateRoot) {
+    return true;
+  }
+
+  return [
+    volume.name,
+    fileNameForPath(volume.path),
+  ].some((name) => mountNamesMatch(name, candidate.volumeName));
+}
+
+function findLocalMountRecovery(path, availableVolumes = [], options = {}) {
+  const candidates = localMountCandidatesForPath(path, options);
+
+  for (const candidate of candidates) {
+    const volume = availableVolumes.find((candidateVolume) => {
+      if (!candidateVolume?.devicePath || !volumeMatchesMountCandidate(candidateVolume, candidate)) {
+        return false;
+      }
+
+      const mountedPath = normalizeComparablePath(candidateVolume.path || '');
+      const requestedRoot = normalizeComparablePath(candidate.root);
+
+      return !candidateVolume.isMounted || mountedPath !== requestedRoot;
+    });
+
+    if (volume) {
+      return { candidate, volume };
+    }
+  }
+
+  return null;
+}
+
+function pathWithMountedRoot(candidate, mountedRoot) {
+  const root = String(mountedRoot || '').trim().replace(/\/+$/, '');
+
+  if (!root) {
+    return '';
+  }
+
+  return candidate.suffix ? `${root}/${candidate.suffix}` : root;
+}
+
+function replaceTabCurrentPath(tab, previousPath, nextPath) {
+  const normalizedPath = String(nextPath || '').trim();
+
+  if (!tab || !normalizedPath || normalizedPath === previousPath) {
+    return;
+  }
+
+  tab.currentPath = normalizedPath;
+
+  if (tab.history[tab.historyIndex] === previousPath) {
+    tab.history.splice(tab.historyIndex, 1, normalizedPath);
+  } else if (tab.historyIndex >= 0 && tab.historyIndex < tab.history.length) {
+    tab.history.splice(tab.historyIndex, 1, normalizedPath);
+  }
+}
+
+function isWatchableLocalDirectoryPath(path) {
+  const value = normalizeComparablePath(path);
+
+  return Boolean(
+    value
+    && !value.startsWith('remote://')
+    && !isArchivePath(value)
+    && (value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value))
+  );
+}
+
+function resolveHomeRelativePath(path, home) {
+  const value = normalizeComparablePath(path);
+  const homePath = normalizeComparablePath(home);
+
+  if (!homePath || homePath === '~') {
+    return value;
+  }
+
+  if (value === '~') {
+    return homePath;
+  }
+
+  if (value.startsWith('~/')) {
+    return `${homePath}/${value.slice(2)}`;
+  }
+
+  return value;
 }
 
 function normalizeError(error) {
@@ -845,6 +1064,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const volumes = ref([]);
   const favoriteGroups = ref([]);
   const favorites = ref([]);
+  const homeDirectory = ref('');
   const columnPreviewEntries = ref({ left: null, right: null });
   const columnSelectionStates = ref({ left: null, right: null });
   const columnTargetDirectories = ref({ left: null, right: null });
@@ -1170,9 +1390,11 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     initializePromise = (async () => {
       await loadAppSettings();
+      await loadHomeDirectory();
       await Promise.all([
         initializeOperationProgressListener(),
         initializeRemoteEditSyncListener(),
+        initializeDirectoryWatchListener(),
       ]);
       await Promise.all([
         loadFavoriteGroups(),
@@ -1193,7 +1415,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       }
 
       try {
-        const home = await getHomeDirectory();
+        const home = homeDirectory.value || await getHomeDirectory();
         for (const paneId of ['left', 'right']) {
           const tab = activeTabFor(paneId);
           tab.currentPath = home;
@@ -1211,6 +1433,14 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     })();
 
     return initializePromise;
+  }
+
+  async function loadHomeDirectory() {
+    try {
+      homeDirectory.value = await getHomeDirectory();
+    } catch {
+      homeDirectory.value = '';
+    }
   }
 
   async function loadAppSettings() {
@@ -1295,6 +1525,66 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     }
   }
 
+  async function initializeDirectoryWatchListener() {
+    if (stopDirectoryWatchListener || !canUseLocalFileAssets()) {
+      return;
+    }
+
+    try {
+      stopDirectoryWatchListener = await listen('directory-watch-changed', (event) => {
+        const path = normalizeComparablePath(event.payload?.path || '');
+
+        if (!path || !activeDirectoryWatchPaths.value.includes(path)) {
+          return;
+        }
+
+        scheduleDirectoryReloadInPanes(path);
+      });
+
+      scheduleActiveDirectoryWatchSync(activeDirectoryWatchPaths.value);
+    } catch {
+      stopDirectoryWatchListener = null;
+    }
+  }
+
+  function scheduleActiveDirectoryWatchSync(paths = activeDirectoryWatchPaths.value) {
+    if (!canUseLocalFileAssets()) {
+      return;
+    }
+
+    const normalizedPaths = [...new Set(
+      (Array.isArray(paths) ? paths : [])
+        .map(normalizeComparablePath)
+        .filter(isWatchableLocalDirectoryPath),
+    )].sort();
+    const key = normalizedPaths.join('\0');
+
+    if (key === lastWatchedDirectoryPaths) {
+      return;
+    }
+
+    lastWatchedDirectoryPaths = key;
+
+    if (activeDirectoryWatchSyncTimer) {
+      globalThis.clearTimeout(activeDirectoryWatchSyncTimer);
+    }
+
+    activeDirectoryWatchSyncTimer = globalThis.setTimeout(async () => {
+      activeDirectoryWatchSyncTimer = null;
+
+      try {
+        const watchedPaths = await watchActiveDirectories(normalizedPaths);
+        lastWatchedDirectoryPaths = [...new Set(
+          (Array.isArray(watchedPaths) ? watchedPaths : [])
+            .map(normalizeComparablePath)
+            .filter(isWatchableLocalDirectoryPath),
+        )].sort().join('\0');
+      } catch {
+        lastWatchedDirectoryPaths = '';
+      }
+    }, 120);
+  }
+
   async function refreshVolumes() {
     try {
       const previous = new Map(volumes.value.map((volume) => [volume.path, volume]));
@@ -1317,6 +1607,79 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       refreshRemoteHealth();
     } catch {
       volumes.value = [];
+    }
+  }
+
+  function volumeForDevicePath(devicePath) {
+    const normalizedDevicePath = String(devicePath || '').trim();
+
+    if (!normalizedDevicePath) {
+      return null;
+    }
+
+    return volumes.value.find((volume) =>
+      volume.devicePath === normalizedDevicePath
+      && !String(volume.path || '').startsWith('remote://'),
+    ) || null;
+  }
+
+  async function autoMountMissingLocalVolume(path, error) {
+    if (!isLikelyMissingPathError(error) || localMountCandidatesForPath(path).length === 0) {
+      return null;
+    }
+
+    const home = homeDirectory.value || await getHomeDirectory().catch(() => '');
+    const candidateOptions = { homeUserName: home ? fileNameForPath(home) : '' };
+
+    let recovery = findLocalMountRecovery(path, volumes.value, candidateOptions);
+
+    if (!recovery) {
+      await refreshVolumes();
+      recovery = findLocalMountRecovery(path, volumes.value, candidateOptions);
+    }
+
+    if (!recovery) {
+      return null;
+    }
+
+    const { candidate, volume } = recovery;
+    let mountedByCarelo = false;
+
+    try {
+      let mountedVolume = volume;
+
+      if (!mountedVolume.isMounted || !mountedVolume.path) {
+        mountedVolume = await mountVolume(volume.devicePath);
+        mountedByCarelo = true;
+      }
+
+      await refreshVolumes();
+
+      const refreshedVolume = volumeForDevicePath(mountedVolume?.devicePath || volume.devicePath);
+      const resolvedVolume = refreshedVolume || mountedVolume || volume;
+      const resolvedPath = pathWithMountedRoot(candidate, resolvedVolume?.path);
+
+      if (!resolvedPath) {
+        return {
+          error: {
+            message: `Unable to mount ${volume.name || candidate.volumeName} automatically. Carelo could not resolve its mount point.`,
+          },
+        };
+      }
+
+      return {
+        path: resolvedPath,
+        volume: resolvedVolume,
+        mounted: mountedByCarelo,
+      };
+    } catch (mountError) {
+      await refreshVolumes();
+
+      return {
+        error: {
+          message: `Unable to mount ${volume.name || candidate.volumeName} automatically. ${normalizeError(mountError)}`,
+        },
+      };
     }
   }
 
@@ -1544,6 +1907,19 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     return tab.currentPath;
   }
 
+  function directoryReloadComparablePath(path) {
+    return normalizeComparablePath(resolveHomeRelativePath(path, homeDirectory.value));
+  }
+
+  const activeDirectoryWatchPaths = computed(() => {
+    const paths = ['left', 'right']
+      .map((paneId) => effectiveDirectoryFor(paneId) || activeTabFor(paneId)?.currentPath || '')
+      .map(directoryReloadComparablePath)
+      .filter(isWatchableLocalDirectoryPath);
+
+    return [...new Set(paths)].sort();
+  });
+
   function tabTitle(tab) {
     return tabTitleForPath(tab?.currentPath);
   }
@@ -1664,16 +2040,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     const loadVersion = tab.loadVersion + 1;
     tab.loadVersion = loadVersion;
-
-    try {
-      const entries = await listDirectory(requestedPath);
-
-      if (tab.loadVersion !== loadVersion) {
-        return;
-      }
-
+    const applyLoadedEntries = (entries, loadedPath) => {
+      replaceTabCurrentPath(tab, requestedPath, loadedPath);
       tab.entries = entries;
-      tab.entriesPath = requestedPath;
+      tab.entriesPath = loadedPath;
       tab.loaded = true;
       tab.selectedPaths = tab.selectedPaths.filter((path) =>
         entries.some((entry) => entry.path === path),
@@ -1684,9 +2054,59 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         : -1;
       tab.selectedIndex = focusedIndex >= 0 ? focusedIndex : -1;
       tab.selectionAnchorIndex = tab.selectedIndex;
+      scheduleActiveDirectoryWatchSync(activeDirectoryWatchPaths.value);
+    };
+
+    try {
+      const entries = await listDirectory(requestedPath);
+
+      if (tab.loadVersion !== loadVersion) {
+        return;
+      }
+
+      applyLoadedEntries(entries, requestedPath);
     } catch (error) {
       if (tab.loadVersion !== loadVersion) {
         return;
+      }
+
+      let loadError = error;
+      const mountRecovery = await autoMountMissingLocalVolume(requestedPath, error);
+
+      if (tab.loadVersion !== loadVersion) {
+        return;
+      }
+
+      if (mountRecovery?.path) {
+        try {
+          const entries = await listDirectory(mountRecovery.path);
+
+          if (tab.loadVersion !== loadVersion) {
+            return;
+          }
+
+          applyLoadedEntries(entries, mountRecovery.path);
+
+          if (mountRecovery.mounted) {
+            addOperationLog({
+              operation: 'mount',
+              label: `Mounted ${mountRecovery.volume?.name || tabTitleForPath(mountRecovery.path)}`,
+              detail: mountRecovery.path,
+              status: 'completed',
+              path: mountRecovery.path,
+            });
+          }
+
+          return;
+        } catch (retryError) {
+          if (tab.loadVersion !== loadVersion) {
+            return;
+          }
+
+          loadError = retryError;
+        }
+      } else if (mountRecovery?.error) {
+        loadError = mountRecovery.error;
       }
 
       tab.entries = [];
@@ -1694,7 +2114,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       tab.selectedIndex = -1;
       tab.selectionAnchorIndex = -1;
       tab.loaded = true;
-      tab.error = normalizeError(error);
+      tab.error = normalizeError(loadError);
       addOperationLog({
         operation: 'directory',
         label: `Unable to load ${tabTitleForPath(tab.currentPath)}`,
@@ -1731,7 +2151,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   }
 
   async function reloadDirectoryInPanes(path, paneIds = null) {
-    const normalizedPath = normalizeComparablePath(path);
+    const normalizedPath = directoryReloadComparablePath(path);
     const targetPaneIds = Array.isArray(paneIds) && paneIds.length > 0
       ? [...new Set(paneIds.filter((paneId) => panes.value[paneId]))]
       : Object.keys(panes.value);
@@ -1742,7 +2162,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       requestColumnDirectoryRefresh(paneId, path);
 
       for (const tab of pane.tabs) {
-        if (normalizeComparablePath(tab.currentPath) === normalizedPath) {
+        if (directoryReloadComparablePath(tab.currentPath) === normalizedPath) {
           reloads.push(loadPane(paneId, tab.id));
         }
       }
@@ -1752,7 +2172,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   }
 
   function scheduleDirectoryReloadInPanes(path) {
-    const normalizedPath = normalizeComparablePath(path);
+    const normalizedPath = directoryReloadComparablePath(path);
 
     if (!normalizedPath) {
       return;
@@ -3150,6 +3570,14 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     activeRemoteVolumeIds,
     (ids) => {
       scheduleActiveRemoteVolumeSync(ids);
+    },
+    { immediate: true },
+  );
+
+  watch(
+    activeDirectoryWatchPaths,
+    (paths) => {
+      scheduleActiveDirectoryWatchSync(paths);
     },
     { immediate: true },
   );

@@ -47,6 +47,10 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  canRename: {
+    type: Boolean,
+    default: true,
+  },
   canMove: {
     type: Boolean,
     default: true,
@@ -82,6 +86,7 @@ const toolsMenuStyle = ref({
 
 const canOpenInNewTab = computed(() => props.entry?.kind === 'directory');
 const hasSingleOperation = computed(() => props.operationCount === 1);
+const canRenameItem = computed(() => props.canModify && props.canRename && hasSingleOperation.value);
 const itemType = computed(() => (props.entry?.kind === 'directory' ? 'Folder' : 'File'));
 const isDirectoryContext = computed(() => !props.entry && Boolean(props.targetDirectory));
 const hasMenuTarget = computed(() => Boolean(props.entry) || isDirectoryContext.value);
@@ -128,7 +133,7 @@ const actionGroups = computed(() => {
           action: 'refreshDirectory',
           label: 'Refresh Folder',
           icon: 'refresh',
-          shortcut: 'F2',
+          shortcut: 'Ctrl R',
           keywords: ['reload update'],
         },
       ],
@@ -240,8 +245,8 @@ const actionGroups = computed(() => {
         action: 'rename',
         label: 'Rename',
         icon: 'file',
-        shortcut: props.canModify ? 'Shift F6' : undefined,
-        disabled: !props.canModify,
+        shortcut: canRenameItem.value ? 'F2' : undefined,
+        disabled: !canRenameItem.value,
         keywords: ['name move'],
       },
       {

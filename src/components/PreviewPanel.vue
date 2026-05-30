@@ -404,33 +404,18 @@ watch(
     }
 
     if (!isRemotePath(entry.path)) {
-      imagePreviewUrl.value = localFileAssetUrl(entry.path);
-      return;
-    }
+      const assetUrl = localFileAssetUrl(entry.path);
 
-    imageLoading.value = true;
-
-    try {
-      const payload = await readMediaPreview(entry.path, mediaPreviewFallbackMaxBytes);
-      const bytes = mediaPreviewPayloadToBytes(payload);
-      const blob = new Blob([bytes], { type: imageMimeType(entry.name) || 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-
-      if (imagePreviewLoadVersion !== loadVersion) {
-        revokeObjectUrl(url);
+      if (assetUrl) {
+        imagePreviewUrl.value = assetUrl;
         return;
       }
 
-      imagePreviewUrl.value = url;
-    } catch {
-      if (imagePreviewLoadVersion === loadVersion) {
-        imageFailed.value = true;
-      }
-    } finally {
-      if (imagePreviewLoadVersion === loadVersion) {
-        imageLoading.value = false;
-      }
+      await loadImageBlobFallback(loadVersion);
+      return;
     }
+
+    await loadImageBlobFallback(loadVersion);
   },
   { immediate: true },
 );
@@ -737,8 +722,17 @@ function captureImageProperties(event) {
 }
 
 function handleImageError() {
+  if (
+    !imagePreviewUrl.value.startsWith('blob:') &&
+    canUseMediaBlobFallback(inspectedEntry.value)
+  ) {
+    loadImageBlobFallback(imagePreviewLoadVersion);
+    return;
+  }
+
   imageFailed.value = true;
   imageProperties.value = null;
+  imageLoading.value = false;
 }
 
 function captureAudioProperties(audio) {
@@ -1015,6 +1009,45 @@ function revokeObjectUrl(url) {
 function revokeImagePreviewUrl() {
   revokeObjectUrl(imagePreviewUrl.value);
   imagePreviewUrl.value = '';
+}
+
+async function loadImageBlobFallback(loadVersion) {
+  const entry = inspectedEntry.value;
+
+  if (!entry || !isImageEntry(entry) || !canUseMediaBlobFallback(entry)) {
+    if (imagePreviewLoadVersion === loadVersion) {
+      imageFailed.value = true;
+      imageLoading.value = false;
+    }
+    return;
+  }
+
+  revokeImagePreviewUrl();
+  imageProperties.value = null;
+  imageFailed.value = false;
+  imageLoading.value = true;
+
+  try {
+    const payload = await readMediaPreview(entry.path, mediaPreviewFallbackMaxBytes);
+    const bytes = mediaPreviewPayloadToBytes(payload);
+    const blob = new Blob([bytes], { type: imageMimeType(entry.name) || 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+
+    if (imagePreviewLoadVersion !== loadVersion) {
+      revokeObjectUrl(url);
+      return;
+    }
+
+    imagePreviewUrl.value = url;
+  } catch {
+    if (imagePreviewLoadVersion === loadVersion) {
+      imageFailed.value = true;
+    }
+  } finally {
+    if (imagePreviewLoadVersion === loadVersion) {
+      imageLoading.value = false;
+    }
+  }
 }
 
 function clearAudioPreviewFallbackTimer() {

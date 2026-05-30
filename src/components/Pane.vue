@@ -348,6 +348,11 @@ const canBatchRenameContext = computed(() => {
 
   return operationEntries.length > 1 && operationEntries.every((item) => canRenamePath(item.path));
 });
+const canRenameContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  return operationEntries.length === 1 && canRenamePath(operationEntries[0]?.path);
+});
 const canMoveContext = computed(() =>
   canTransferToOtherPane.value
     && contextOperationEntries(contextMenu.value).every((item) => !isArchivePath(item.path)),
@@ -2419,6 +2424,19 @@ async function handleContextAction(action) {
     }
 
     if (action === 'rename') {
+      if (!canRenamePath(entry.path)) {
+        const unsupportedRemote = unsupportedRenameRemoteVolume([entry]);
+        await dialog.alert({
+          title: 'Rename Not Available',
+          message: isArchivePath(entry.path)
+            ? 'Archive contents are read-only while browsing.'
+            : `${unsupportedRemote?.name || 'This remote storage'} does not support rename operations.`,
+          detail: isArchivePath(entry.path) ? '' : 'Copy or move the item to a rename-capable location first.',
+          variant: 'warning',
+        });
+        return;
+      }
+
       const nextName = (await dialog.prompt({
         title: 'Rename Item',
         message: entry.name,
@@ -2718,6 +2736,7 @@ async function handleContextAction(action) {
       :custom-tools="availableCustomTools"
       :can-transfer="canTransferToOtherPane"
       :can-modify="canModifyContext"
+      :can-rename="canRenameContext"
       :can-move="canMoveContext"
       :can-batch-rename="canBatchRenameContext"
       :operation-count="contextOperationEntries(contextMenu).length"
@@ -2797,6 +2816,11 @@ async function handleContextAction(action) {
   overflow: hidden;
   border-radius: 0;
   background: var(--pane-glass);
+}
+
+.pane:focus,
+.pane:focus-visible {
+  outline: 0;
 }
 
 .file-drag-ghost {

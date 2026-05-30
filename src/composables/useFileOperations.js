@@ -310,6 +310,10 @@ export async function listVolumes() {
   return invokeCommand('list_volumes');
 }
 
+export async function watchActiveDirectories(paths) {
+  return invokeCommand('watch_active_directories', { paths });
+}
+
 export async function mountVolume(devicePath) {
   return invokeCommand('mount_volume', { devicePath });
 }
@@ -517,6 +521,7 @@ export function useFileOperations() {
     localFileAssetUrl,
     measureItemsSize,
     mountVolume,
+    watchActiveDirectories,
     moveFavorite,
     moveItems,
     openWithApp,

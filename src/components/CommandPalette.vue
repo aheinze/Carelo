@@ -174,8 +174,8 @@ const commandDefinitions = [
     title: 'Rename selected item',
     detail: 'Change the focused file or folder name',
     icon: 'file-text',
-    shortcut: 'Shift F6',
-    when: () => hasFocusedEntry.value && !isArchivePath(selectedEntry.value?.path),
+    shortcut: 'F2',
+    when: () => hasFocusedEntry.value && canRenamePath(selectedEntry.value?.path),
     keywords: 'name',
   },
   {
@@ -373,7 +373,7 @@ const commandDefinitions = [
     title: 'Refresh current folder',
     detail: 'Reload the active pane',
     icon: 'refresh',
-    shortcut: 'F2',
+    shortcut: 'Ctrl R',
     keywords: 'reload rescan',
   },
   {
