@@ -83,6 +83,8 @@ pub struct VolumeEntry {
     pub detail: Option<String>,
     pub is_removable: bool,
     pub is_mounted: bool,
+    pub is_encrypted: bool,
+    pub needs_unlock: bool,
     pub capabilities: Option<RemoteVolumeCapabilities>,
     pub health: Option<RemoteVolumeHealth>,
 }

@@ -318,6 +318,10 @@ export async function mountVolume(devicePath) {
   return invokeCommand('mount_volume', { devicePath });
 }
 
+export async function unlockVolume(devicePath, password) {
+  return invokeCommand('unlock_volume', { devicePath, password });
+}
+
 export async function areSameVolume(paths, targetDirectory) {
   return invokeCommand('same_volume', { paths, targetDirectory });
 }
@@ -521,6 +525,7 @@ export function useFileOperations() {
     localFileAssetUrl,
     measureItemsSize,
     mountVolume,
+    unlockVolume,
     watchActiveDirectories,
     moveFavorite,
     moveItems,

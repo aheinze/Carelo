@@ -75,6 +75,7 @@ pub fn run() {
             commands::fs::transfer::get_home_directory,
             commands::fs::volumes::list_volumes,
             commands::fs::volumes::mount_volume,
+            commands::fs::volumes::unlock_volume,
             commands::fs::watcher::watch_active_directories,
             commands::fs::transfer::same_volume,
             commands::fs::remotes::add_remote_volume,

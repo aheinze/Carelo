@@ -170,6 +170,8 @@ impl RemoteVolumeState {
                     detail: Some(detail),
                     is_removable: false,
                     is_mounted: true,
+                    is_encrypted: false,
+                    needs_unlock: false,
                     capabilities: Some(remote.capabilities),
                     health: Some(remote.health),
                 }

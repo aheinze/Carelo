@@ -22,8 +22,10 @@ import {
   resumeFileOperation,
   saveAppSettings as saveStoredAppSettings,
   setActiveRemoteVolumes,
+  unlockVolume,
   watchActiveDirectories,
 } from '../composables/useFileOperations';
+import { useDialog } from '../composables/useDialog';
 import { loadUiSettings, saveUiSettings } from '../composables/useSettings';
 import {
   archiveDisplayName,
@@ -54,6 +56,7 @@ let scheduledDirectoryReloadPaths = new Set();
 let remoteHealthBackoff = new Map();
 let activeDirectoryWatchSyncTimer = null;
 let lastWatchedDirectoryPaths = '';
+const activeLocalVolumeUnlocks = new Map();
 const SORT_KEYS = ['name', 'extension', 'size', 'modifiedAt', 'none'];
 const SORT_DIRECTIONS = ['asc', 'desc'];
 const VIEW_MODES = ['list', 'grid', 'columns'];
@@ -462,6 +465,23 @@ function isLikelyMissingPathError(error) {
     || code === 'file_not_found'
     || (code === 'io_error' && MISSING_PATH_ERROR_PATTERN.test(message))
     || MISSING_PATH_ERROR_PATTERN.test(message);
+}
+
+function isUnlockAuthError(error) {
+  const code = String(error?.code || '').toLowerCase();
+  const message = normalizeError(error).toLowerCase();
+
+  return code === 'volume_unlock_auth_failed'
+    || message.includes('password was not accepted')
+    || message.includes('incorrect passphrase');
+}
+
+function localVolumeNeedsUnlock(volume) {
+  return Boolean(
+    volume?.devicePath
+    && volume?.isEncrypted
+    && volume?.needsUnlock,
+  );
 }
 
 function localMountCandidatesForPath(path, options = {}) {
@@ -1009,6 +1029,7 @@ function clampIndex(index, min, max) {
 }
 
 export const useFileManagerStore = defineStore('file-manager', () => {
+  const dialog = useDialog();
   const savedSettings = loadUiSettings();
   const initialAppSettings = normalizeAppSettings({
     ...(savedSettings.appSettings || {}),
@@ -1127,17 +1148,20 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     const volumeItems = volumes.value.map((volume) => {
       const isRemote = volume.path?.startsWith('remote://');
       const isMountable = !volume.isMounted && Boolean(volume.devicePath);
+      const needsUnlock = localVolumeNeedsUnlock(volume);
 
       return {
         name: volume.name,
         path: volume.path,
         devicePath: volume.devicePath,
         detail: isRemote ? '' : volume.detail || 'Mounted',
-        icon: isRemote ? 'network' : 'drive',
-        color: isRemote ? remoteHealthColor(volume.health) : volume.isRemovable ? '#5ca8ff' : '#8E8E93',
+        icon: isRemote ? 'network' : needsUnlock ? 'lock' : 'drive',
+        color: isRemote ? remoteHealthColor(volume.health) : needsUnlock ? '#ff9f0a' : volume.isRemovable ? '#5ca8ff' : '#8E8E93',
         disabled: !volume.isMounted && !isMountable,
         isMountable,
         isRemote,
+        isEncrypted: Boolean(volume.isEncrypted),
+        needsUnlock,
         remoteId: isRemote ? remoteVolumeIdFromPath(volume.path) : '',
         remoteHealth: volume.health || null,
         remoteCapabilities: volume.capabilities || null,
@@ -1623,6 +1647,93 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     ) || null;
   }
 
+  async function promptEncryptedVolumePassword(volume, lastError = null) {
+    const name = volume?.name || 'Encrypted Device';
+
+    return dialog.prompt({
+      title: lastError ? 'Password Not Accepted' : 'Unlock Device',
+      message: `Enter the password for ${name}.`,
+      detail: volume?.devicePath || '',
+      inputLabel: 'Device password',
+      inputType: 'password',
+      inputRequired: true,
+      confirmLabel: 'Unlock',
+      icon: 'lock',
+      variant: lastError ? 'warning' : 'default',
+    });
+  }
+
+  async function unlockLocalVolumeWithPrompt(volume) {
+    const devicePath = String(volume?.devicePath || '').trim();
+
+    if (!devicePath) {
+      throw new Error('No device path is available for this encrypted volume.');
+    }
+
+    if (activeLocalVolumeUnlocks.has(devicePath)) {
+      return activeLocalVolumeUnlocks.get(devicePath);
+    }
+
+    const unlockPromise = (async () => {
+      let lastError = null;
+
+      while (true) {
+        const password = await promptEncryptedVolumePassword(volume, lastError);
+
+        if (password === null) {
+          return null;
+        }
+
+        try {
+          return await unlockVolume(devicePath, password);
+        } catch (error) {
+          if (isUnlockAuthError(error)) {
+            lastError = error;
+            continue;
+          }
+
+          throw error;
+        }
+      }
+    })();
+
+    activeLocalVolumeUnlocks.set(devicePath, unlockPromise);
+
+    try {
+      return await unlockPromise;
+    } finally {
+      activeLocalVolumeUnlocks.delete(devicePath);
+    }
+  }
+
+  async function mountLocalVolume(volume) {
+    const devicePath = String(volume?.devicePath || '').trim();
+
+    if (!devicePath) {
+      return null;
+    }
+
+    const currentVolume = volumeForDevicePath(devicePath) || volume;
+
+    if (localVolumeNeedsUnlock(currentVolume)) {
+      return unlockLocalVolumeWithPrompt(currentVolume);
+    }
+
+    try {
+      return await mountVolume(devicePath);
+    } catch (error) {
+      await refreshVolumes();
+
+      const refreshedVolume = volumeForDevicePath(devicePath) || currentVolume;
+
+      if (localVolumeNeedsUnlock(refreshedVolume)) {
+        return unlockLocalVolumeWithPrompt(refreshedVolume);
+      }
+
+      throw error;
+    }
+  }
+
   async function autoMountMissingLocalVolume(path, error) {
     if (!isLikelyMissingPathError(error) || localMountCandidatesForPath(path).length === 0) {
       return null;
@@ -1649,8 +1760,16 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       let mountedVolume = volume;
 
       if (!mountedVolume.isMounted || !mountedVolume.path) {
-        mountedVolume = await mountVolume(volume.devicePath);
+        mountedVolume = await mountLocalVolume(volume);
         mountedByCarelo = true;
+      }
+
+      if (!mountedVolume) {
+        return {
+          error: {
+            message: `Unlock cancelled for ${volume.name || candidate.volumeName}.`,
+          },
+        };
       }
 
       await refreshVolumes();
@@ -3615,6 +3734,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     sidebarSections,
     initialize,
     refreshVolumes,
+    mountLocalVolume,
     refreshRemoteHealth,
     activeTabFor,
     parentDirectoryFor,

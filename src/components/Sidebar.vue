@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, nextTick, ref, onMounted, onUnmounted } from 'vue';
 import AppIcon from './AppIcon.vue';
 import WorkspaceSelector from './WorkspaceSelector.vue';
-import { getFileMetadata, mountVolume, removeRemoteVolume } from '../composables/useFileOperations';
+import { getFileMetadata, removeRemoteVolume } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import {
@@ -66,6 +66,10 @@ const sidebarItemMenuDetail = computed(() => {
     return 'Remote Storage';
   }
 
+  if (item.needsUnlock) {
+    return 'Encrypted Device';
+  }
+
   if (item.isMountable) {
     return 'Device';
   }
@@ -89,8 +93,8 @@ const sidebarItemMenuGroups = computed(() => {
       {
         id: 'open',
         action: 'open',
-        label: item.isMountable ? 'Mount and Open' : 'Open',
-        icon: item.icon || (item.isMountable ? 'drive' : 'folder'),
+        label: item.needsUnlock ? 'Unlock and Open' : item.isMountable ? 'Mount and Open' : 'Open',
+        icon: item.icon || (item.needsUnlock ? 'lock' : item.isMountable ? 'drive' : 'folder'),
         disabled: !canOpen || openDisabled,
       },
       {
@@ -197,7 +201,7 @@ async function mountSidebarVolume(item) {
   mountingDevicePath.value = item.devicePath;
 
   try {
-    const volume = await mountVolume(item.devicePath);
+    const volume = await store.mountLocalVolume(item);
     await store.refreshVolumes();
 
     if (volume?.path) {
@@ -206,14 +210,18 @@ async function mountSidebarVolume(item) {
   } catch (error) {
     await store.refreshVolumes();
     await dialog.alert({
-      title: 'Mount Failed',
-      message: error?.message || `Unable to mount ${item.name}.`,
+      title: item.needsUnlock ? 'Unlock Failed' : 'Mount Failed',
+      message: error?.message || `Unable to ${item.needsUnlock ? 'unlock' : 'mount'} ${item.name}.`,
       detail: item.devicePath || '',
       variant: 'warning',
     });
   } finally {
     mountingDevicePath.value = '';
   }
+}
+
+function deviceBusyLabel(item) {
+  return item?.needsUnlock ? 'Unlocking…' : 'Mounting…';
 }
 
 function remoteIdFromPath(path) {
@@ -1256,7 +1264,7 @@ onUnmounted(() => {
             </span>
             <span class="sidebar-label">{{ item.name }}</span>
             <small v-if="item.detail || mountingDevicePath === item.devicePath">
-              {{ mountingDevicePath === item.devicePath ? 'Mounting…' : item.detail }}
+              {{ mountingDevicePath === item.devicePath ? deviceBusyLabel(item) : item.detail }}
             </small>
           </button>
           <span v-if="item.isRemote" class="sidebar-item-actions">

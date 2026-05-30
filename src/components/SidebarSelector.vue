@@ -1,7 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
-import { mountVolume } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 
@@ -97,7 +96,7 @@ async function mountSidebarVolume(item) {
   mountingDevicePath.value = item.devicePath;
 
   try {
-    const volume = await mountVolume(item.devicePath);
+    const volume = await store.mountLocalVolume(item);
     await store.refreshVolumes();
 
     if (volume?.path) {
@@ -107,14 +106,18 @@ async function mountSidebarVolume(item) {
   } catch (error) {
     await store.refreshVolumes();
     await dialog.alert({
-      title: 'Mount Failed',
-      message: error?.message || `Unable to mount ${item.name}.`,
+      title: item.needsUnlock ? 'Unlock Failed' : 'Mount Failed',
+      message: error?.message || `Unable to ${item.needsUnlock ? 'unlock' : 'mount'} ${item.name}.`,
       detail: item.devicePath || '',
       variant: 'warning',
     });
   } finally {
     mountingDevicePath.value = '';
   }
+}
+
+function deviceBusyLabel(item) {
+  return item?.needsUnlock ? 'Unlocking...' : 'Mounting...';
 }
 
 function openRemoteModal() {
@@ -243,7 +246,7 @@ onUnmounted(() => {
               <span class="sidebar-selector-item-copy">
                 <span>{{ item.name }}</span>
                 <small v-if="item.detail || mountingDevicePath === item.devicePath">
-                  {{ mountingDevicePath === item.devicePath ? 'Mounting...' : item.detail }}
+                  {{ mountingDevicePath === item.devicePath ? deviceBusyLabel(item) : item.detail }}
                 </small>
               </span>
             </button>
