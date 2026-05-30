@@ -398,6 +398,11 @@ defineProps({
       <circle cx="17" cy="16.4" r="1" fill="currentColor" stroke="none" />
     </template>
 
+    <template v-else-if="name === 'eject'">
+      <path d="m12 5 6 7H6Z" />
+      <path d="M6 17h12" />
+    </template>
+
     <template v-else-if="name === 'server'">
       <rect x="4" y="4.5" width="16" height="6" rx="2" />
       <rect x="4" y="13.5" width="16" height="6" rx="2" />

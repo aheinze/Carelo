@@ -37,6 +37,7 @@ const draggedFavoriteId = ref(null);
 const favoriteDropIndex = ref(null);
 const favoriteDropGroupId = ref('');
 const mountingDevicePath = ref('');
+const deviceBusyAction = ref('');
 let volumeRefreshTimer = null;
 
 const favoriteGroupsForMenu = computed(() => {
@@ -179,6 +180,21 @@ const sidebarItemMenuGroups = computed(() => {
     });
   }
 
+  if (item.canEject) {
+    groups.push({
+      id: 'device',
+      items: [
+        {
+          id: 'ejectDevice',
+          action: 'ejectDevice',
+          label: 'Eject',
+          icon: 'eject',
+          disabled: item.devicePath && mountingDevicePath.value === item.devicePath,
+        },
+      ],
+    });
+  }
+
   return groups.filter((group) => group.items.length > 0);
 });
 
@@ -199,6 +215,7 @@ async function openSidebarItem(item) {
 
 async function mountSidebarVolume(item) {
   mountingDevicePath.value = item.devicePath;
+  deviceBusyAction.value = item.needsUnlock ? 'unlock' : 'mount';
 
   try {
     const volume = await store.mountLocalVolume(item);
@@ -217,10 +234,15 @@ async function mountSidebarVolume(item) {
     });
   } finally {
     mountingDevicePath.value = '';
+    deviceBusyAction.value = '';
   }
 }
 
 function deviceBusyLabel(item) {
+  if (deviceBusyAction.value === 'eject') {
+    return 'Ejecting…';
+  }
+
   return item?.needsUnlock ? 'Unlocking…' : 'Mounting…';
 }
 
@@ -690,6 +712,11 @@ async function runSidebarItemContextAction(menuItem) {
 
     if (menuItem.action === 'disconnectRemote') {
       await disconnectRemoteItem(item);
+      return;
+    }
+
+    if (menuItem.action === 'ejectDevice') {
+      await ejectSidebarDevice(item);
     }
   } catch (error) {
     await dialog.alert({
@@ -1006,6 +1033,32 @@ async function refreshRemoteItem(item, event) {
   await store.refreshRemoteHealth(item.remoteId);
 }
 
+async function ejectSidebarDevice(item, event) {
+  event?.stopPropagation?.();
+
+  if (!item?.devicePath || mountingDevicePath.value === item.devicePath) {
+    return;
+  }
+
+  mountingDevicePath.value = item.devicePath;
+  deviceBusyAction.value = 'eject';
+
+  try {
+    await store.ejectLocalVolume(item);
+  } catch (error) {
+    await store.refreshVolumes();
+    await dialog.alert({
+      title: 'Eject Failed',
+      message: error?.message || `Unable to eject ${item.name}.`,
+      detail: item.devicePath || '',
+      variant: 'warning',
+    });
+  } finally {
+    mountingDevicePath.value = '';
+    deviceBusyAction.value = '';
+  }
+}
+
 function closeSidebarAddMenu() {
   sidebarAddMenuOpen.value = false;
 }
@@ -1253,7 +1306,7 @@ onUnmounted(() => {
               'sidebar-item--disabled': item.disabled,
               'sidebar-item--mounting': mountingDevicePath === item.devicePath,
               'sidebar-item--remote': item.isRemote,
-              'sidebar-item--actionable': item.isRemote || item.isFavorite,
+              'sidebar-item--actionable': item.isRemote || item.isFavorite || item.canEject,
             }"
             :disabled="item.disabled || mountingDevicePath === item.devicePath"
             @click="openSidebarItem(item)"
@@ -1287,6 +1340,17 @@ onUnmounted(() => {
               <AppIcon name="x" :size="13" :stroke-width="2.2" />
             </button>
           </span>
+          <button
+            v-else-if="item.canEject"
+            type="button"
+            class="sidebar-item-action"
+            aria-label="Eject device"
+            title="Eject device"
+            :disabled="mountingDevicePath === item.devicePath"
+            @click="ejectSidebarDevice(item, $event)"
+          >
+            <AppIcon name="eject" :size="13" :stroke-width="2.2" />
+          </button>
           <button
             v-else-if="item.isFavorite"
             type="button"
@@ -1722,6 +1786,11 @@ h2 {
 .sidebar-item-action:focus-visible {
   background: var(--btn-hover);
   color: var(--text);
+}
+
+.sidebar-item-action:disabled {
+  cursor: wait;
+  color: var(--text-faint);
 }
 
 /* ── Context menu ────────────────────────────────────────── */

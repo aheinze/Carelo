@@ -8,6 +8,7 @@ import {
   canUseLocalFileAssets,
   checkRemoteVolume,
   clearRemotePreviewCache,
+  ejectVolume,
   getAppSettings as getStoredAppSettings,
   getHomeDirectory,
   listDirectory,
@@ -641,6 +642,21 @@ function pathWithMountedRoot(candidate, mountedRoot) {
   return candidate.suffix ? `${root}/${candidate.suffix}` : root;
 }
 
+function pathIsInsideRoot(path, root) {
+  const normalizedPath = normalizeComparablePath(path);
+  const normalizedRoot = normalizeComparablePath(root);
+
+  if (!normalizedPath || !normalizedRoot) {
+    return false;
+  }
+
+  if (normalizedRoot === '/') {
+    return normalizedPath.startsWith('/');
+  }
+
+  return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+}
+
 function replaceTabCurrentPath(tab, previousPath, nextPath) {
   const normalizedPath = String(nextPath || '').trim();
 
@@ -1162,6 +1178,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         isRemote,
         isEncrypted: Boolean(volume.isEncrypted),
         needsUnlock,
+        canEject: !isRemote && Boolean(volume.devicePath),
         remoteId: isRemote ? remoteVolumeIdFromPath(volume.path) : '',
         remoteHealth: volume.health || null,
         remoteCapabilities: volume.capabilities || null,
@@ -1732,6 +1749,106 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
       throw error;
     }
+  }
+
+  function clearTabForEjectedRoot(tab, rootPath) {
+    if (!tab || !rootPath) {
+      return false;
+    }
+
+    const wasInsideRoot = pathIsInsideRoot(tab.currentPath, rootPath)
+      || pathIsInsideRoot(tab.entriesPath, rootPath);
+
+    if (!wasInsideRoot) {
+      return false;
+    }
+
+    replaceTabCurrentPath(tab, tab.currentPath, '~');
+    tab.entries = [];
+    tab.entriesPath = '';
+    tab.loaded = false;
+    tab.selectedIndex = -1;
+    tab.selectionAnchorIndex = -1;
+    tab.selectedPaths = [];
+    tab.error = '';
+    return true;
+  }
+
+  async function ejectLocalVolume(volume) {
+    const devicePath = String(volume?.devicePath || '').trim();
+
+    if (!devicePath) {
+      return false;
+    }
+
+    const currentVolume = volumeForDevicePath(devicePath) || volume;
+    const mountedRoot = normalizeComparablePath(currentVolume?.path || volume?.path || '');
+    const mountedRootsBeforeEject = volumes.value
+      .filter((candidate) => candidate?.path && !candidate.path.startsWith('remote://'))
+      .map((candidate) => normalizeComparablePath(candidate.path))
+      .filter(Boolean);
+
+    let ejectError = null;
+    let ejectResult = null;
+
+    try {
+      ejectResult = await ejectVolume(devicePath);
+    } catch (error) {
+      ejectError = error;
+    } finally {
+      await refreshVolumes();
+    }
+
+    const removedRoots = mountedRootsBeforeEject.filter((root) => (
+      !volumes.value.some((candidate) => normalizeComparablePath(candidate.path) === root)
+    ));
+    const affectedRoots = [
+      mountedRoot,
+      ...(Array.isArray(ejectResult?.mountPaths) ? ejectResult.mountPaths : []),
+      ...removedRoots,
+    ]
+      .map(normalizeComparablePath)
+      .filter(Boolean)
+      .filter((root, index, roots) => roots.indexOf(root) === index);
+
+    if (affectedRoots.length > 0) {
+      const rootsMissingAfterEject = affectedRoots.filter((root) => (
+        !volumes.value.some((candidate) => normalizeComparablePath(candidate.path) === root)
+      ));
+      const rootsToClear = ejectError ? rootsMissingAfterEject : affectedRoots;
+
+      if (rootsToClear.length > 0) {
+        const reloads = [];
+
+        for (const paneId of ['left', 'right']) {
+          const pane = panes.value[paneId];
+
+          for (const tab of pane.tabs) {
+            const changed = rootsToClear.some((root) => clearTabForEjectedRoot(tab, root));
+
+            if (changed && pane.activeTabId === tab.id) {
+              reloads.push(loadPane(paneId, tab.id));
+            }
+          }
+        }
+
+        await Promise.allSettled(reloads);
+      }
+    }
+
+    if (ejectError) {
+      throw ejectError;
+    }
+
+    addOperationLog({
+      operation: 'eject',
+      label: `Ejected ${currentVolume?.name || volume?.name || 'device'}`,
+      detail: devicePath,
+      status: 'completed',
+      path: devicePath,
+    });
+
+    return true;
   }
 
   async function autoMountMissingLocalVolume(path, error) {
@@ -3735,6 +3852,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     initialize,
     refreshVolumes,
     mountLocalVolume,
+    ejectLocalVolume,
     refreshRemoteHealth,
     activeTabFor,
     parentDirectoryFor,

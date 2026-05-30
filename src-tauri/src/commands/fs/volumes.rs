@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EjectVolumeResult {
+    pub ejected: bool,
+    pub mount_paths: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn list_volumes(
     remotes: tauri::State<'_, RemoteVolumeState>,
@@ -49,6 +56,26 @@ pub async fn unlock_volume(device_path: String, password: String) -> Result<Volu
         })?
 }
 
+#[tauri::command]
+pub async fn eject_volume(device_path: String) -> Result<EjectVolumeResult, FsError> {
+    let error_path = device_path.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        eject_system_volume(&device_path).map(|mount_paths| EjectVolumeResult {
+            ejected: true,
+            mount_paths,
+        })
+    })
+    .await
+    .map_err(|error| {
+        FsError::new(
+            "task_join_error",
+            format!("Volume eject failed: {error}"),
+            Some(error_path),
+        )
+    })?
+}
+
 fn list_system_volumes() -> FsResult<Vec<VolumeEntry>> {
     #[cfg(target_os = "macos")]
     {
@@ -95,6 +122,22 @@ fn unlock_system_volume(device_path: &str, password: &str) -> FsResult<VolumeEnt
         Err(FsError::new(
             "unlock_volume_unsupported",
             "Unlocking encrypted volumes from Carelo is not supported on this platform yet.",
+            Some(device_path.to_string()),
+        ))
+    }
+}
+
+fn eject_system_volume(device_path: &str) -> FsResult<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        return eject_linux_volume(device_path);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(FsError::new(
+            "eject_volume_unsupported",
+            "Ejecting volumes from Carelo is not supported on this platform yet.",
             Some(device_path.to_string()),
         ))
     }
@@ -240,6 +283,119 @@ fn unlock_linux_volume(device_path: &str, password: &str) -> FsResult<VolumeEntr
     Err(FsError::new(
         "unlock_volume_path_not_found",
         "The volume unlocked, but Carelo could not find its cleartext device yet.",
+        Some(device_path.to_string()),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn eject_linux_volume(device_path: &str) -> FsResult<Vec<String>> {
+    let device_path = device_path.trim();
+
+    if !device_path.starts_with("/dev/") {
+        return Err(FsError::new(
+            "invalid_volume_device",
+            "Volume device path must start with /dev/.",
+            Some(device_path.to_string()),
+        ));
+    }
+
+    let related_devices = related_linux_devices_for_eject(device_path);
+    let mounted_entries = mounted_linux_mounts_for_candidates(&related_devices)?;
+    let mut mount_paths = mounted_entries
+        .iter()
+        .map(|(_, mount_path)| mount_path.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    mount_paths.sort();
+    let mut unmounted_devices = HashSet::new();
+
+    for (mounted_device, _) in mounted_entries {
+        if unmounted_devices.insert(canonical_linux_device_path(&mounted_device)) {
+            run_udisksctl(
+                &["unmount", "-b", &mounted_device],
+                "eject_unmount_spawn_failed",
+                "eject_unmount_failed",
+                "unmount the volume",
+                device_path,
+            )?;
+        }
+    }
+
+    for encrypted_device in related_devices
+        .iter()
+        .filter(|device| linux_block_device_is_encrypted(device))
+    {
+        for cleartext_device in unlocked_linux_devices_for_device(encrypted_device) {
+            run_udisksctl(
+                &["lock", "-b", &cleartext_device],
+                "eject_lock_spawn_failed",
+                "eject_lock_failed",
+                "lock the encrypted volume",
+                device_path,
+            )?;
+        }
+    }
+
+    let power_device =
+        linux_parent_block_device_path(device_path).unwrap_or_else(|| device_path.to_string());
+
+    match run_udisksctl(
+        &["power-off", "-b", &power_device],
+        "eject_power_off_spawn_failed",
+        "eject_power_off_failed",
+        "power off the device",
+        device_path,
+    ) {
+        Ok(()) => Ok(mount_paths),
+        Err(error) if power_device != device_path => run_udisksctl(
+            &["power-off", "-b", device_path],
+            "eject_power_off_spawn_failed",
+            "eject_power_off_failed",
+            "power off the device",
+            device_path,
+        )
+        .map(|_| mount_paths)
+        .map_err(|_| error),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_udisksctl(
+    args: &[&str],
+    spawn_code: &str,
+    failure_code: &str,
+    action: &str,
+    device_path: &str,
+) -> FsResult<()> {
+    let output = Command::new("udisksctl")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            FsError::new(
+                spawn_code,
+                format!("Unable to start udisksctl to {action}: {error}"),
+                Some(device_path.to_string()),
+            )
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+
+    Err(FsError::new(
+        failure_code,
+        if detail.is_empty() {
+            format!("Unable to {action}.")
+        } else {
+            format!("Unable to {action}: {detail}")
+        },
         Some(device_path.to_string()),
     ))
 }
@@ -421,6 +577,13 @@ fn list_linux_volumes() -> FsResult<Vec<VolumeEntry>> {
         if seen_devices.insert(device_path.clone()) {
             if volume.path.is_empty() || seen_paths.insert(volume.path.clone()) {
                 volumes.push(volume);
+            } else if volume.is_encrypted {
+                if let Some(existing_volume) = volumes
+                    .iter_mut()
+                    .find(|existing| existing.path == volume.path)
+                {
+                    *existing_volume = volume;
+                }
             }
         }
     }
@@ -435,7 +598,9 @@ fn volume_from_mountinfo_line(line: &str) -> Option<VolumeEntry> {
     let separator_index = fields.iter().position(|field| *field == "-")?;
     let mount_point = decode_mountinfo_escape(fields.get(4)?);
     let fs_type = fields.get(separator_index + 1)?;
-    let source = decode_mountinfo_escape(fields.get(separator_index + 2).copied().unwrap_or(""));
+    let source = strip_mount_source_suffix(&decode_mountinfo_escape(
+        fields.get(separator_index + 2).copied().unwrap_or(""),
+    ));
 
     if is_pseudo_filesystem(fs_type) {
         return None;
@@ -502,6 +667,115 @@ fn canonical_linux_device_path(device_path: &str) -> String {
     std::fs::canonicalize(device_path)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| device_path.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_parent_block_device_path(device_path: &str) -> Option<String> {
+    let device_name = device_name_from_device_path(device_path)?;
+    let sys_path = std::fs::canonicalize(Path::new("/sys/class/block").join(&device_name)).ok()?;
+
+    if sys_path.join("partition").exists() {
+        return sys_path
+            .parent()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("/dev/{name}"));
+    }
+
+    Some(format!("/dev/{device_name}"))
+}
+
+#[cfg(target_os = "linux")]
+fn related_linux_devices_for_eject(device_path: &str) -> Vec<String> {
+    let mut devices = HashSet::new();
+    devices.insert(strip_mount_source_suffix(device_path));
+
+    if let Some(parent_device_path) = linux_parent_block_device_path(device_path) {
+        devices.insert(parent_device_path.clone());
+
+        if let Some(parent_name) = device_name_from_device_path(&parent_device_path) {
+            let parent_path = Path::new("/sys/class/block").join(parent_name);
+
+            if let Ok(entries) = std::fs::read_dir(parent_path) {
+                for entry in entries.filter_map(Result::ok) {
+                    let entry_path = entry.path();
+
+                    if !entry_path.join("partition").exists() {
+                        continue;
+                    }
+
+                    let name = entry.file_name().to_string_lossy().into_owned();
+
+                    if !name.is_empty() {
+                        devices.insert(format!("/dev/{name}"));
+                    }
+                }
+            }
+        }
+    }
+
+    for device in devices.clone() {
+        for cleartext_device in unlocked_linux_devices_for_device(&device) {
+            devices.insert(cleartext_device);
+        }
+    }
+
+    let mut devices = devices.into_iter().collect::<Vec<_>>();
+    devices.sort();
+    devices
+}
+
+#[cfg(target_os = "linux")]
+fn mounted_linux_mounts_for_candidates(candidates: &[String]) -> FsResult<Vec<(String, String)>> {
+    let mountinfo_path = Path::new("/proc/self/mountinfo");
+    let mountinfo = match std::fs::read_to_string(mountinfo_path) {
+        Ok(mountinfo) => mountinfo,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(FsError::io("Read mount table", mountinfo_path, error)),
+    };
+
+    Ok(mounted_linux_mounts_from_mountinfo(&mountinfo, candidates))
+}
+
+#[cfg(target_os = "linux")]
+fn mounted_linux_mounts_from_mountinfo(
+    mountinfo: &str,
+    candidates: &[String],
+) -> Vec<(String, String)> {
+    let mut devices = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let Some(separator_index) = fields.iter().position(|field| *field == "-") else {
+            continue;
+        };
+        let Some(mount_point) = fields.get(4) else {
+            continue;
+        };
+        let source =
+            decode_mountinfo_escape(fields.get(separator_index + 2).copied().unwrap_or(""));
+
+        if !source.starts_with("/dev/") {
+            continue;
+        }
+
+        let source = strip_mount_source_suffix(&source);
+
+        if candidates
+            .iter()
+            .any(|candidate| linux_device_paths_match(&source, candidate))
+        {
+            let mount_point = decode_mountinfo_escape(mount_point);
+
+            if seen.insert((source.clone(), mount_point.clone())) {
+                devices.push((source, mount_point));
+            }
+        }
+    }
+
+    devices
 }
 
 #[cfg(target_os = "linux")]
@@ -637,17 +911,33 @@ fn linux_udev_properties_are_encrypted(properties: &HashMap<String, String>) -> 
 
 #[cfg(target_os = "linux")]
 fn unlocked_linux_device_for_device(device_path: &str) -> Option<String> {
-    let device_name = device_name_from_device_path(device_path)?;
+    unlocked_linux_devices_for_device(device_path)
+        .into_iter()
+        .next()
+}
+
+#[cfg(target_os = "linux")]
+fn unlocked_linux_devices_for_device(device_path: &str) -> Vec<String> {
+    let Some(device_name) = device_name_from_device_path(device_path) else {
+        return Vec::new();
+    };
     let holders_path = Path::new("/sys/class/block")
         .join(device_name)
         .join("holders");
-    let entries = std::fs::read_dir(holders_path).ok()?;
+    let Ok(entries) = std::fs::read_dir(holders_path) else {
+        return Vec::new();
+    };
 
-    entries.filter_map(Result::ok).find_map(|entry| {
-        let holder_name = entry.file_name().to_string_lossy().into_owned();
+    let mut devices = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let holder_name = entry.file_name().to_string_lossy().into_owned();
 
-        (!holder_name.is_empty()).then(|| format!("/dev/{holder_name}"))
-    })
+            (!holder_name.is_empty()).then(|| format!("/dev/{holder_name}"))
+        })
+        .collect::<Vec<_>>();
+    devices.sort();
+    devices
 }
 
 #[cfg(target_os = "linux")]
@@ -813,7 +1103,8 @@ fn is_removable_device_source(source: &str) -> bool {
         return false;
     }
 
-    let source_path = std::fs::canonicalize(source).unwrap_or_else(|_| PathBuf::from(source));
+    let source = strip_mount_source_suffix(source);
+    let source_path = std::fs::canonicalize(&source).unwrap_or_else(|_| PathBuf::from(source));
     let Some(device_name) = source_path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
@@ -990,5 +1281,29 @@ mod tests {
         ]);
 
         assert!(linux_udev_properties_are_encrypted(&properties));
+    }
+
+    #[test]
+    fn collects_mounted_paths_for_eject_candidates() {
+        let mountinfo = "\
+36 25 8:17 / /run/media/artur/USB\\040One rw,relatime - ext4 /dev/sdb1 rw
+37 25 8:18 / /run/media/artur/USB\\040Two rw,relatime - ext4 /dev/sdb2 rw
+38 25 0:50 / /run/user/1000/doc rw,nosuid - fuse.portal portal rw
+";
+        let candidates = vec!["/dev/sdb1".to_string(), "/dev/sdb2".to_string()];
+
+        assert_eq!(
+            mounted_linux_mounts_from_mountinfo(mountinfo, &candidates),
+            vec![
+                (
+                    "/dev/sdb1".to_string(),
+                    "/run/media/artur/USB One".to_string(),
+                ),
+                (
+                    "/dev/sdb2".to_string(),
+                    "/run/media/artur/USB Two".to_string(),
+                ),
+            ]
+        );
     }
 }

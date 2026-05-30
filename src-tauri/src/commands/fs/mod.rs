@@ -198,7 +198,7 @@ pub use transfer::{
     copy_items, create_folder, delete_items, get_file_metadata, get_home_directory, list_directory,
     move_items, rename_item, same_volume,
 };
-pub use volumes::{list_volumes, mount_volume, unlock_volume};
+pub use volumes::{eject_volume, list_volumes, mount_volume, unlock_volume};
 pub use watcher::{watch_active_directories, DirectoryWatchState};
 
 use search::{expand_local_search_root, is_probably_binary};
