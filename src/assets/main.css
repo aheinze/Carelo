@@ -84,6 +84,77 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
+/* ── Buttons — flat capsule action buttons (dialogs/modals) ── */
+.app-button {
+  display: inline-flex;
+  min-width: 86px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 18px;
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 590;
+  transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.app-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.app-button:active:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 19%, transparent);
+}
+
+.app-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.app-button--subtle {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.app-button--subtle:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+}
+
+.app-button--subtle:active:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.app-button--primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.app-button--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, #fff);
+}
+
+.app-button--primary:active:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 86%, #000);
+}
+
+.app-button--danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.app-button--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 88%, #fff);
+}
+
+.app-button--danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 86%, #000);
+}
+
 /* Desktop shell text should not highlight while clicking, dragging, or navigating. */
 .app-window,
 .app-tooltip {

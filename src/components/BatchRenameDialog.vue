@@ -793,10 +793,10 @@ onBeforeUnmount(() => {
           </div>
 
           <footer class="batch-rename-actions">
-            <button type="button" class="batch-rename-button" @click="cancel">Cancel</button>
+            <button type="button" class="app-button" @click="cancel">Cancel</button>
             <button
               type="button"
-              class="batch-rename-button batch-rename-button--primary"
+              class="app-button app-button--primary"
               :disabled="!canRename"
               @click="rename"
             >
@@ -1487,48 +1487,6 @@ onBeforeUnmount(() => {
   gap: 10px;
   padding: 12px 16px 16px;
   border-top: 1px solid var(--hairline);
-}
-
-.batch-rename-button {
-  min-width: 86px;
-  height: 36px;
-  border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
-  border-radius: 999px;
-  padding: 0 18px;
-  background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.04)),
-    color-mix(in srgb, var(--control-glass) 72%, transparent);
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 650;
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.16),
-    inset 0 -1px 0 rgb(0 0 0 / 0.22),
-    0 1px 2px rgb(0 0 0 / 0.24);
-}
-
-.batch-rename-button:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--text) 20%, transparent);
-  background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.18), rgb(255 255 255 / 0.06)),
-    color-mix(in srgb, var(--control-glass) 82%, transparent);
-}
-
-.batch-rename-button:disabled {
-  cursor: default;
-  opacity: 0.55;
-}
-
-.batch-rename-button--primary {
-  border-color: rgb(var(--accent-rgb) / 0.58);
-  background:
-    linear-gradient(180deg, rgb(72 176 255), rgb(0 113 242));
-  color: rgb(255 255 255 / 0.96);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.34),
-    inset 0 -1px 0 rgb(0 48 120 / 0.35),
-    0 0 0 1px rgb(var(--accent-rgb) / 0.18),
-    0 4px 14px rgb(var(--accent-rgb) / 0.32);
 }
 
 .batch-rename-dialog-enter-active,

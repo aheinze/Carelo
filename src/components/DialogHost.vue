@@ -272,10 +272,10 @@ function handleKeydown(event) {
                 v-for="action in activeDialog.actions"
                 :key="action.value || action.label"
                 type="button"
-                class="dialog-button"
+                class="app-button"
                 :class="{
-                  'dialog-button--primary': action.primary,
-                  'dialog-button--danger': action.destructive,
+                  'app-button--primary': action.primary,
+                  'app-button--danger': action.destructive,
                 }"
                 @click="resolveChoice(action)"
               >
@@ -287,15 +287,15 @@ function handleKeydown(event) {
               <button
                 v-if="activeDialog.showCancel"
                 type="button"
-                class="dialog-button"
+                class="app-button"
                 @click="cancelDialog"
               >
                 {{ activeDialog.cancelLabel }}
               </button>
               <button
                 type="button"
-                class="dialog-button dialog-button--primary"
-                :class="{ 'dialog-button--danger': activeDialog.destructive }"
+                class="app-button app-button--primary"
+                :class="{ 'app-button--danger': activeDialog.destructive }"
                 @click="confirmDialog"
               >
                 {{ activeDialog.confirmLabel }}
@@ -520,79 +520,9 @@ function handleKeydown(event) {
   flex-wrap: wrap;
 }
 
-.dialog-actions--choice .dialog-button {
+.dialog-actions--choice .app-button {
   min-width: 0;
   padding-inline: 14px;
-}
-
-.dialog-button {
-  min-width: 86px;
-  height: 36px;
-  border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
-  border-radius: 999px;
-  padding: 0 18px;
-  background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.04)),
-    color-mix(in srgb, var(--control-glass) 72%, transparent);
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 650;
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.16),
-    inset 0 -1px 0 rgb(0 0 0 / 0.22),
-    0 1px 2px rgb(0 0 0 / 0.24);
-  transition:
-    background 100ms ease,
-    border-color 100ms ease,
-    box-shadow 100ms ease,
-    transform 80ms ease;
-}
-
-.dialog-button:hover {
-  border-color: color-mix(in srgb, var(--text) 20%, transparent);
-  background:
-    linear-gradient(180deg, rgb(255 255 255 / 0.18), rgb(255 255 255 / 0.06)),
-    color-mix(in srgb, var(--control-glass) 82%, transparent);
-}
-
-.dialog-button:active {
-  transform: translateY(1px);
-  box-shadow:
-    inset 0 1px 2px rgb(0 0 0 / 0.22),
-    0 1px 1px rgb(0 0 0 / 0.18);
-}
-
-.dialog-button--primary {
-  border-color: rgb(var(--accent-rgb) / 0.58);
-  background:
-    linear-gradient(180deg, rgb(72 176 255), rgb(0 113 242));
-  color: rgb(255 255 255 / 0.96);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.34),
-    inset 0 -1px 0 rgb(0 48 120 / 0.35),
-    0 0 0 1px rgb(var(--accent-rgb) / 0.18),
-    0 4px 14px rgb(var(--accent-rgb) / 0.32);
-}
-
-.dialog-button--primary:hover {
-  background:
-    linear-gradient(180deg, rgb(91 188 255), rgb(0 123 255));
-}
-
-.dialog-button--danger {
-  border-color: rgb(var(--danger-rgb) / 0.45);
-  background:
-    linear-gradient(180deg, rgb(255 93 84), rgb(214 49 39));
-  color: rgb(255 255 255 / 0.96);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.26),
-    inset 0 -1px 0 rgb(95 0 0 / 0.30),
-    0 4px 14px rgb(var(--danger-rgb) / 0.26);
-}
-
-.dialog-button--danger:hover {
-  background:
-    linear-gradient(180deg, rgb(255 105 96), rgb(226 58 47));
 }
 
 /* ── Enter/leave animation ────────────────────────────────── */
