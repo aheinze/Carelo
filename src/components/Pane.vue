@@ -372,6 +372,12 @@ const canOpenWithContext = computed(() => {
 
   return operationEntries.length === 1 && operationEntries[0]?.kind === 'file' && isLocalEntry(operationEntries[0]);
 });
+const canRevealContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+  const entry = operationEntries[0];
+
+  return operationEntries.length === 1 && entry?.path && !entry.path.startsWith('remote://');
+});
 const canEditFileContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
 
@@ -2731,6 +2737,7 @@ async function handleContextAction(action) {
       :can-archive="canArchiveContext"
       :can-unarchive="canUnarchiveContext"
       :can-open-with="canOpenWithContext"
+      :can-reveal="canRevealContext"
       :can-edit-file="canEditFileContext"
       :can-custom-tools="canRunCustomToolContext"
       :custom-tools="availableCustomTools"

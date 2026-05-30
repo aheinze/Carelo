@@ -31,6 +31,10 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  canReveal: {
+    type: Boolean,
+    default: true,
+  },
   canEditFile: {
     type: Boolean,
     default: false,
@@ -224,6 +228,7 @@ const actionGroups = computed(() => {
         action: 'reveal',
         label: 'Reveal in File Manager',
         icon: 'folder',
+        disabled: !props.canReveal,
         keywords: ['show locate finder explorer nautilus'],
       },
     ],
@@ -330,7 +335,7 @@ const filteredActionGroups = computed(() => {
   return actionGroups.value
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => itemMatchesFilter(item, query)),
+      items: group.items.filter((item) => !item.disabled && itemMatchesFilter(item, query)),
     }))
     .filter((group) => group.items.length > 0);
 });

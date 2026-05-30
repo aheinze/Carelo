@@ -77,7 +77,9 @@ const menuGroups = computed(() => [
       disabled: !props.canCloseOthers,
     },
   ],
-]);
+]
+  .map((group) => group.filter((item) => !item.disabled))
+  .filter((group) => group.length > 0));
 
 function updatePosition() {
   nextTick(() => {

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 
 const DESKTOP_PREVIEW_ROW_HEIGHT = 34;
@@ -7,10 +7,10 @@ const MOBILE_PREVIEW_ROW_HEIGHT = 74;
 const PREVIEW_OVERSCAN_ROWS = 12;
 
 const MODES = [
-  { value: 'replace', label: 'Replace', icon: 'search' },
-  { value: 'add', label: 'Add Text', icon: 'plus' },
-  { value: 'number', label: 'Number', icon: 'sort' },
-  { value: 'case', label: 'Case', icon: 'file-text' },
+  { value: 'replace', label: 'Replace', icon: 'search', description: 'Find and replace text' },
+  { value: 'add', label: 'Add Text', icon: 'plus', description: 'Add a prefix or suffix' },
+  { value: 'number', label: 'Number', icon: 'sort', description: 'Append a sequence number' },
+  { value: 'case', label: 'Case', icon: 'file-text', description: 'Change letter casing' },
 ];
 
 const CASE_MODES = [
@@ -37,6 +37,10 @@ const props = defineProps({
 const emit = defineEmits(['cancel', 'rename']);
 
 const panelRef = ref(null);
+const methodTriggerRef = ref(null);
+const methodDropdownRef = ref(null);
+const methodDropdownOpen = ref(false);
+const methodDropdownRect = reactive({ top: 0, left: 0, width: 0 });
 const replaceInput = ref(null);
 const prefixInput = ref(null);
 const templateInput = ref(null);
@@ -59,6 +63,7 @@ const useRegex = ref(false);
 const caseMode = ref('lower');
 
 const hasFileEntries = computed(() => props.entries.some((entry) => entry?.kind === 'file'));
+const currentMode = computed(() => MODES.find((candidate) => candidate.value === mode.value) || MODES[0]);
 const selectedLabel = computed(() => {
   const count = props.entries.length;
 
@@ -273,6 +278,49 @@ function chooseMode(nextMode) {
   focusActiveField();
 }
 
+function openMethodDropdown() {
+  const el = methodTriggerRef.value;
+
+  if (el) {
+    const rect = el.getBoundingClientRect();
+    methodDropdownRect.top = rect.bottom + 5;
+    methodDropdownRect.left = rect.left;
+    methodDropdownRect.width = rect.width;
+  }
+
+  methodDropdownOpen.value = true;
+  nextTick(() => {
+    document.addEventListener('pointerdown', handleMethodOutsideClick, { capture: true });
+  });
+}
+
+function closeMethodDropdown() {
+  methodDropdownOpen.value = false;
+  document.removeEventListener('pointerdown', handleMethodOutsideClick, { capture: true });
+}
+
+function toggleMethodDropdown() {
+  if (methodDropdownOpen.value) {
+    closeMethodDropdown();
+  } else {
+    openMethodDropdown();
+  }
+}
+
+function selectMethod(value) {
+  closeMethodDropdown();
+  chooseMode(value);
+}
+
+function handleMethodOutsideClick(event) {
+  if (
+    !methodTriggerRef.value?.contains(event.target) &&
+    !methodDropdownRef.value?.contains(event.target)
+  ) {
+    closeMethodDropdown();
+  }
+}
+
 function normalizeName(value) {
   return String(value || '').toLocaleLowerCase();
 }
@@ -427,6 +475,7 @@ function parentDirectoryForPath(path) {
 }
 
 function cancel() {
+  closeMethodDropdown();
   emit('cancel');
 }
 
@@ -449,6 +498,12 @@ function rename() {
 function handleKeydown(event) {
   if (event.key === 'Escape') {
     event.preventDefault();
+
+    if (methodDropdownOpen.value) {
+      closeMethodDropdown();
+      return;
+    }
+
     cancel();
     return;
   }
@@ -461,6 +516,7 @@ function handleKeydown(event) {
 
 watch(() => props.visible, (visible) => {
   if (!visible) {
+    closeMethodDropdown();
     return;
   }
 
@@ -482,6 +538,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  closeMethodDropdown();
   previewResizeObserver?.disconnect?.();
   window.removeEventListener('resize', updatePreviewMetrics);
 });
@@ -524,86 +581,153 @@ onBeforeUnmount(() => {
 
           <div class="batch-rename-layout">
             <section class="batch-rename-controls" aria-label="Rename rules">
-              <div class="batch-rename-mode-group" role="tablist" aria-label="Rename mode">
-                <button
-                  v-for="candidate in MODES"
-                  :key="candidate.value"
-                  type="button"
-                  class="batch-rename-mode"
-                  :class="{ 'batch-rename-mode--active': mode === candidate.value }"
-                  role="tab"
-                  :aria-selected="mode === candidate.value"
-                  @click="chooseMode(candidate.value)"
-                >
-                  <AppIcon :name="candidate.icon" :size="15" :stroke-width="2" />
-                  <span>{{ candidate.label }}</span>
-                </button>
-              </div>
-
-              <div v-if="mode === 'replace'" class="batch-rename-fields">
-                <label class="batch-rename-field">
-                  <span>Find</span>
-                  <input ref="replaceInput" v-model="findText" type="text" autocomplete="off">
-                </label>
-                <label class="batch-rename-field">
-                  <span>Replace With</span>
-                  <input v-model="replaceText" type="text" autocomplete="off">
-                </label>
-                <div class="batch-rename-checks">
-                  <label class="batch-rename-check">
-                    <input v-model="matchCase" type="checkbox">
-                    <span>Match case</span>
-                  </label>
-                  <label class="batch-rename-check">
-                    <input v-model="useRegex" type="checkbox">
-                    <span>Regular expression</span>
-                  </label>
-                </div>
-              </div>
-
-              <div v-else-if="mode === 'add'" class="batch-rename-fields">
-                <label class="batch-rename-field">
-                  <span>Prefix</span>
-                  <input ref="prefixInput" v-model="prefixText" type="text" autocomplete="off">
-                </label>
-                <label class="batch-rename-field">
-                  <span>Suffix</span>
-                  <input v-model="suffixText" type="text" autocomplete="off">
-                </label>
-              </div>
-
-              <div v-else-if="mode === 'number'" class="batch-rename-fields">
-                <label class="batch-rename-field">
-                  <span>Template</span>
-                  <input ref="templateInput" v-model="numberTemplate" type="text" autocomplete="off">
-                </label>
-                <div class="batch-rename-number-grid">
-                  <label class="batch-rename-field">
-                    <span>Start</span>
-                    <input v-model.number="startNumber" type="number" min="0" step="1">
-                  </label>
-                  <label class="batch-rename-field">
-                    <span>Padding</span>
-                    <input v-model.number="numberPadding" type="number" min="1" max="8" step="1">
-                  </label>
-                </div>
-                <div class="batch-rename-token-row">
-                  <button type="button" @click="numberTemplate = `${numberTemplate}{name}`">{name}</button>
-                  <button type="button" @click="numberTemplate = `${numberTemplate}{n}`">{n}</button>
-                </div>
-              </div>
-
-              <div v-else class="batch-rename-fields">
-                <div class="batch-rename-case-grid" role="radiogroup" aria-label="Case conversion">
-                  <label
-                    v-for="candidate in CASE_MODES"
-                    :key="candidate.value"
-                    class="batch-rename-case"
-                    :class="{ 'batch-rename-case--active': caseMode === candidate.value }"
+              <div class="batch-rename-section">
+                <span class="batch-rename-eyebrow">Method</span>
+                <div ref="methodTriggerRef" class="batch-rename-select">
+                  <button
+                    type="button"
+                    class="batch-rename-select-trigger"
+                    :class="{ 'batch-rename-select-trigger--open': methodDropdownOpen }"
+                    aria-haspopup="listbox"
+                    :aria-expanded="methodDropdownOpen"
+                    @click="toggleMethodDropdown"
                   >
-                    <input v-model="caseMode" type="radio" name="batch-rename-case" :value="candidate.value">
-                    <span>{{ candidate.label }}</span>
+                    <span class="batch-rename-select-icon" aria-hidden="true">
+                      <AppIcon :name="currentMode.icon" :size="17" :stroke-width="1.8" />
+                    </span>
+                    <span class="batch-rename-select-body">
+                      <span class="batch-rename-select-label">{{ currentMode.label }}</span>
+                      <span class="batch-rename-select-desc">{{ currentMode.description }}</span>
+                    </span>
+                    <span class="batch-rename-select-chevron" aria-hidden="true">
+                      <AppIcon name="chevron-down" :size="14" :stroke-width="2.2" />
+                    </span>
+                  </button>
+                </div>
+
+                <Teleport to="body">
+                  <div
+                    v-if="methodDropdownOpen"
+                    ref="methodDropdownRef"
+                    class="batch-rename-select-dropdown"
+                    role="listbox"
+                    :style="{
+                      top: `${methodDropdownRect.top}px`,
+                      left: `${methodDropdownRect.left}px`,
+                      width: `${methodDropdownRect.width}px`,
+                    }"
+                  >
+                    <button
+                      v-for="candidate in MODES"
+                      :key="candidate.value"
+                      type="button"
+                      class="batch-rename-select-option"
+                      :class="{ 'batch-rename-select-option--active': mode === candidate.value }"
+                      role="option"
+                      :aria-selected="mode === candidate.value"
+                      @click="selectMethod(candidate.value)"
+                    >
+                      <span class="batch-rename-select-option-icon" aria-hidden="true">
+                        <AppIcon :name="candidate.icon" :size="16" :stroke-width="1.8" />
+                      </span>
+                      <span class="batch-rename-select-option-body">
+                        <span class="batch-rename-select-option-label">{{ candidate.label }}</span>
+                        <span class="batch-rename-select-option-desc">{{ candidate.description }}</span>
+                      </span>
+                      <span
+                        v-if="mode === candidate.value"
+                        class="batch-rename-select-option-check"
+                        aria-hidden="true"
+                      >
+                        <AppIcon name="check" :size="13" :stroke-width="2.6" />
+                      </span>
+                    </button>
+                  </div>
+                </Teleport>
+              </div>
+
+              <div class="batch-rename-section">
+                <span class="batch-rename-eyebrow">Options</span>
+
+                <div v-if="mode === 'replace'" class="batch-rename-fields">
+                  <label class="batch-rename-field">
+                    <span>Find</span>
+                    <input ref="replaceInput" v-model="findText" type="text" autocomplete="off">
                   </label>
+                  <label class="batch-rename-field">
+                    <span>Replace With</span>
+                    <input v-model="replaceText" type="text" autocomplete="off">
+                  </label>
+                  <div class="batch-rename-toggle-row">
+                    <label class="batch-rename-option">
+                      <span class="batch-rename-option-label">Match case</span>
+                      <input v-model="matchCase" class="batch-rename-switch-input" type="checkbox">
+                      <span class="batch-rename-switch-ui" aria-hidden="true"></span>
+                    </label>
+                    <label class="batch-rename-option">
+                      <span class="batch-rename-option-label">Regular expression</span>
+                      <input v-model="useRegex" class="batch-rename-switch-input" type="checkbox">
+                      <span class="batch-rename-switch-ui" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                </div>
+
+                <div v-else-if="mode === 'add'" class="batch-rename-fields">
+                  <label class="batch-rename-field">
+                    <span>Prefix</span>
+                    <input ref="prefixInput" v-model="prefixText" type="text" autocomplete="off">
+                  </label>
+                  <label class="batch-rename-field">
+                    <span>Suffix</span>
+                    <input v-model="suffixText" type="text" autocomplete="off">
+                  </label>
+                </div>
+
+                <div v-else-if="mode === 'number'" class="batch-rename-fields">
+                  <label class="batch-rename-field">
+                    <span>Template</span>
+                    <input ref="templateInput" v-model="numberTemplate" type="text" autocomplete="off">
+                  </label>
+                  <div class="batch-rename-number-grid">
+                    <label class="batch-rename-field">
+                      <span>Start</span>
+                      <input v-model.number="startNumber" type="number" min="0" step="1">
+                    </label>
+                    <label class="batch-rename-field">
+                      <span>Padding</span>
+                      <input v-model.number="numberPadding" type="number" min="1" max="8" step="1">
+                    </label>
+                  </div>
+                  <div class="batch-rename-token-field">
+                    <span class="batch-rename-token-label">Insert token</span>
+                    <div class="batch-rename-token-row">
+                      <button type="button" @click="numberTemplate = `${numberTemplate}{name}`">
+                        <AppIcon name="plus" :size="11" :stroke-width="2.4" />
+                        <span>{name}</span>
+                      </button>
+                      <button type="button" @click="numberTemplate = `${numberTemplate}{n}`">
+                        <AppIcon name="plus" :size="11" :stroke-width="2.4" />
+                        <span>{n}</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else class="batch-rename-fields">
+                  <div class="batch-rename-case-grid" role="radiogroup" aria-label="Case conversion">
+                    <label
+                      v-for="candidate in CASE_MODES"
+                      :key="candidate.value"
+                      class="batch-rename-case"
+                      :class="{ 'batch-rename-case--active': caseMode === candidate.value }"
+                    >
+                      <input v-model="caseMode" type="radio" name="batch-rename-case" :value="candidate.value">
+                      <span class="batch-rename-case-label">{{ candidate.label }}</span>
+                      <span class="batch-rename-case-check" aria-hidden="true">
+                        <AppIcon name="check" :size="13" :stroke-width="2.6" />
+                      </span>
+                    </label>
+                  </div>
                 </div>
               </div>
 
@@ -615,7 +739,7 @@ onBeforeUnmount(() => {
                   <strong>Keep file extensions</strong>
                   <small>Changes apply before the final dot.</small>
                 </span>
-                <input v-model="keepExtensions" type="checkbox">
+                <input v-model="keepExtensions" class="batch-rename-switch-input" type="checkbox">
                 <span class="batch-rename-switch-ui" aria-hidden="true"></span>
               </label>
             </section>
@@ -795,48 +919,191 @@ onBeforeUnmount(() => {
 .batch-rename-controls {
   display: grid;
   align-content: start;
-  gap: 13px;
+  gap: 18px;
   min-width: 0;
   overflow-y: auto;
-  padding: 14px;
+  padding: 16px 14px;
   border-right: 1px solid var(--hairline);
 }
 
-.batch-rename-mode-group {
+.batch-rename-section {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
+  gap: 10px;
+  min-width: 0;
 }
 
-.batch-rename-mode {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
+.batch-rename-eyebrow {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 760;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.batch-rename-select {
+  position: relative;
+}
+
+.batch-rename-select-trigger {
+  display: flex;
+  width: 100%;
+  height: 48px;
   align-items: center;
-  gap: 7px;
-  min-height: 34px;
+  gap: 10px;
   border: 1px solid var(--input-border);
-  border-radius: 8px;
-  padding: 0 9px;
+  border-radius: 9px;
+  padding: 0 12px 0 13px;
   background: var(--input-bg);
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 650;
+  box-shadow: var(--input-shadow);
+  color: var(--text);
   text-align: left;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
-.batch-rename-mode span {
+.batch-rename-select-trigger:hover {
+  border-color: var(--control-border);
+}
+
+.batch-rename-select-trigger--open {
+  border-color: var(--accent-border);
+  box-shadow:
+    var(--accent-focus-ring),
+    var(--input-shadow);
+}
+
+.batch-rename-select-icon {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.batch-rename-select-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.batch-rename-select-label {
   overflow: hidden;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.batch-rename-mode:hover {
-  border-color: var(--control-border);
+.batch-rename-select-desc {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 560;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.batch-rename-mode--active {
-  border-color: var(--accent-border);
-  background: rgb(var(--accent-rgb) / 0.11);
+.batch-rename-select-chevron {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--icon);
+  transition: transform 160ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.batch-rename-select-trigger--open .batch-rename-select-chevron {
+  transform: rotate(180deg);
+}
+
+.batch-rename-select-dropdown {
+  position: fixed;
+  z-index: 9000;
+  overflow-y: auto;
+  max-height: 320px;
+  padding: 4px;
+  border: 1px solid var(--control-border);
+  border-radius: 11px;
+  background: var(--popover-bg);
+  box-shadow: var(--shadow-overlay);
+  animation: batch-rename-select-dropdown-in 130ms cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+
+@keyframes batch-rename-select-dropdown-in {
+  from {
+    opacity: 0;
+    transform: translateY(-5px) scale(0.98);
+    transform-origin: top center;
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.batch-rename-select-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  border-radius: 7px;
+  padding: 9px 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition: background 80ms ease;
+}
+
+.batch-rename-select-option:hover {
+  background: var(--btn-hover);
+}
+
+.batch-rename-select-option--active {
+  background: rgb(var(--accent-rgb) / 0.08);
+}
+
+.batch-rename-select-option-icon {
+  display: flex;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: rgb(var(--accent-rgb) / 0.1);
+  color: var(--accent);
+}
+
+.batch-rename-select-option--active .batch-rename-select-option-icon {
+  background: rgb(var(--accent-rgb) / 0.16);
+}
+
+.batch-rename-select-option-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.batch-rename-select-option-label {
+  font-size: 13px;
+  font-weight: 580;
+  line-height: 1;
+}
+
+.batch-rename-select-option-desc {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-rename-select-option-check {
+  display: flex;
+  flex-shrink: 0;
   color: var(--accent);
 }
 
@@ -885,6 +1152,17 @@ onBeforeUnmount(() => {
   gap: 9px;
 }
 
+.batch-rename-token-field {
+  display: grid;
+  gap: 7px;
+}
+
+.batch-rename-token-label {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
 .batch-rename-token-row {
   display: flex;
   flex-wrap: wrap;
@@ -892,35 +1170,59 @@ onBeforeUnmount(() => {
 }
 
 .batch-rename-token-row button {
-  height: 26px;
-  border: 1px solid var(--input-border);
-  border-radius: 7px;
-  padding: 0 9px;
-  background: var(--input-bg);
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 660;
-}
-
-.batch-rename-token-row button:hover {
-  background: var(--btn-hover);
-  color: var(--text);
-}
-
-.batch-rename-checks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.batch-rename-check {
-  display: flex;
+  display: inline-flex;
+  height: 28px;
   align-items: center;
-  gap: 7px;
-  min-height: 28px;
+  gap: 5px;
+  border: 1px solid var(--input-border);
+  border-radius: 999px;
+  padding: 0 11px 0 9px;
+  background: var(--input-bg);
+  box-shadow: var(--input-shadow);
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 620;
+  font-variant-ligatures: none;
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.batch-rename-token-row button :deep(svg) {
+  color: var(--accent);
+}
+
+.batch-rename-token-row button:hover {
+  border-color: var(--accent-border);
+  background: rgb(var(--accent-rgb) / 0.1);
+  color: var(--text);
+}
+
+.batch-rename-toggle-row {
+  display: grid;
+  gap: 7px;
+}
+
+.batch-rename-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 0 2px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  transition: color 120ms ease;
+}
+
+.batch-rename-option:hover {
+  color: var(--text);
+}
+
+.batch-rename-option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .batch-rename-case-grid {
@@ -929,22 +1231,68 @@ onBeforeUnmount(() => {
 }
 
 .batch-rename-case {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
-  min-height: 34px;
+  min-height: 36px;
   border: 1px solid var(--input-border);
-  border-radius: 8px;
-  padding: 0 10px;
+  border-radius: 9px;
+  padding: 0 11px;
   background: var(--input-bg);
+  box-shadow: var(--input-shadow);
   color: var(--text-muted);
   font-size: 12.5px;
-  font-weight: 650;
+  font-weight: 600;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.batch-rename-case input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.batch-rename-case-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-rename-case-check {
+  display: flex;
+  flex: 0 0 auto;
+  color: var(--accent);
+  opacity: 0;
+  transform: scale(0.8);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.batch-rename-case:hover {
+  border-color: var(--control-border);
+  color: var(--text);
+}
+
+.batch-rename-case:focus-within {
+  border-color: var(--accent-border);
+  box-shadow:
+    var(--accent-focus-ring),
+    var(--input-shadow);
 }
 
 .batch-rename-case--active {
   border-color: var(--accent-border);
+  background: rgb(var(--accent-rgb) / 0.09);
   color: var(--text);
+}
+
+.batch-rename-case--active .batch-rename-case-check {
+  opacity: 1;
+  transform: none;
 }
 
 .batch-rename-switch {
@@ -985,7 +1333,7 @@ onBeforeUnmount(() => {
   font-weight: 560;
 }
 
-.batch-rename-switch input {
+.batch-rename-switch-input {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -1020,14 +1368,20 @@ onBeforeUnmount(() => {
   transition: transform 120ms ease, background 120ms ease;
 }
 
-.batch-rename-switch input:checked + .batch-rename-switch-ui {
+.batch-rename-switch-input:checked + .batch-rename-switch-ui {
   border-color: var(--accent-border);
   background: var(--accent);
 }
 
-.batch-rename-switch input:checked + .batch-rename-switch-ui::after {
+.batch-rename-switch-input:checked + .batch-rename-switch-ui::after {
   background: #fff;
   transform: translateX(18px);
+}
+
+.batch-rename-switch-input:focus-visible + .batch-rename-switch-ui {
+  box-shadow:
+    var(--accent-focus-ring),
+    var(--input-shadow);
 }
 
 .batch-rename-preview {

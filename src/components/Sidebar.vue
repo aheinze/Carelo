@@ -195,7 +195,12 @@ const sidebarItemMenuGroups = computed(() => {
     });
   }
 
-  return groups.filter((group) => group.items.length > 0);
+  return groups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((menuItem) => !menuItem.disabled),
+    }))
+    .filter((group) => group.items.length > 0);
 });
 
 async function openSidebarItem(item) {
