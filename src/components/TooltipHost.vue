@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, onUpdated, ref, watch } from 'vue';
+import { onUpdated, ref, watch } from 'vue';
 import { tooltipState } from '../composables/useTooltipState';
 
 const GAP = 10;
@@ -49,55 +49,6 @@ onUpdated(() => {
   }
 });
 
-// ── Global title interceptor ─────────────────────────────────
-let showTimer = null;
-
-function showAt(el, text) {
-  clearTimeout(showTimer);
-  showTimer = setTimeout(() => {
-    const rect = el.getBoundingClientRect();
-    tooltipState.text = text;
-    tooltipState.description = '';
-    tooltipState.x = rect.left + rect.width / 2;
-    tooltipState.y = rect.top;
-    tooltipState.targetBottom = rect.bottom;
-    tooltipState.visible = true;
-  }, 380);
-}
-
-function hide() {
-  clearTimeout(showTimer);
-  tooltipState.visible = false;
-}
-
-function onDocMouseover(e) {
-  const el = e.target.closest('[title]');
-  if (!el) return;
-
-  const text = el.getAttribute('title');
-  if (!text) return;
-
-  el.setAttribute('data-tooltip-stolen', text);
-  el.removeAttribute('title');
-
-  el.addEventListener('mouseleave', () => {
-    if (el.hasAttribute('data-tooltip-stolen')) {
-      el.setAttribute('title', el.getAttribute('data-tooltip-stolen'));
-      el.removeAttribute('data-tooltip-stolen');
-    }
-    hide();
-  }, { once: true });
-
-  el.addEventListener('mousedown', hide, { once: true });
-
-  showAt(el, text);
-}
-
-onMounted(() => document.addEventListener('mouseover', onDocMouseover));
-onUnmounted(() => {
-  document.removeEventListener('mouseover', onDocMouseover);
-  clearTimeout(showTimer);
-});
 </script>
 
 <template>
