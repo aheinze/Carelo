@@ -223,7 +223,7 @@ operations use native Rust libraries, including the `zip` crate.
 - `Cmd/Ctrl + Shift + F`: content search in the current folder
 - `Backspace` or `Cmd/Ctrl + Up`: go to parent folder
 - `Alt + Left` / `Alt + Right`: navigation history
-- `F2`: refresh
+- `F2`: rename
 - `F3`: preview
 - `F4`: open
 - `F5`: copy to other pane
