@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
+import { useScrollableContentState } from '../composables/useScrollableContentState';
 
 const DESKTOP_PREVIEW_ROW_HEIGHT = 34;
 const MOBILE_PREVIEW_ROW_HEIGHT = 74;
@@ -44,6 +45,7 @@ const methodDropdownRect = reactive({ top: 0, left: 0, width: 0 });
 const replaceInput = ref(null);
 const prefixInput = ref(null);
 const templateInput = ref(null);
+const controlsRef = ref(null);
 const previewListRef = ref(null);
 const previewScrollTop = ref(0);
 const previewViewportHeight = ref(0);
@@ -63,6 +65,25 @@ const useRegex = ref(false);
 const caseMode = ref('lower');
 
 const hasFileEntries = computed(() => props.entries.some((entry) => entry?.kind === 'file'));
+const { isScrollable: controlsScrollable } = useScrollableContentState(controlsRef, {
+  watch: [
+    () => props.visible,
+    mode,
+    useRegex,
+    hasFileEntries,
+  ],
+});
+const { isScrollable: previewScrollable } = useScrollableContentState(previewListRef, {
+  watch: [
+    () => props.visible,
+    () => props.entries.length,
+    mode,
+    keepExtensions,
+  ],
+});
+const batchRenameContentScrollable = computed(() => (
+  controlsScrollable.value || previewScrollable.value
+));
 const currentMode = computed(() => MODES.find((candidate) => candidate.value === mode.value) || MODES[0]);
 const selectedLabel = computed(() => {
   const count = props.entries.length;
@@ -557,6 +578,7 @@ onBeforeUnmount(() => {
         <section
           ref="panelRef"
           class="batch-rename-panel"
+          :class="{ 'batch-rename-panel--content-scrollable': batchRenameContentScrollable }"
           role="dialog"
           aria-modal="true"
           aria-labelledby="batch-rename-title"
@@ -580,7 +602,7 @@ onBeforeUnmount(() => {
           </header>
 
           <div class="batch-rename-layout">
-            <section class="batch-rename-controls" aria-label="Rename rules">
+            <section ref="controlsRef" class="batch-rename-controls" aria-label="Rename rules">
               <div class="batch-rename-section">
                 <span class="batch-rename-eyebrow">Method</span>
                 <div ref="methodTriggerRef" class="batch-rename-select">
@@ -839,7 +861,11 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 18px;
   padding: 16px 16px 12px;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: 1px solid transparent;
+}
+
+.batch-rename-panel--content-scrollable .batch-rename-header {
+  border-bottom-color: var(--hairline);
 }
 
 .batch-rename-title-row {
@@ -1484,7 +1510,11 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   gap: 10px;
   padding: 12px 16px 16px;
-  border-top: 1px solid var(--hairline);
+  border-top: 1px solid transparent;
+}
+
+.batch-rename-panel--content-scrollable .batch-rename-actions {
+  border-top-color: var(--hairline);
 }
 
 .batch-rename-dialog-enter-active,

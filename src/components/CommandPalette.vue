@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { canUseLocalFileAssets, searchContent, searchFiles } from '../composables/useFileOperations';
+import { useScrollableContentState } from '../composables/useScrollableContentState';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { isArchivePath } from '../utils/archivePaths';
 import { RUN_COMMAND_EVENT } from '../utils/appEvents';
@@ -36,6 +37,15 @@ const activeSearchJob = computed(() => (
     : null
 ));
 const currentMode = computed(() => store.fileSearchMode || 'files');
+const { isScrollable: resultListScrollable } = useScrollableContentState(resultList, {
+  watch: [
+    () => store.fileSearchVisible,
+    currentMode,
+    () => results.value.length,
+    loading,
+    error,
+  ],
+});
 const isCommandMode = computed(() => currentMode.value === 'commands');
 const activeRoot = computed(() => (
   store.effectiveDirectoryFor(store.activePaneId) || store.activeTabFor(store.activePaneId)?.currentPath || '~'
@@ -1143,7 +1153,13 @@ onBeforeUnmount(() => {
         class="command-palette__overlay"
         @pointerdown.self="close"
       >
-        <section class="command-palette" role="dialog" aria-modal="true" :aria-label="dialogLabel">
+        <section
+          class="command-palette"
+          :class="{ 'command-palette--content-scrollable': resultListScrollable }"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="dialogLabel"
+        >
           <header class="command-palette__header">
             <div class="command-palette__title-group">
               <div class="command-palette__title-text">
@@ -1373,8 +1389,12 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: 1px solid transparent;
   flex-shrink: 0;
+}
+
+.command-palette--content-scrollable .command-palette__header {
+  border-bottom-color: var(--hairline);
 }
 
 .command-palette__title-group {
@@ -1749,9 +1769,13 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 14px;
   padding: 8px 14px;
-  border-top: 1px solid var(--hairline);
+  border-top: 1px solid transparent;
   background: color-mix(in srgb, var(--text) 2%, transparent);
   flex-shrink: 0;
+}
+
+.command-palette--content-scrollable .command-palette__footer {
+  border-top-color: var(--hairline);
 }
 
 .command-palette__hint {

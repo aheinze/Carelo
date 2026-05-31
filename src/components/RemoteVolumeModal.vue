@@ -2,6 +2,7 @@
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { addRemoteVolume, createOAuthTokens } from '../composables/useFileOperations';
+import { useScrollableContentState } from '../composables/useScrollableContentState';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 
 const props = defineProps({
@@ -13,6 +14,7 @@ const store = useFileManagerStore();
 
 const nameInput = ref(null);
 const primaryFieldInput = ref(null);
+const remoteContent = ref(null);
 const saving = ref(false);
 const creatingTokens = ref(false);
 const errorMessage = ref('');
@@ -374,6 +376,14 @@ const selectedNetworkKind = computed(() => (
 ));
 const isNetworkSmb = computed(() => selectedNetworkKind.value === 'smb');
 const isNetworkSftp = computed(() => selectedNetworkKind.value === 'sftp');
+const { isScrollable: remoteContentScrollable } = useScrollableContentState(remoteContent, {
+  watch: [
+    () => props.visible,
+    () => form.scheme,
+    () => form.fields.protocol,
+    showAdvancedProviders,
+  ],
+});
 const networkHostPlaceholder = computed(() => {
   switch (selectedNetworkKind.value) {
     case 'smb':
@@ -867,6 +877,7 @@ async function submit() {
       >
         <section
           class="remote-panel"
+          :class="{ 'remote-panel--content-scrollable': remoteContentScrollable }"
           role="dialog"
           aria-modal="true"
           aria-labelledby="remote-volume-title"
@@ -884,255 +895,257 @@ async function submit() {
           </header>
 
           <form class="remote-form" @submit.prevent="submit">
-            <!-- Protocol picker -->
-            <div class="remote-section">
-              <div class="remote-section-heading">
-                <p class="remote-section-label">Connection</p>
-                <button
-                  v-if="hasAdvancedProviders"
-                  type="button"
-                  class="provider-advanced-toggle"
-                  :class="{ 'provider-advanced-toggle--active': showAdvancedProviders }"
-                  @click="toggleAdvancedProviders"
-                >
-                  <AppIcon name="sliders" :size="13" :stroke-width="2" />
-                  Advanced forms
-                </button>
-              </div>
-              <div ref="protocolTriggerRef" class="protocol-select">
-                <button
-                  type="button"
-                  class="protocol-trigger"
-                  :class="{ 'protocol-trigger--open': protocolDropdownOpen }"
-                  aria-haspopup="listbox"
-                  :aria-expanded="protocolDropdownOpen"
-                  @click="toggleProtocolDropdown"
-                >
-                  <span class="protocol-trigger-icon" aria-hidden="true">
-                    <AppIcon :name="selectedProvider.icon" :size="17" :stroke-width="1.8" />
-                  </span>
-                  <span class="protocol-trigger-body">
-                    <span class="protocol-trigger-label">{{ selectedProvider.label }}</span>
-                    <span class="protocol-trigger-desc">{{ selectedProvider.description }}</span>
-                  </span>
-                  <span class="protocol-trigger-chevron" aria-hidden="true">
-                    <AppIcon name="chevron-down" :size="14" :stroke-width="2.2" />
-                  </span>
-                </button>
-              </div>
-
-              <Teleport to="body">
-                <div
-                  v-if="protocolDropdownOpen"
-                  ref="protocolDropdownRef"
-                  class="protocol-dropdown"
-                  role="listbox"
-                  :style="{
-                    top: `${dropdownRect.top}px`,
-                    left: `${dropdownRect.left}px`,
-                    width: `${dropdownRect.width}px`,
-                  }"
-                >
+            <div ref="remoteContent" class="remote-content">
+              <!-- Protocol picker -->
+              <div class="remote-section">
+                <div class="remote-section-heading">
+                  <p class="remote-section-label">Connection</p>
                   <button
-                    v-for="provider in visibleProviders"
-                    :key="provider.scheme"
+                    v-if="hasAdvancedProviders"
                     type="button"
-                    class="protocol-option"
-                    :class="{ 'protocol-option--active': form.scheme === provider.scheme }"
-                    role="option"
-                    :aria-selected="form.scheme === provider.scheme"
-                    @click="selectProtocol(provider.scheme)"
+                    class="provider-advanced-toggle"
+                    :class="{ 'provider-advanced-toggle--active': showAdvancedProviders }"
+                    @click="toggleAdvancedProviders"
                   >
-                    <span class="protocol-option-icon" aria-hidden="true">
-                      <AppIcon :name="provider.icon" :size="16" :stroke-width="1.8" />
+                    <AppIcon name="sliders" :size="13" :stroke-width="2" />
+                    Advanced forms
+                  </button>
+                </div>
+                <div ref="protocolTriggerRef" class="protocol-select">
+                  <button
+                    type="button"
+                    class="protocol-trigger"
+                    :class="{ 'protocol-trigger--open': protocolDropdownOpen }"
+                    aria-haspopup="listbox"
+                    :aria-expanded="protocolDropdownOpen"
+                    @click="toggleProtocolDropdown"
+                  >
+                    <span class="protocol-trigger-icon" aria-hidden="true">
+                      <AppIcon :name="selectedProvider.icon" :size="17" :stroke-width="1.8" />
                     </span>
-                    <span class="protocol-option-body">
-                      <span class="protocol-option-label">{{ provider.label }}</span>
-                      <span class="protocol-option-desc">{{ provider.description }}</span>
+                    <span class="protocol-trigger-body">
+                      <span class="protocol-trigger-label">{{ selectedProvider.label }}</span>
+                      <span class="protocol-trigger-desc">{{ selectedProvider.description }}</span>
                     </span>
-                    <span v-if="form.scheme === provider.scheme" class="protocol-option-check" aria-hidden="true">
-                      <AppIcon name="check" :size="13" :stroke-width="2.6" />
+                    <span class="protocol-trigger-chevron" aria-hidden="true">
+                      <AppIcon name="chevron-down" :size="14" :stroke-width="2.2" />
                     </span>
                   </button>
                 </div>
-              </Teleport>
-            </div>
 
-            <!-- Name + Root -->
-            <div class="remote-section remote-row" :class="{ 'remote-row--single': isNetworkLocation }">
-              <label class="remote-field">
-                <span>Name <em v-if="isNetworkLocation">(optional)</em></span>
-                <input
-                  ref="nameInput"
-                  v-model="form.name"
-                  type="text"
-                  autocomplete="off"
-                  spellcheck="false"
-                  :placeholder="isNetworkLocation ? 'Derived from address' : 'Production server'"
-                />
-              </label>
-              <label v-if="!isNetworkLocation" class="remote-field">
-                <span>Root path <em>(optional)</em></span>
-                <input
-                  v-model="form.root"
-                  type="text"
-                  autocomplete="off"
-                  spellcheck="false"
-                  :placeholder="selectedProvider.rootPlaceholder"
-                />
-              </label>
-            </div>
+                <Teleport to="body">
+                  <div
+                    v-if="protocolDropdownOpen"
+                    ref="protocolDropdownRef"
+                    class="protocol-dropdown"
+                    role="listbox"
+                    :style="{
+                      top: `${dropdownRect.top}px`,
+                      left: `${dropdownRect.left}px`,
+                      width: `${dropdownRect.width}px`,
+                    }"
+                  >
+                    <button
+                      v-for="provider in visibleProviders"
+                      :key="provider.scheme"
+                      type="button"
+                      class="protocol-option"
+                      :class="{ 'protocol-option--active': form.scheme === provider.scheme }"
+                      role="option"
+                      :aria-selected="form.scheme === provider.scheme"
+                      @click="selectProtocol(provider.scheme)"
+                    >
+                      <span class="protocol-option-icon" aria-hidden="true">
+                        <AppIcon :name="provider.icon" :size="16" :stroke-width="1.8" />
+                      </span>
+                      <span class="protocol-option-body">
+                        <span class="protocol-option-label">{{ provider.label }}</span>
+                        <span class="protocol-option-desc">{{ provider.description }}</span>
+                      </span>
+                      <span v-if="form.scheme === provider.scheme" class="protocol-option-check" aria-hidden="true">
+                        <AppIcon name="check" :size="13" :stroke-width="2.6" />
+                      </span>
+                    </button>
+                  </div>
+                </Teleport>
+              </div>
 
-            <!-- Provider-specific credentials -->
-            <div class="remote-section">
-              <p class="remote-section-label">{{ isNetworkLocation ? 'Details' : 'Credentials' }}</p>
-              <div v-if="selectedProviderSupportsOAuth" class="oauth-helper">
-                <div class="oauth-helper-copy">
-                  <strong>OAuth</strong>
-                  <span>Redirect URI: {{ OAUTH_CALLBACK_URL }}</span>
+              <!-- Name + Root -->
+              <div class="remote-section remote-row" :class="{ 'remote-row--single': isNetworkLocation }">
+                <label class="remote-field">
+                  <span>Name <em v-if="isNetworkLocation">(optional)</em></span>
+                  <input
+                    ref="nameInput"
+                    v-model="form.name"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    :placeholder="isNetworkLocation ? 'Derived from address' : 'Production server'"
+                  />
+                </label>
+                <label v-if="!isNetworkLocation" class="remote-field">
+                  <span>Root path <em>(optional)</em></span>
+                  <input
+                    v-model="form.root"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    :placeholder="selectedProvider.rootPlaceholder"
+                  />
+                </label>
+              </div>
+
+              <!-- Provider-specific credentials -->
+              <div class="remote-section">
+                <p class="remote-section-label">{{ isNetworkLocation ? 'Details' : 'Credentials' }}</p>
+                <div v-if="selectedProviderSupportsOAuth" class="oauth-helper">
+                  <div class="oauth-helper-copy">
+                    <strong>OAuth</strong>
+                    <span>Redirect URI: {{ OAUTH_CALLBACK_URL }}</span>
+                  </div>
+                  <button
+                    type="button"
+                    class="oauth-helper-button"
+                    :disabled="creatingTokens || saving"
+                    @click="createProviderTokens"
+                  >
+                    <AppIcon name="lock" :size="13" :stroke-width="2" />
+                    {{ creatingTokens ? 'Waiting...' : 'Create token' }}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  class="oauth-helper-button"
-                  :disabled="creatingTokens || saving"
-                  @click="createProviderTokens"
-                >
-                  <AppIcon name="lock" :size="13" :stroke-width="2" />
-                  {{ creatingTokens ? 'Waiting...' : 'Create token' }}
+                <p v-if="oauthMessage" class="oauth-message">
+                  {{ oauthMessage }}
+                </p>
+                <div v-if="isNetworkLocation" class="network-fields">
+                  <label class="remote-field">
+                    <span>Server</span>
+                    <div class="server-address-control">
+                      <select v-model="form.fields.protocol" aria-label="Protocol">
+                        <option
+                          v-for="option in networkProtocolOptions"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          {{ option.label }}
+                        </option>
+                      </select>
+                      <input
+                        ref="primaryFieldInput"
+                        v-model="form.fields.host"
+                        type="text"
+                        autocomplete="off"
+                        spellcheck="false"
+                        :placeholder="networkHostPlaceholder"
+                        aria-label="Server host and path"
+                        @blur="normalizeNetworkHostField"
+                      />
+                    </div>
+                  </label>
+
+                  <div class="creds-grid">
+                    <label class="remote-field remote-field--half">
+                      <span>Username <em>(optional)</em></span>
+                      <input
+                        v-model="form.fields.username"
+                        type="text"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                    </label>
+                    <label class="remote-field remote-field--half">
+                      <span>Password <em>(optional)</em></span>
+                      <input
+                        v-model="form.fields.password"
+                        type="password"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                    </label>
+                    <label v-if="isNetworkSmb" class="remote-field remote-field--half">
+                      <span>Domain / Workgroup <em>(optional)</em></span>
+                      <input
+                        v-model="form.fields.domain"
+                        type="text"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="WORKGROUP"
+                      />
+                    </label>
+                    <label v-if="isNetworkSftp" class="remote-field">
+                      <span>SSH Private Key / Path <em>(optional)</em></span>
+                      <input
+                        v-model="form.fields.key"
+                        type="text"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="~/.ssh/id_rsa"
+                      />
+                    </label>
+                    <label v-if="isNetworkSftp" class="remote-field remote-field--half">
+                      <span>SSH Known Hosts <em>(optional)</em></span>
+                      <select v-model="form.fields.known_hosts_strategy">
+                        <option value="">— default (strict) —</option>
+                        <option value="strict">Strict</option>
+                        <option value="accept">Accept all</option>
+                        <option value="add">Add & trust</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+                <div v-else class="creds-grid">
+                  <template v-for="field in selectedProvider.fields" :key="field.divider ?? field.key">
+                    <!-- Section divider -->
+                    <div v-if="field.divider" class="creds-divider">{{ field.divider }}</div>
+
+                    <!-- Select field -->
+                    <label
+                      v-else-if="field.type === 'select'"
+                      class="remote-field"
+                      :class="{ 'remote-field--half': field.half }"
+                    >
+                      <span>{{ field.label }} <em v-if="field.optional">(optional)</em></span>
+                      <select v-model="form.fields[field.key]">
+                        <option v-for="opt in field.options" :key="opt.value" :value="opt.value">
+                          {{ opt.label }}
+                        </option>
+                      </select>
+                    </label>
+
+                    <!-- Text / password field -->
+                    <label
+                      v-else
+                      class="remote-field"
+                      :class="{ 'remote-field--half': field.half }"
+                    >
+                      <span>{{ field.label }} <em v-if="field.optional">(optional)</em></span>
+                      <input
+                        :ref="field.key === primaryFieldKey ? setPrimaryFieldInput : null"
+                        v-model="form.fields[field.key]"
+                        :type="field.type"
+                        autocomplete="off"
+                        spellcheck="false"
+                        :placeholder="field.placeholder"
+                      />
+                    </label>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <footer class="remote-footer">
+              <p v-if="errorMessage" class="remote-error" role="alert">
+                <AppIcon name="alert" :size="14" :stroke-width="2" />
+                {{ errorMessage }}
+              </p>
+
+              <div class="remote-actions">
+                <button type="button" class="app-button" :disabled="saving" @click.stop="close">
+                  Cancel
+                </button>
+                <button type="submit" class="app-button app-button--primary" :disabled="saving">
+                  {{ saving ? 'Connecting…' : 'Connect' }}
                 </button>
               </div>
-              <p v-if="oauthMessage" class="oauth-message">
-                {{ oauthMessage }}
-              </p>
-              <div v-if="isNetworkLocation" class="network-fields">
-                <label class="remote-field">
-                  <span>Server</span>
-                  <div class="server-address-control">
-                    <select v-model="form.fields.protocol" aria-label="Protocol">
-                      <option
-                        v-for="option in networkProtocolOptions"
-                        :key="option.value"
-                        :value="option.value"
-                      >
-                        {{ option.label }}
-                      </option>
-                    </select>
-                    <input
-                      ref="primaryFieldInput"
-                      v-model="form.fields.host"
-                      type="text"
-                      autocomplete="off"
-                      spellcheck="false"
-                      :placeholder="networkHostPlaceholder"
-                      aria-label="Server host and path"
-                      @blur="normalizeNetworkHostField"
-                    />
-                  </div>
-                </label>
-
-                <div class="creds-grid">
-                  <label class="remote-field remote-field--half">
-                    <span>Username <em>(optional)</em></span>
-                    <input
-                      v-model="form.fields.username"
-                      type="text"
-                      autocomplete="off"
-                      spellcheck="false"
-                    />
-                  </label>
-                  <label class="remote-field remote-field--half">
-                    <span>Password <em>(optional)</em></span>
-                    <input
-                      v-model="form.fields.password"
-                      type="password"
-                      autocomplete="off"
-                      spellcheck="false"
-                    />
-                  </label>
-                  <label v-if="isNetworkSmb" class="remote-field remote-field--half">
-                    <span>Domain / Workgroup <em>(optional)</em></span>
-                    <input
-                      v-model="form.fields.domain"
-                      type="text"
-                      autocomplete="off"
-                      spellcheck="false"
-                      placeholder="WORKGROUP"
-                    />
-                  </label>
-                  <label v-if="isNetworkSftp" class="remote-field">
-                    <span>SSH Private Key / Path <em>(optional)</em></span>
-                    <input
-                      v-model="form.fields.key"
-                      type="text"
-                      autocomplete="off"
-                      spellcheck="false"
-                      placeholder="~/.ssh/id_rsa"
-                    />
-                  </label>
-                  <label v-if="isNetworkSftp" class="remote-field remote-field--half">
-                    <span>SSH Known Hosts <em>(optional)</em></span>
-                    <select v-model="form.fields.known_hosts_strategy">
-                      <option value="">— default (strict) —</option>
-                      <option value="strict">Strict</option>
-                      <option value="accept">Accept all</option>
-                      <option value="add">Add & trust</option>
-                    </select>
-                  </label>
-                </div>
-              </div>
-              <div v-else class="creds-grid">
-                <template v-for="field in selectedProvider.fields" :key="field.divider ?? field.key">
-                  <!-- Section divider -->
-                  <div v-if="field.divider" class="creds-divider">{{ field.divider }}</div>
-
-                  <!-- Select field -->
-                  <label
-                    v-else-if="field.type === 'select'"
-                    class="remote-field"
-                    :class="{ 'remote-field--half': field.half }"
-                  >
-                    <span>{{ field.label }} <em v-if="field.optional">(optional)</em></span>
-                    <select v-model="form.fields[field.key]">
-                      <option v-for="opt in field.options" :key="opt.value" :value="opt.value">
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </label>
-
-                  <!-- Text / password field -->
-                  <label
-                    v-else
-                    class="remote-field"
-                    :class="{ 'remote-field--half': field.half }"
-                  >
-                    <span>{{ field.label }} <em v-if="field.optional">(optional)</em></span>
-                    <input
-                      :ref="field.key === primaryFieldKey ? setPrimaryFieldInput : null"
-                      v-model="form.fields[field.key]"
-                      :type="field.type"
-                      autocomplete="off"
-                      spellcheck="false"
-                      :placeholder="field.placeholder"
-                    />
-                  </label>
-                </template>
-              </div>
-            </div>
-
-            <!-- Error -->
-            <p v-if="errorMessage" class="remote-error" role="alert">
-              <AppIcon name="alert" :size="14" :stroke-width="2" />
-              {{ errorMessage }}
-            </p>
-
-            <!-- Actions -->
-            <footer class="remote-actions">
-              <button type="button" class="app-button" :disabled="saving" @click.stop="close">
-                Cancel
-              </button>
-              <button type="submit" class="app-button app-button--primary" :disabled="saving">
-                {{ saving ? 'Connecting…' : 'Connect' }}
-              </button>
             </footer>
           </form>
         </section>
@@ -1173,7 +1186,11 @@ async function submit() {
   gap: 10px;
   flex-shrink: 0;
   padding: 16px 16px 16px 18px;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: 1px solid transparent;
+}
+
+.remote-panel--content-scrollable .remote-header {
+  border-bottom-color: var(--hairline);
 }
 
 .remote-header-icon {
@@ -1214,11 +1231,19 @@ async function submit() {
 /* ── Form body ────────────────────────────────────────────── */
 .remote-form {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
-  padding: 16px 18px 18px;
+  overflow: hidden;
+}
+
+.remote-content {
+  display: grid;
+  flex: 1;
+  min-height: 0;
   gap: 16px;
+  overflow-y: auto;
+  padding: 16px 18px;
 }
 
 .remote-section-label {
@@ -1650,6 +1675,18 @@ async function submit() {
 }
 
 /* ── Actions ──────────────────────────────────────────────── */
+.remote-footer {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 10px;
+  border-top: 1px solid transparent;
+  padding: 12px 18px 14px;
+}
+
+.remote-panel--content-scrollable .remote-footer {
+  border-top-color: var(--hairline);
+}
+
 .remote-actions {
   display: flex;
   justify-content: flex-end;

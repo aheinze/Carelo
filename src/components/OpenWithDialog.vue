@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
+import { useScrollableContentState } from '../composables/useScrollableContentState';
 
 const props = defineProps({
   visible: {
@@ -28,12 +29,21 @@ const props = defineProps({
 const emit = defineEmits(['cancel', 'open', 'reveal']);
 
 const panelRef = ref(null);
+const openWithBody = ref(null);
 const selectedAppId = ref('');
 const remember = ref(false);
 
 const apps = computed(() => props.context?.apps || []);
 const fileTypeLabel = computed(() => props.context?.fileType?.label || 'this file type');
 const selectedApp = computed(() => apps.value.find((app) => app.id === selectedAppId.value) || null);
+const { isScrollable: openWithBodyScrollable } = useScrollableContentState(openWithBody, {
+  watch: [
+    () => props.visible,
+    () => props.loading,
+    () => props.error,
+    apps,
+  ],
+});
 const canOpen = computed(() => Boolean(selectedAppId.value && !props.loading));
 
 watch(
@@ -113,6 +123,7 @@ function handleKeydown(event) {
         <section
           ref="panelRef"
           class="open-with-panel"
+          :class="{ 'open-with-panel--content-scrollable': openWithBodyScrollable }"
           role="dialog"
           aria-modal="true"
           aria-labelledby="open-with-title"
@@ -130,46 +141,48 @@ function handleKeydown(event) {
               <small>{{ fileTypeLabel }}</small>
             </header>
 
-            <div v-if="loading" class="open-with-loading" aria-live="polite">
-              <span v-for="index in 4" :key="index"></span>
-            </div>
+            <div ref="openWithBody" class="open-with-body">
+              <div v-if="loading" class="open-with-loading" aria-live="polite">
+                <span v-for="index in 4" :key="index"></span>
+              </div>
 
-            <p v-else-if="error" class="open-with-error" role="alert">
-              {{ error }}
-            </p>
+              <p v-else-if="error" class="open-with-error" role="alert">
+                {{ error }}
+              </p>
 
-            <div v-else-if="apps.length > 0" class="open-with-apps" role="radiogroup" aria-label="Applications">
-              <label
-                v-for="app in apps"
-                :key="app.id"
-                class="open-with-app"
-                :class="{ 'open-with-app--selected': selectedAppId === app.id }"
-              >
-                <input v-model="selectedAppId" type="radio" :value="app.id">
-                <span class="open-with-app-icon" aria-hidden="true">
-                  <AppIcon name="app" :size="17" :stroke-width="1.8" />
+              <div v-else-if="apps.length > 0" class="open-with-apps" role="radiogroup" aria-label="Applications">
+                <label
+                  v-for="app in apps"
+                  :key="app.id"
+                  class="open-with-app"
+                  :class="{ 'open-with-app--selected': selectedAppId === app.id }"
+                >
+                  <input v-model="selectedAppId" type="radio" :value="app.id">
+                  <span class="open-with-app-icon" aria-hidden="true">
+                    <AppIcon name="app" :size="17" :stroke-width="1.8" />
+                  </span>
+                  <span class="open-with-app-copy">
+                    <strong>{{ app.name }}</strong>
+                    <span>{{ app.description }}</span>
+                  </span>
+                  <span v-if="selectedAppId === app.id" class="open-with-app-check" aria-hidden="true">
+                    <AppIcon name="check" :size="13" :stroke-width="2.6" />
+                  </span>
+                </label>
+              </div>
+
+              <p v-else class="open-with-empty">No compatible apps were found.</p>
+
+              <label class="open-with-switch" :class="{ 'open-with-switch--disabled': !selectedApp }">
+                <span class="open-with-switch-copy">
+                  <strong>Always use for {{ fileTypeLabel }}</strong>
+                  <span v-if="selectedApp">Use {{ selectedApp.name }} when opening this file type.</span>
+                  <span v-else>Choose an app before saving a default.</span>
                 </span>
-                <span class="open-with-app-copy">
-                  <strong>{{ app.name }}</strong>
-                  <span>{{ app.description }}</span>
-                </span>
-                <span v-if="selectedAppId === app.id" class="open-with-app-check" aria-hidden="true">
-                  <AppIcon name="check" :size="13" :stroke-width="2.6" />
-                </span>
+                <input v-model="remember" class="switch-input" type="checkbox" :disabled="!selectedApp">
+                <span class="settings-switch" aria-hidden="true"></span>
               </label>
             </div>
-
-            <p v-else class="open-with-empty">No compatible apps were found.</p>
-
-            <label class="open-with-switch" :class="{ 'open-with-switch--disabled': !selectedApp }">
-              <span class="open-with-switch-copy">
-                <strong>Always use for {{ fileTypeLabel }}</strong>
-                <span v-if="selectedApp">Use {{ selectedApp.name }} when opening this file type.</span>
-                <span v-else>Choose an app before saving a default.</span>
-              </span>
-              <input v-model="remember" class="switch-input" type="checkbox" :disabled="!selectedApp">
-              <span class="settings-switch" aria-hidden="true"></span>
-            </label>
 
             <footer class="open-with-actions">
               <button type="button" class="app-button app-button--subtle" @click="reveal">
@@ -213,7 +226,6 @@ function handleKeydown(event) {
   overflow: hidden;
   border: 1px solid var(--control-border);
   border-radius: 11px;
-  padding: 16px;
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);
   color: var(--text);
@@ -230,16 +242,32 @@ function handleKeydown(event) {
 }
 
 .open-with-content {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
-  gap: 14px;
+  max-height: calc(100vh - 56px);
 }
 
 .open-with-header {
   display: grid;
   gap: 4px;
   min-width: 0;
+  border-bottom: 1px solid transparent;
+  padding: 16px 16px 13px;
+}
+
+.open-with-panel--content-scrollable .open-with-header {
+  border-bottom-color: var(--separator);
+}
+
+.open-with-body {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 14px;
+  overflow-y: auto;
+  padding: 14px 16px 16px;
 }
 
 .open-with-title-row {
@@ -307,10 +335,9 @@ function handleKeydown(event) {
 
 .open-with-apps {
   display: grid;
-  max-height: min(320px, calc(100vh - 350px));
+  max-height: none;
   min-height: 0;
   gap: 5px;
-  overflow-y: auto;
   padding-right: 2px;
 }
 
@@ -481,6 +508,12 @@ function handleKeydown(event) {
   display: flex;
   align-items: center;
   gap: 10px;
+  border-top: 1px solid transparent;
+  padding: 12px 16px;
+}
+
+.open-with-panel--content-scrollable .open-with-actions {
+  border-top-color: var(--separator);
 }
 
 .open-with-action-spacer {
@@ -510,7 +543,18 @@ function handleKeydown(event) {
 
 @media (max-width: 560px) {
   .open-with-panel {
-    padding: 14px;
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+
+  .open-with-content {
+    max-height: calc(100vh - 24px);
+  }
+
+  .open-with-header,
+  .open-with-body,
+  .open-with-actions {
+    padding-inline: 14px;
   }
 
   .open-with-actions {

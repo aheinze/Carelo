@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
+import { useScrollableContentState } from '../composables/useScrollableContentState';
 
 const ARCHIVE_FORMATS = [
   {
@@ -91,6 +92,7 @@ const props = defineProps({
 const emit = defineEmits(['cancel', 'create']);
 
 const nameInput = ref(null);
+const archiveBody = ref(null);
 const archiveName = ref('');
 const format = ref('zip');
 const compressionLevel = ref('balanced');
@@ -129,6 +131,14 @@ const passwordMismatch = computed(() => (
   confirmPassword.value.length > 0 &&
   password.value !== confirmPassword.value
 ));
+const { isScrollable: archiveBodyScrollable } = useScrollableContentState(archiveBody, {
+  watch: [
+    () => props.visible,
+    format,
+    usePassword,
+    nameExists,
+  ],
+});
 const createDisabled = computed(() => (
   !normalizedArchiveName.value ||
   (nameExists.value && !replaceExisting.value) ||
@@ -444,7 +454,13 @@ onUnmounted(() => {
   <Teleport to="body">
     <Transition name="archive-dialog">
       <div v-if="visible" class="archive-overlay" @pointerdown.self="cancel">
-        <section class="archive-panel" role="dialog" aria-modal="true" aria-labelledby="archive-title">
+        <section
+          class="archive-panel"
+          :class="{ 'archive-panel--content-scrollable': archiveBodyScrollable }"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="archive-title"
+        >
           <div class="archive-content">
             <header class="archive-header">
               <div class="archive-title-row">
@@ -456,175 +472,177 @@ onUnmounted(() => {
               <p>{{ selectedLabel }} in {{ directory }}</p>
             </header>
 
-            <label class="archive-field">
-              <span>Name</span>
-              <input
-                ref="nameInput"
-                v-model="archiveName"
-                type="text"
-                autocomplete="off"
-                spellcheck="false"
-                @keydown.enter.prevent="create"
-              >
-            </label>
+            <div ref="archiveBody" class="archive-body">
+              <label class="archive-field">
+                <span>Name</span>
+                <input
+                  ref="nameInput"
+                  v-model="archiveName"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  @keydown.enter.prevent="create"
+                >
+              </label>
 
-            <div class="archive-select-grid">
-              <div class="archive-select-field">
-                <span>Format</span>
-                <div ref="formatTriggerRef" class="archive-select">
-                  <button
-                    type="button"
-                    class="archive-select-trigger"
-                    :class="{ 'archive-select-trigger--open': selectDropdown.key === 'format' }"
-                    aria-haspopup="listbox"
-                    :aria-expanded="selectDropdown.key === 'format'"
-                    @click="toggleSelectDropdown('format')"
-                  >
-                    <span class="archive-select-icon" aria-hidden="true">
-                      <AppIcon :name="currentFormat.icon" :size="17" :stroke-width="1.8" />
-                    </span>
-                    <span class="archive-select-body">
-                      <span class="archive-select-label">{{ currentFormat.label }}</span>
-                      <span class="archive-select-desc">{{ currentFormat.description }}</span>
-                    </span>
-                    <span class="archive-select-chevron" aria-hidden="true">
-                      <AppIcon name="chevron-down" :size="14" :stroke-width="2.2" />
-                    </span>
-                  </button>
+              <div class="archive-select-grid">
+                <div class="archive-select-field">
+                  <span>Format</span>
+                  <div ref="formatTriggerRef" class="archive-select">
+                    <button
+                      type="button"
+                      class="archive-select-trigger"
+                      :class="{ 'archive-select-trigger--open': selectDropdown.key === 'format' }"
+                      aria-haspopup="listbox"
+                      :aria-expanded="selectDropdown.key === 'format'"
+                      @click="toggleSelectDropdown('format')"
+                    >
+                      <span class="archive-select-icon" aria-hidden="true">
+                        <AppIcon :name="currentFormat.icon" :size="17" :stroke-width="1.8" />
+                      </span>
+                      <span class="archive-select-body">
+                        <span class="archive-select-label">{{ currentFormat.label }}</span>
+                        <span class="archive-select-desc">{{ currentFormat.description }}</span>
+                      </span>
+                      <span class="archive-select-chevron" aria-hidden="true">
+                        <AppIcon name="chevron-down" :size="14" :stroke-width="2.2" />
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="archive-select-field">
+                  <span>Compression</span>
+                  <div ref="compressionTriggerRef" class="archive-select">
+                    <button
+                      type="button"
+                      class="archive-select-trigger"
+                      :class="{ 'archive-select-trigger--open': selectDropdown.key === 'compression' }"
+                      :disabled="compressionDisabled"
+                      aria-haspopup="listbox"
+                      :aria-expanded="selectDropdown.key === 'compression'"
+                      @click="toggleSelectDropdown('compression')"
+                    >
+                      <span class="archive-select-icon" aria-hidden="true">
+                        <AppIcon :name="currentCompression.icon" :size="17" :stroke-width="1.8" />
+                      </span>
+                      <span class="archive-select-body">
+                        <span class="archive-select-label">{{ currentCompression.label }}</span>
+                        <span class="archive-select-desc">{{ currentCompression.description }}</span>
+                      </span>
+                      <span class="archive-select-chevron" aria-hidden="true">
+                        <AppIcon name="chevron-down" :size="14" :stroke-width="2.2" />
+                      </span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              <div class="archive-select-field">
-                <span>Compression</span>
-                <div ref="compressionTriggerRef" class="archive-select">
+              <Teleport to="body">
+                <div
+                  v-if="selectDropdown.key"
+                  ref="selectDropdownRef"
+                  class="archive-select-dropdown"
+                  role="listbox"
+                  :style="{
+                    top: `${selectDropdown.top}px`,
+                    left: `${selectDropdown.left}px`,
+                    width: `${selectDropdown.width}px`,
+                  }"
+                >
                   <button
+                    v-for="candidate in activeDropdownOptions"
+                    :key="candidate.value"
                     type="button"
-                    class="archive-select-trigger"
-                    :class="{ 'archive-select-trigger--open': selectDropdown.key === 'compression' }"
-                    :disabled="compressionDisabled"
-                    aria-haspopup="listbox"
-                    :aria-expanded="selectDropdown.key === 'compression'"
-                    @click="toggleSelectDropdown('compression')"
+                    class="archive-select-option"
+                    :class="{ 'archive-select-option--active': activeDropdownValue === candidate.value }"
+                    role="option"
+                    :aria-selected="activeDropdownValue === candidate.value"
+                    @click="chooseSelectOption(selectDropdown.key, candidate.value)"
                   >
-                    <span class="archive-select-icon" aria-hidden="true">
-                      <AppIcon :name="currentCompression.icon" :size="17" :stroke-width="1.8" />
+                    <span class="archive-select-option-icon" aria-hidden="true">
+                      <AppIcon :name="candidate.icon" :size="16" :stroke-width="1.8" />
                     </span>
-                    <span class="archive-select-body">
-                      <span class="archive-select-label">{{ currentCompression.label }}</span>
-                      <span class="archive-select-desc">{{ currentCompression.description }}</span>
+                    <span class="archive-select-option-body">
+                      <span class="archive-select-option-label">{{ candidate.label }}</span>
+                      <span class="archive-select-option-desc">{{ candidate.description }}</span>
                     </span>
-                    <span class="archive-select-chevron" aria-hidden="true">
-                      <AppIcon name="chevron-down" :size="14" :stroke-width="2.2" />
+                    <span
+                      v-if="activeDropdownValue === candidate.value"
+                      class="archive-select-option-check"
+                      aria-hidden="true"
+                    >
+                      <AppIcon name="check" :size="13" :stroke-width="2.6" />
                     </span>
                   </button>
                 </div>
-              </div>
-            </div>
+              </Teleport>
 
-            <Teleport to="body">
-              <div
-                v-if="selectDropdown.key"
-                ref="selectDropdownRef"
-                class="archive-select-dropdown"
-                role="listbox"
-                :style="{
-                  top: `${selectDropdown.top}px`,
-                  left: `${selectDropdown.left}px`,
-                  width: `${selectDropdown.width}px`,
-                }"
-              >
-                <button
-                  v-for="candidate in activeDropdownOptions"
-                  :key="candidate.value"
-                  type="button"
-                  class="archive-select-option"
-                  :class="{ 'archive-select-option--active': activeDropdownValue === candidate.value }"
-                  role="option"
-                  :aria-selected="activeDropdownValue === candidate.value"
-                  @click="chooseSelectOption(selectDropdown.key, candidate.value)"
+              <div class="archive-options">
+                <label
+                  class="archive-switch-row"
+                  :class="{ 'archive-switch-row--disabled': !canToggleTopLevel }"
                 >
-                  <span class="archive-select-option-icon" aria-hidden="true">
-                    <AppIcon :name="candidate.icon" :size="16" :stroke-width="1.8" />
+                  <span class="archive-switch-copy">
+                    <strong>Include top-level folder</strong>
+                    <span>Keep the selected folder as the archive root.</span>
                   </span>
-                  <span class="archive-select-option-body">
-                    <span class="archive-select-option-label">{{ candidate.label }}</span>
-                    <span class="archive-select-option-desc">{{ candidate.description }}</span>
-                  </span>
-                  <span
-                    v-if="activeDropdownValue === candidate.value"
-                    class="archive-select-option-check"
-                    aria-hidden="true"
+                  <input
+                    v-model="includeTopLevelDirectory"
+                    class="switch-input"
+                    type="checkbox"
+                    :disabled="!canToggleTopLevel"
                   >
-                    <AppIcon name="check" :size="13" :stroke-width="2.6" />
+                  <span class="settings-switch" aria-hidden="true"></span>
+                </label>
+
+                <label
+                  class="archive-switch-row"
+                  :class="{ 'archive-switch-row--disabled': !passwordAvailable }"
+                >
+                  <span class="archive-switch-copy">
+                    <strong>Password protect archive</strong>
+                    <span>Available for ZIP and 7Z archives.</span>
                   </span>
-                </button>
+                  <input
+                    v-model="usePassword"
+                    class="switch-input"
+                    type="checkbox"
+                    :disabled="!passwordAvailable"
+                  >
+                  <span class="settings-switch" aria-hidden="true"></span>
+                </label>
               </div>
-            </Teleport>
 
-            <div class="archive-options">
-              <label
-                class="archive-switch-row"
-                :class="{ 'archive-switch-row--disabled': !canToggleTopLevel }"
-              >
-                <span class="archive-switch-copy">
-                  <strong>Include top-level folder</strong>
-                  <span>Keep the selected folder as the archive root.</span>
-                </span>
-                <input
-                  v-model="includeTopLevelDirectory"
-                  class="switch-input"
-                  type="checkbox"
-                  :disabled="!canToggleTopLevel"
-                >
-                <span class="settings-switch" aria-hidden="true"></span>
-              </label>
+              <div v-if="usePassword && passwordAvailable" class="archive-password-grid">
+                <label class="archive-field">
+                  <span>Password</span>
+                  <input v-model="password" type="password" autocomplete="new-password">
+                </label>
+                <label class="archive-field">
+                  <span>Confirm</span>
+                  <input v-model="confirmPassword" type="password" autocomplete="new-password">
+                </label>
+                <p class="archive-note">
+                  ZIP uses legacy ZipCrypto compatibility. 7Z uses AES encryption.
+                </p>
+              </div>
 
-              <label
-                class="archive-switch-row"
-                :class="{ 'archive-switch-row--disabled': !passwordAvailable }"
-              >
-                <span class="archive-switch-copy">
-                  <strong>Password protect archive</strong>
-                  <span>Available for ZIP and 7Z archives.</span>
-                </span>
-                <input
-                  v-model="usePassword"
-                  class="switch-input"
-                  type="checkbox"
-                  :disabled="!passwordAvailable"
-                >
-                <span class="settings-switch" aria-hidden="true"></span>
-              </label>
-            </div>
-
-            <div v-if="usePassword && passwordAvailable" class="archive-password-grid">
-              <label class="archive-field">
-                <span>Password</span>
-                <input v-model="password" type="password" autocomplete="new-password">
-              </label>
-              <label class="archive-field">
-                <span>Confirm</span>
-                <input v-model="confirmPassword" type="password" autocomplete="new-password">
-              </label>
-              <p class="archive-note">
-                ZIP uses legacy ZipCrypto compatibility. 7Z uses AES encryption.
+              <p v-else-if="!passwordAvailable" class="archive-note">
+                Passwords are available only for ZIP and 7Z archives.
               </p>
+
+              <label v-if="nameExists" class="archive-switch-row archive-switch-row--replace">
+                <span class="archive-switch-copy">
+                  <strong>Replace existing archive</strong>
+                  <span>{{ normalizedArchiveName }}</span>
+                </span>
+                <input v-model="replaceExisting" class="switch-input" type="checkbox">
+                <span class="settings-switch" aria-hidden="true"></span>
+              </label>
+
+              <p v-if="passwordMismatch" class="archive-error">Passwords do not match.</p>
             </div>
-
-            <p v-else-if="!passwordAvailable" class="archive-note">
-              Passwords are available only for ZIP and 7Z archives.
-            </p>
-
-            <label v-if="nameExists" class="archive-switch-row archive-switch-row--replace">
-              <span class="archive-switch-copy">
-                <strong>Replace existing archive</strong>
-                <span>{{ normalizedArchiveName }}</span>
-              </span>
-              <input v-model="replaceExisting" class="switch-input" type="checkbox">
-              <span class="settings-switch" aria-hidden="true"></span>
-            </label>
-
-            <p v-if="passwordMismatch" class="archive-error">Passwords do not match.</p>
 
             <footer class="archive-actions">
               <button type="button" class="app-button" @click="cancel">Cancel</button>
@@ -659,11 +677,9 @@ onUnmounted(() => {
   display: block;
   width: min(540px, calc(100vw - 48px));
   max-height: calc(100vh - 56px);
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
   border: 1px solid var(--control-border);
   border-radius: 11px;
-  padding: 16px;
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);
   color: var(--text);
@@ -679,14 +695,30 @@ onUnmounted(() => {
 }
 
 .archive-content {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  gap: 13px;
+  max-height: calc(100vh - 56px);
 }
 
 .archive-header {
   display: grid;
   gap: 5px;
+  border-bottom: 1px solid transparent;
+  padding: 16px 16px 13px;
+}
+
+.archive-panel--content-scrollable .archive-header {
+  border-bottom-color: var(--separator);
+}
+
+.archive-body {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 13px;
+  overflow-y: auto;
+  padding: 16px;
 }
 
 .archive-title-row {
@@ -1060,7 +1092,12 @@ onUnmounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  padding-top: 2px;
+  border-top: 1px solid transparent;
+  padding: 12px 16px;
+}
+
+.archive-panel--content-scrollable .archive-actions {
+  border-top-color: var(--separator);
 }
 
 .archive-dialog-enter-active,
@@ -1086,7 +1123,18 @@ onUnmounted(() => {
 
 @media (max-width: 560px) {
   .archive-panel {
-    padding: 14px;
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+
+  .archive-content {
+    max-height: calc(100vh - 24px);
+  }
+
+  .archive-header,
+  .archive-body,
+  .archive-actions {
+    padding-inline: 14px;
   }
 
   .archive-select-grid,

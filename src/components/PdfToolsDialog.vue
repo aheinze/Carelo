@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
+import { useScrollableContentState } from '../composables/useScrollableContentState';
 import { extensionForName } from '../utils/fileTypes';
 
 const DESKTOP_PREVIEW_ROW_HEIGHT = 34;
@@ -61,6 +62,7 @@ const props = defineProps({
 const emit = defineEmits(['cancel', 'run']);
 
 const panelRef = ref(null);
+const controlsRef = ref(null);
 const previewListRef = ref(null);
 const previewScrollTop = ref(0);
 const previewViewportHeight = ref(0);
@@ -74,6 +76,24 @@ const password = ref('');
 const conflictPolicy = ref('keepBoth');
 const destinationMode = ref('sameFolder');
 let previewResizeObserver = null;
+const { isScrollable: controlsScrollable } = useScrollableContentState(controlsRef, {
+  watch: [
+    () => props.visible,
+    tool,
+    () => props.otherPaneDirectory,
+  ],
+});
+const { isScrollable: previewScrollable } = useScrollableContentState(previewListRef, {
+  watch: [
+    () => props.visible,
+    () => props.entries.length,
+    tool,
+    conflictPolicy,
+  ],
+});
+const pdfToolsContentScrollable = computed(() => (
+  controlsScrollable.value || previewScrollable.value
+));
 
 const availableTools = computed(() => (
   TOOLS.filter((option) => props.entries.length >= option.min)
@@ -523,6 +543,7 @@ onBeforeUnmount(() => {
       <section
         ref="panelRef"
         class="pdf-tools-panel"
+        :class="{ 'pdf-tools-panel--content-scrollable': pdfToolsContentScrollable }"
         role="dialog"
         aria-modal="true"
         aria-labelledby="pdf-tools-title"
@@ -559,7 +580,7 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="pdf-tools-layout">
-            <section class="pdf-tools-controls" aria-label="PDF tool options">
+            <section ref="controlsRef" class="pdf-tools-controls" aria-label="PDF tool options">
               <p class="pdf-tools-hint">{{ currentToolHint }}</p>
 
               <div v-if="tool === 'compress'" class="pdf-tools-section">
@@ -780,8 +801,12 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  border-bottom: 1px solid var(--separator);
+  border-bottom: 1px solid transparent;
   padding: 16px 18px;
+}
+
+.pdf-tools-panel--content-scrollable .pdf-tools-header {
+  border-bottom-color: var(--separator);
 }
 
 .pdf-tools-title-row,
@@ -794,8 +819,12 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  border-bottom: 1px solid var(--separator);
+  border-bottom: 1px solid transparent;
   padding: 10px 14px;
+}
+
+.pdf-tools-panel--content-scrollable .pdf-tools-tabs {
+  border-bottom-color: var(--separator);
 }
 
 .pdf-tools-tab {
@@ -1229,8 +1258,12 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
-  border-top: 1px solid var(--separator);
+  border-top: 1px solid transparent;
   padding: 13px 16px;
+}
+
+.pdf-tools-panel--content-scrollable .pdf-tools-footer {
+  border-top-color: var(--separator);
 }
 
 @media (max-width: 760px) {

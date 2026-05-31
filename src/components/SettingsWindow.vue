@@ -3,6 +3,7 @@ import { check } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
+import { useScrollableContentState } from '../composables/useScrollableContentState';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { COLOR_SCHEME_OPTIONS, normalizeAccentColor } from '../utils/colorSchemes';
 import { DATE_FORMAT_OPTIONS, formatDate } from '../utils/dateFormat';
@@ -13,6 +14,7 @@ const store = useFileManagerStore();
 
 const searchQuery = ref('');
 const activeSectionId = ref('appearance');
+const settingsContent = ref(null);
 const editorTemplatesVisible = ref(false);
 const editorTemplateControl = ref(null);
 const updateState = ref('idle');
@@ -122,6 +124,16 @@ const editorTemplates = [
 const activeSection = computed(() =>
   sections.find((section) => section.id === activeSectionId.value) || sections[0],
 );
+const { isScrollable: settingsContentScrollable } = useScrollableContentState(settingsContent, {
+  watch: [
+    () => store.settingsVisible,
+    activeSectionId,
+    searchQuery,
+    editorTemplatesVisible,
+    updateDetails,
+    updateMessage,
+  ],
+});
 const dateFormatSample = new Date(2026, 4, 18, 14, 30);
 const updateProgressLabel = computed(() => {
   const progress = updateProgress.value;
@@ -514,7 +526,10 @@ onUnmounted(() => {
             </nav>
           </aside>
 
-          <main class="settings-main">
+          <main
+            class="settings-main"
+            :class="{ 'settings-main--content-scrollable': settingsContentScrollable }"
+          >
             <header class="settings-header">
               <div class="settings-title-group">
                 <div class="settings-header-icon">
@@ -528,7 +543,7 @@ onUnmounted(() => {
               </button>
             </header>
 
-            <div class="settings-content">
+            <div ref="settingsContent" class="settings-content">
               <section v-if="activeSectionId === 'appearance'" class="settings-page">
                 <div class="settings-section-heading">
                   <h3>Appearance</h3>
@@ -1236,7 +1251,11 @@ onUnmounted(() => {
   height: 56px;
   flex: 0 0 auto;
   padding: 0 18px;
-  border-bottom: 1px solid var(--separator);
+  border-bottom: 1px solid transparent;
+}
+
+.settings-main--content-scrollable .settings-header {
+  border-bottom-color: var(--separator);
 }
 
 .settings-title-group {

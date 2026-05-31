@@ -2,9 +2,11 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import { useDialog } from '../composables/useDialog';
+import { useScrollableContentState } from '../composables/useScrollableContentState';
 
 const dialog = useDialog();
 const dialogPanel = ref(null);
+const dialogBody = ref(null);
 const promptInput = ref(null);
 const inputValue = ref('');
 const checkboxValue = ref(false);
@@ -12,6 +14,9 @@ let promptFocusFrame = 0;
 let promptFocusTimers = [];
 
 const activeDialog = computed(() => dialog.activeDialog.value);
+const { isScrollable: dialogBodyScrollable } = useScrollableContentState(dialogBody, {
+  watch: activeDialog,
+});
 
 const iconName = computed(() => {
   if (activeDialog.value?.icon) {
@@ -218,6 +223,7 @@ function handleKeydown(event) {
             'dialog-panel--danger': activeDialog.variant === 'danger',
             'dialog-panel--warning': activeDialog.variant === 'warning',
             'dialog-panel--wide': activeDialog.size === 'wide',
+            'dialog-panel--content-scrollable': dialogBodyScrollable,
           }"
           role="dialog"
           aria-modal="true"
@@ -232,38 +238,41 @@ function handleKeydown(event) {
                 </span>
                 <h2 :id="`dialog-title-${activeDialog.id}`">{{ activeDialog.title }}</h2>
               </div>
-              <p v-if="activeDialog.message">{{ activeDialog.message }}</p>
-              <small v-if="activeDialog.detail">{{ activeDialog.detail }}</small>
             </header>
 
-            <label v-if="activeDialog.type === 'prompt'" class="dialog-input-row">
-              <span v-if="activeDialog.inputLabel">{{ activeDialog.inputLabel }}</span>
-              <input
-                ref="promptInput"
-                v-model="inputValue"
-                autofocus
-                :type="activeDialog.inputType || 'text'"
-                :placeholder="activeDialog.inputPlaceholder"
-                @keydown.enter.stop.prevent="confirmDialog"
-              />
-            </label>
+            <div ref="dialogBody" class="dialog-body">
+              <p v-if="activeDialog.message" class="dialog-message">{{ activeDialog.message }}</p>
+              <small v-if="activeDialog.detail" class="dialog-detail">{{ activeDialog.detail }}</small>
 
-            <dl v-if="activeDialog.facts.length > 0" class="dialog-facts">
-              <div v-for="fact in activeDialog.facts" :key="fact.label">
-                <dt :title="fact.label">{{ fact.label }}</dt>
-                <dd
-                  :class="{ 'dialog-fact--mono': fact.mono }"
-                  :title="fact.value"
-                >
-                  {{ fact.value }}
-                </dd>
-              </div>
-            </dl>
+              <label v-if="activeDialog.type === 'prompt'" class="dialog-input-row">
+                <span v-if="activeDialog.inputLabel">{{ activeDialog.inputLabel }}</span>
+                <input
+                  ref="promptInput"
+                  v-model="inputValue"
+                  autofocus
+                  :type="activeDialog.inputType || 'text'"
+                  :placeholder="activeDialog.inputPlaceholder"
+                  @keydown.enter.stop.prevent="confirmDialog"
+                />
+              </label>
 
-            <label v-if="activeDialog.checkboxLabel" class="dialog-checkbox">
-              <input v-model="checkboxValue" type="checkbox" />
-              <span>{{ activeDialog.checkboxLabel }}</span>
-            </label>
+              <dl v-if="activeDialog.facts.length > 0" class="dialog-facts">
+                <div v-for="fact in activeDialog.facts" :key="fact.label">
+                  <dt :title="fact.label">{{ fact.label }}</dt>
+                  <dd
+                    :class="{ 'dialog-fact--mono': fact.mono }"
+                    :title="fact.value"
+                  >
+                    {{ fact.value }}
+                  </dd>
+                </div>
+              </dl>
+
+              <label v-if="activeDialog.checkboxLabel" class="dialog-checkbox">
+                <input v-model="checkboxValue" type="checkbox" />
+                <span>{{ activeDialog.checkboxLabel }}</span>
+              </label>
+            </div>
 
             <footer
               v-if="activeDialog.type === 'choice'"
@@ -326,11 +335,9 @@ function handleKeydown(event) {
   display: block;
   width: min(380px, calc(100vw - 48px));
   max-height: calc(100vh - 56px);
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
   border: 1px solid var(--control-border);
   border-radius: 11px;
-  padding: 16px;
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);
   color: var(--text);
@@ -363,15 +370,30 @@ function handleKeydown(event) {
 
 /* ── Content ──────────────────────────────────────────────── */
 .dialog-content {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  gap: 16px;
+  max-height: calc(100vh - 56px);
 }
 
 .dialog-header {
   display: grid;
   min-width: 0;
-  gap: 6px;
+  border-bottom: 1px solid transparent;
+  padding: 16px 16px 13px;
+}
+
+.dialog-panel--content-scrollable .dialog-header {
+  border-bottom-color: var(--separator);
+}
+
+.dialog-body {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 14px;
+  overflow-y: auto;
+  padding: 16px;
 }
 
 .dialog-title-row {
@@ -391,7 +413,7 @@ function handleKeydown(event) {
   overflow-wrap: anywhere;
 }
 
-.dialog-header p {
+.dialog-message {
   min-width: 0;
   margin: 0;
   color: var(--text-muted);
@@ -402,7 +424,7 @@ function handleKeydown(event) {
   white-space: pre-line;
 }
 
-.dialog-header small {
+.dialog-detail {
   min-width: 0;
   color: var(--text-faint);
   font-size: 11.5px;
@@ -521,6 +543,12 @@ function handleKeydown(event) {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+  border-top: 1px solid transparent;
+  padding: 12px 16px;
+}
+
+.dialog-panel--content-scrollable .dialog-actions {
+  border-top-color: var(--separator);
 }
 
 .dialog-actions--choice {

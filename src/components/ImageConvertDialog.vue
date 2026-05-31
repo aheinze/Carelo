@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
+import { useScrollableContentState } from '../composables/useScrollableContentState';
 import { extensionForName } from '../utils/fileTypes';
 
 const DESKTOP_PREVIEW_ROW_HEIGHT = 34;
@@ -45,6 +46,7 @@ const props = defineProps({
 const emit = defineEmits(['cancel', 'convert']);
 
 const panelRef = ref(null);
+const controlsRef = ref(null);
 const previewListRef = ref(null);
 const previewScrollTop = ref(0);
 const previewViewportHeight = ref(0);
@@ -54,6 +56,24 @@ const conflictPolicy = ref('keepBoth');
 const destinationMode = ref('sameFolder');
 const imageQuality = ref(85);
 let previewResizeObserver = null;
+const { isScrollable: controlsScrollable } = useScrollableContentState(controlsRef, {
+  watch: [
+    () => props.visible,
+    targetFormat,
+    () => props.otherPaneDirectory,
+  ],
+});
+const { isScrollable: previewScrollable } = useScrollableContentState(previewListRef, {
+  watch: [
+    () => props.visible,
+    () => props.entries.length,
+    targetFormat,
+    conflictPolicy,
+  ],
+});
+const imageConvertContentScrollable = computed(() => (
+  controlsScrollable.value || previewScrollable.value
+));
 
 const currentFormat = computed(() => (
   FORMATS.find((format) => format.value === targetFormat.value) || FORMATS[0]
@@ -406,6 +426,7 @@ onBeforeUnmount(() => {
         <section
           ref="panelRef"
           class="image-convert-panel"
+          :class="{ 'image-convert-panel--content-scrollable': imageConvertContentScrollable }"
           role="dialog"
           aria-modal="true"
           aria-labelledby="image-convert-title"
@@ -429,7 +450,7 @@ onBeforeUnmount(() => {
           </header>
 
           <div class="image-convert-layout">
-            <section class="image-convert-controls" aria-label="Conversion options">
+            <section ref="controlsRef" class="image-convert-controls" aria-label="Conversion options">
               <p class="image-convert-hint">{{ conversionHint }}</p>
 
               <div class="image-convert-section">
@@ -596,8 +617,12 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  border-bottom: 1px solid var(--separator);
+  border-bottom: 1px solid transparent;
   padding: 16px 18px;
+}
+
+.image-convert-panel--content-scrollable .image-convert-header {
+  border-bottom-color: var(--separator);
 }
 
 .image-convert-title-row {
@@ -912,8 +937,12 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
-  border-top: 1px solid var(--separator);
+  border-top: 1px solid transparent;
   padding: 13px 16px;
+}
+
+.image-convert-panel--content-scrollable .image-convert-footer {
+  border-top-color: var(--separator);
 }
 
 .image-convert-dialog-enter-active,
