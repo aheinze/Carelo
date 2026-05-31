@@ -1,4 +1,4 @@
-<img width="1672" height="941" alt="Image" src="https://github.com/user-attachments/assets/4dea1f56-3a30-4ade-8c49-429600ac5caf" />
+<img width="1672" height="941" alt="Carelo Banner" src="https://github.com/user-attachments/assets/a5033332-ddbe-4ea9-b29a-d69c52a97d45" />
 
 
 # Carelo
