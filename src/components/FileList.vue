@@ -22,6 +22,12 @@ const GRID_ROW_STRIDE = 214;
 const GRID_OVERSCAN_ROWS = 3;
 const CUSTOM_SCROLLBAR_TRACK_PADDING = 6;
 const CUSTOM_SCROLLBAR_MIN_THUMB_SIZE = 40;
+const LIST_COLUMN_LIMITS = Object.freeze({
+  name: { min: 160, max: 900, default: 180 },
+  size: { min: 72, max: 180, default: 88 },
+  modifiedAt: { min: 104, max: 280, default: 126 },
+});
+const LIST_COLUMN_KEY_STEP = 12;
 const FILE_DRAG_MIME = 'application/x-carelo-files';
 const HANDLED_FILE_DRAG_EVENT = '__careloHandledFileDragEvent';
 
@@ -114,6 +120,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  listColumnWidths: {
+    type: Object,
+    default: () => ({}),
+  },
 });
 
 const emit = defineEmits([
@@ -126,6 +136,7 @@ const emit = defineEmits([
   'preview-entry',
   'active-directory',
   'column-summary',
+  'list-column-widths-change',
   'drag-start',
   'drag-end',
   'pointer-drag-start',
@@ -143,8 +154,11 @@ const currentDirectoryDropActive = ref(false);
 const currentDirectoryDropPath = ref('');
 const localDraggedPaths = ref([]);
 const listScrollTop = ref(0);
+const listScrollLeft = ref(0);
 const listViewportHeight = ref(0);
+const listViewportWidth = ref(0);
 const listScrollHeight = ref(0);
+const listScrollWidth = ref(0);
 const gridScrollTop = ref(0);
 const gridViewportHeight = ref(0);
 const gridViewportWidth = ref(0);
@@ -156,9 +170,12 @@ const columnViewportWidth = ref(0);
 const columnScrollHeight = ref(0);
 const columnScrollWidth = ref(0);
 const customScrollbarDraggingAxis = ref('');
+const listColumnWidths = ref(normalizeListColumnWidths());
+const resizingListColumn = ref('');
 let columnLoadVersion = 0;
 let scrollerResizeObserver = null;
 let customScrollbarDrag = null;
+let listColumnResize = null;
 
 const activeSearchQuery = computed(() => props.searchQuery.trim().toLowerCase());
 const isSearchFiltering = computed(() => activeSearchQuery.value.length > 0);
@@ -242,6 +259,22 @@ const baseColumn = computed(() => ({
 
 const columns = computed(() => [baseColumn.value, ...columnTrail.value]);
 const parentDirectory = computed(() => parentPathForDirectory(props.directoryKey));
+const listGridColumns = computed(() => (
+  `minmax(${listColumnWidths.value.name}px, 1fr) 46px ${listColumnWidths.value.size}px ${listColumnWidths.value.modifiedAt}px`
+));
+const listMinimumWidth = computed(() => (
+  listColumnWidths.value.name
+  + 46
+  + listColumnWidths.value.size
+  + listColumnWidths.value.modifiedAt
+  + (12 * 3)
+  + 54
+));
+const listColumnStyle = computed(() => ({
+  '--file-list-grid-columns': listGridColumns.value,
+  '--file-list-min-width': `${listMinimumWidth.value}px`,
+  '--file-list-scroll-left': `${listScrollLeft.value}px`,
+}));
 const listStripeOffset = computed(() => (parentDirectory.value ? 1 : 0));
 const materializedColumns = computed(() =>
   columns.value.map((column) => ({
@@ -395,6 +428,19 @@ function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+function normalizeListColumnWidths(widths = props.listColumnWidths) {
+  const value = widths && typeof widths === 'object' ? widths : {};
+
+  return Object.fromEntries(
+    Object.entries(LIST_COLUMN_LIMITS).map(([key, limits]) => {
+      const width = Number(value[key]);
+      const normalizedWidth = Number.isFinite(width) ? width : limits.default;
+
+      return [key, Math.round(clampNumber(normalizedWidth, limits.min, limits.max))];
+    }),
+  );
+}
+
 function scrollbarGeometry(scrollOffset, viewportSize, scrollSize, trackSize = viewportSize) {
   const viewport = Math.max(0, Number(viewportSize) || 0);
   const scrollExtent = Math.max(viewport, Number(scrollSize) || 0);
@@ -453,7 +499,15 @@ const verticalScrollbarStyle = computed(() => {
 });
 
 const horizontalScrollbarStyle = computed(() => {
-  if ((props.loading && !props.loaded) || props.viewMode !== 'columns') {
+  if (props.loading && !props.loaded) {
+    return null;
+  }
+
+  if (props.viewMode === 'list') {
+    return customScrollbarStyle(listScrollLeft.value, listViewportWidth.value, listScrollWidth.value);
+  }
+
+  if (props.viewMode !== 'columns') {
     return null;
   }
 
@@ -480,8 +534,11 @@ function updateListViewport() {
   }
 
   listScrollTop.value = scroller.scrollTop;
+  listScrollLeft.value = scroller.scrollLeft;
   listViewportHeight.value = scroller.clientHeight;
+  listViewportWidth.value = scroller.clientWidth;
   listScrollHeight.value = scroller.scrollHeight;
+  listScrollWidth.value = scroller.scrollWidth;
 }
 
 function updateGridViewport() {
@@ -606,6 +663,130 @@ function stopCustomScrollbarDrag() {
   window.removeEventListener('pointercancel', stopCustomScrollbarDrag);
 }
 
+function updateListColumnWidth(column, width, { emitChange = false } = {}) {
+  const limits = LIST_COLUMN_LIMITS[column];
+
+  if (!limits) {
+    return;
+  }
+
+  const nextWidths = {
+    ...listColumnWidths.value,
+    [column]: Math.round(clampNumber(Number(width) || limits.default, limits.min, limits.max)),
+  };
+
+  listColumnWidths.value = normalizeListColumnWidths(nextWidths);
+  nextTick(updateAllViewports);
+
+  if (emitChange) {
+    emit('list-column-widths-change', { ...listColumnWidths.value });
+  }
+}
+
+function handleListColumnResizeMove(event) {
+  if (!listColumnResize) {
+    return;
+  }
+
+  event.preventDefault();
+  updateListColumnWidth(
+    listColumnResize.column,
+    listColumnResize.startWidth + (event.clientX - listColumnResize.startX),
+  );
+}
+
+function stopListColumnResize() {
+  if (!listColumnResize) {
+    return;
+  }
+
+  listColumnResize = null;
+  resizingListColumn.value = '';
+  if (typeof document !== 'undefined') {
+    document.body?.classList.remove('is-list-column-resizing');
+  }
+  window.removeEventListener('pointermove', handleListColumnResizeMove);
+  window.removeEventListener('pointerup', stopListColumnResize);
+  window.removeEventListener('pointercancel', stopListColumnResize);
+  emit('list-column-widths-change', { ...listColumnWidths.value });
+}
+
+function startListColumnResize(event, column) {
+  const limits = LIST_COLUMN_LIMITS[column];
+
+  if (!limits) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  listColumnResize = {
+    column,
+    startX: event.clientX,
+    startWidth: listColumnWidths.value[column] || limits.default,
+  };
+  resizingListColumn.value = column;
+  if (typeof document !== 'undefined') {
+    document.body?.classList.add('is-list-column-resizing');
+  }
+  window.addEventListener('pointermove', handleListColumnResizeMove, { passive: false });
+  window.addEventListener('pointerup', stopListColumnResize);
+  window.addEventListener('pointercancel', stopListColumnResize);
+}
+
+function handleListColumnResizeKeydown(event, column) {
+  const limits = LIST_COLUMN_LIMITS[column];
+
+  if (!limits) {
+    return;
+  }
+
+  if (event.key === 'Home') {
+    event.preventDefault();
+    updateListColumnWidth(column, limits.min, { emitChange: true });
+    return;
+  }
+
+  if (event.key === 'End') {
+    event.preventDefault();
+    updateListColumnWidth(column, limits.max, { emitChange: true });
+    return;
+  }
+
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    updateListColumnWidth(column, limits.default, { emitChange: true });
+    return;
+  }
+
+  const direction = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+
+  if (!direction) {
+    return;
+  }
+
+  event.preventDefault();
+  const step = event.shiftKey ? LIST_COLUMN_KEY_STEP * 3 : LIST_COLUMN_KEY_STEP;
+  updateListColumnWidth(column, listColumnWidths.value[column] + (direction * step), { emitChange: true });
+}
+
+function resetListColumnWidth(column) {
+  const limits = LIST_COLUMN_LIMITS[column];
+
+  if (!limits) {
+    return;
+  }
+
+  updateListColumnWidth(column, limits.default, { emitChange: true });
+}
+
+function resizeHandleLabel(column) {
+  if (column === 'modifiedAt') return 'Resize Modified column';
+  if (column === 'size') return 'Resize Size column';
+  return 'Resize Name column';
+}
+
 function handleCustomScrollbarPointerDown(event, axis) {
   const track = event.currentTarget;
   const rect = track.getBoundingClientRect();
@@ -661,6 +842,7 @@ function resetScroll() {
 
     if (scroller) {
       scroller.scrollTop = 0;
+      scroller.scrollLeft = 0;
     }
 
     updateAllViewports();
@@ -1816,6 +1998,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopCustomScrollbarDrag();
+  stopListColumnResize();
   scrollerResizeObserver?.disconnect();
   scrollerResizeObserver = null;
   if (typeof window !== 'undefined') {
@@ -1825,14 +2008,28 @@ onBeforeUnmount(() => {
 
 watch(() => props.directoryKey, () => {
   stopCustomScrollbarDrag();
+  stopListColumnResize();
   resetColumnTrail();
   resetScroll();
 });
 watch(() => props.viewMode, () => {
   stopCustomScrollbarDrag();
+  stopListColumnResize();
   observeScrollers();
   resetScroll();
 });
+watch(
+  () => props.listColumnWidths,
+  (widths) => {
+    if (listColumnResize) {
+      return;
+    }
+
+    listColumnWidths.value = normalizeListColumnWidths(widths);
+    nextTick(updateAllViewports);
+  },
+  { immediate: true, deep: true },
+);
 watch(
   () => [props.loaded, props.loading, props.entries.length, parentDirectory.value],
   observeScrollers,
@@ -1958,7 +2155,7 @@ watch(
           </div>
         </div>
 
-        <div v-else class="file-list-frame" role="table" aria-label="Loading directory listing">
+        <div v-else class="file-list-frame" :style="listColumnStyle" role="table" aria-label="Loading directory listing">
           <div class="file-list-header file-list-header--loading" role="row">
             <span role="columnheader">Name</span>
             <span role="columnheader"></span>
@@ -2172,60 +2369,117 @@ watch(
       </div>
     </div>
 
-    <div v-else class="file-list-frame" role="table" aria-label="Directory listing">
+    <div v-else class="file-list-frame" :style="listColumnStyle" role="table" aria-label="Directory listing">
       <div class="file-list-header" role="row">
-        <button
-          type="button"
-          class="file-list-heading"
-          :class="{ 'file-list-heading--active': sortKey === 'name' }"
+        <div
+          class="file-list-header-cell"
           role="columnheader"
           :aria-sort="sortKey === 'name' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'"
-          @click="$emit('sort', 'name')"
-          @keydown.stop
         >
-          <span>Name</span>
-          <AppIcon
-            v-if="sortKey === 'name'"
-            :name="sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'"
-            :size="12"
-            :stroke-width="2.1"
+          <button
+            type="button"
+            class="file-list-heading"
+            :class="{ 'file-list-heading--active': sortKey === 'name' }"
+            @click="$emit('sort', 'name')"
+            @keydown.stop
+          >
+            <span>Name</span>
+            <AppIcon
+              v-if="sortKey === 'name'"
+              :name="sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'"
+              :size="12"
+              :stroke-width="2.1"
+            />
+          </button>
+          <span
+            class="file-list-resize-handle"
+            :class="{ 'file-list-resize-handle--active': resizingListColumn === 'name' }"
+            role="separator"
+            tabindex="0"
+            aria-orientation="vertical"
+            :aria-label="resizeHandleLabel('name')"
+            :aria-valuemin="LIST_COLUMN_LIMITS.name.min"
+            :aria-valuemax="LIST_COLUMN_LIMITS.name.max"
+            :aria-valuenow="listColumnWidths.name"
+            @pointerdown="startListColumnResize($event, 'name')"
+            @dblclick.stop="resetListColumnWidth('name')"
+            @keydown.stop="handleListColumnResizeKeydown($event, 'name')"
+            @click.stop
           />
-        </button>
-        <span role="columnheader"></span>
-        <button
-          type="button"
-          class="file-list-heading file-list-heading--end"
-          :class="{ 'file-list-heading--active': sortKey === 'size' }"
+        </div>
+        <span class="file-list-header-cell file-list-header-cell--tag" role="columnheader"></span>
+        <div
+          class="file-list-header-cell"
           role="columnheader"
           :aria-sort="sortKey === 'size' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'"
-          @click="$emit('sort', 'size')"
-          @keydown.stop
         >
-          <span>Size</span>
-          <AppIcon
-            v-if="sortKey === 'size'"
-            :name="sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'"
-            :size="12"
-            :stroke-width="2.1"
+          <button
+            type="button"
+            class="file-list-heading file-list-heading--end"
+            :class="{ 'file-list-heading--active': sortKey === 'size' }"
+            @click="$emit('sort', 'size')"
+            @keydown.stop
+          >
+            <span>Size</span>
+            <AppIcon
+              v-if="sortKey === 'size'"
+              :name="sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'"
+              :size="12"
+              :stroke-width="2.1"
+            />
+          </button>
+          <span
+            class="file-list-resize-handle"
+            :class="{ 'file-list-resize-handle--active': resizingListColumn === 'size' }"
+            role="separator"
+            tabindex="0"
+            aria-orientation="vertical"
+            :aria-label="resizeHandleLabel('size')"
+            :aria-valuemin="LIST_COLUMN_LIMITS.size.min"
+            :aria-valuemax="LIST_COLUMN_LIMITS.size.max"
+            :aria-valuenow="listColumnWidths.size"
+            @pointerdown="startListColumnResize($event, 'size')"
+            @dblclick.stop="resetListColumnWidth('size')"
+            @keydown.stop="handleListColumnResizeKeydown($event, 'size')"
+            @click.stop
           />
-        </button>
-        <button
-          type="button"
-          class="file-list-heading file-list-heading--end"
-          :class="{ 'file-list-heading--active': sortKey === 'modifiedAt' }"
+        </div>
+        <div
+          class="file-list-header-cell"
           role="columnheader"
           :aria-sort="sortKey === 'modifiedAt' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'"
-          @click="$emit('sort', 'modifiedAt')"
-          @keydown.stop
         >
-          <span>Modified</span>
-          <AppIcon
-            v-if="sortKey === 'modifiedAt'"
-            :name="sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'"
-            :size="12"
-            :stroke-width="2.1"
+          <button
+            type="button"
+            class="file-list-heading file-list-heading--end"
+            :class="{ 'file-list-heading--active': sortKey === 'modifiedAt' }"
+            @click="$emit('sort', 'modifiedAt')"
+            @keydown.stop
+          >
+            <span>Modified</span>
+            <AppIcon
+              v-if="sortKey === 'modifiedAt'"
+              :name="sortDirection === 'asc' ? 'arrow-up' : 'arrow-down'"
+              :size="12"
+              :stroke-width="2.1"
+            />
+          </button>
+          <span
+            class="file-list-resize-handle file-list-resize-handle--edge"
+            :class="{ 'file-list-resize-handle--active': resizingListColumn === 'modifiedAt' }"
+            role="separator"
+            tabindex="0"
+            aria-orientation="vertical"
+            :aria-label="resizeHandleLabel('modifiedAt')"
+            :aria-valuemin="LIST_COLUMN_LIMITS.modifiedAt.min"
+            :aria-valuemax="LIST_COLUMN_LIMITS.modifiedAt.max"
+            :aria-valuenow="listColumnWidths.modifiedAt"
+            @pointerdown="startListColumnResize($event, 'modifiedAt')"
+            @dblclick.stop="resetListColumnWidth('modifiedAt')"
+            @keydown.stop="handleListColumnResizeKeydown($event, 'modifiedAt')"
+            @click.stop
           />
-        </button>
+        </div>
       </div>
 
       <div
@@ -2435,13 +2689,15 @@ watch(
   height: 100%;
   min-height: 0;
   flex-direction: column;
+  overflow: hidden;
   contain: layout paint style;
 }
 
 .file-list-header {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 46px 88px 126px;
+  width: max(100%, var(--file-list-min-width, 530px));
+  grid-template-columns: var(--file-list-grid-columns, minmax(180px, 1fr) 46px 88px 126px);
   gap: 12px;
   min-height: 35px;
   align-items: center;
@@ -2452,7 +2708,20 @@ watch(
   font-size: 13px;
   font-weight: 680;
   letter-spacing: 0;
+  transform: translateX(calc(var(--file-list-scroll-left, 0px) * -1));
   text-transform: none;
+}
+
+.file-list-header-cell {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+}
+
+.file-list-header-cell--tag {
+  justify-content: center;
 }
 
 .file-list-header--loading {
@@ -2467,16 +2736,64 @@ watch(
 
 .file-list-heading {
   display: inline-flex;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   align-items: center;
   gap: 4px;
-  padding: 0;
+  padding: 0 6px 0 0;
   background: transparent;
   color: inherit;
   font: inherit;
   letter-spacing: inherit;
   text-align: left;
   text-transform: inherit;
+}
+
+.file-list-resize-handle {
+  position: absolute;
+  z-index: 2;
+  top: 5px;
+  right: -13px;
+  width: 18px;
+  height: calc(100% - 10px);
+  border-radius: 4px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.file-list-resize-handle::after {
+  position: absolute;
+  top: 3px;
+  right: 8px;
+  bottom: 3px;
+  width: 1px;
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+  content: "";
+  opacity: 0;
+  transition: opacity 100ms ease, background 100ms ease;
+}
+
+.file-list-header-cell:hover .file-list-resize-handle::after {
+  opacity: 0.55;
+}
+
+.file-list-resize-handle:hover::after,
+.file-list-resize-handle:focus-visible::after,
+.file-list-resize-handle--active::after {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.file-list-resize-handle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+:global(body.is-list-column-resizing),
+:global(body.is-list-column-resizing *) {
+  cursor: col-resize !important;
+  user-select: none;
 }
 
 .file-list-heading span {
@@ -2487,6 +2804,8 @@ watch(
 
 .file-list-heading--end {
   justify-content: flex-end;
+  padding-left: 3px;
+  padding-right: 8px;
   text-align: right;
 }
 
@@ -2520,6 +2839,7 @@ watch(
 
 .file-list-item {
   height: 29px;
+  min-width: var(--file-list-min-width, 530px);
   contain: layout paint style;
 }
 
@@ -2537,7 +2857,7 @@ watch(
   display: grid;
   width: 100%;
   height: 29px;
-  grid-template-columns: minmax(180px, 1fr) 46px 88px 126px;
+  grid-template-columns: var(--file-list-grid-columns, minmax(180px, 1fr) 46px 88px 126px);
   align-items: center;
   gap: 12px;
   padding: 2px 20px 2px 34px;
@@ -2557,6 +2877,7 @@ watch(
   justify-self: start;
   align-items: center;
   gap: 7px;
+  padding-right: 6px;
   font-size: 14px;
   font-weight: 650;
 }
@@ -2572,6 +2893,8 @@ watch(
 
 .file-parent-muted {
   overflow: hidden;
+  padding-right: 8px;
+  padding-left: 3px;
   color: var(--text-muted);
   font-size: 13px;
   font-weight: 560;
@@ -2597,7 +2920,8 @@ watch(
 
 .loading-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) 46px 88px 126px;
+  min-width: var(--file-list-min-width, 530px);
+  grid-template-columns: var(--file-list-grid-columns, minmax(180px, 1fr) 46px 88px 126px);
   align-items: center;
   gap: 12px;
   height: 29px;

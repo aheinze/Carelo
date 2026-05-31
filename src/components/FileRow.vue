@@ -249,7 +249,7 @@ onBeforeUnmount(stopThumbnailObserver);
 .file-row {
   display: grid;
   width: 100%;
-  grid-template-columns: minmax(180px, 1fr) 46px 88px 126px;
+  grid-template-columns: var(--file-list-grid-columns, minmax(180px, 1fr) 46px 88px 126px);
   align-items: center;
   gap: 12px;
   height: 29px;
@@ -292,6 +292,7 @@ onBeforeUnmount(stopThumbnailObserver);
   min-width: 0;
   align-items: center;
   gap: 7px;
+  padding-right: 6px;
   font-weight: 400;
 }
 
@@ -370,6 +371,8 @@ onBeforeUnmount(stopThumbnailObserver);
 
 .muted {
   overflow: hidden;
+  padding-right: 8px;
+  padding-left: 3px;
   color: var(--text-muted);
   font-size: 14px;
   font-weight: 400;

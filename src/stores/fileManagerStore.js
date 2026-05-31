@@ -77,6 +77,11 @@ const OPERATION_LOG_LIMIT = 120;
 const WORKSPACE_LIMIT = 32;
 const WORKSPACE_TAB_LIMIT = 64;
 const WORKSPACE_NAME_LIMIT = 80;
+const LIST_COLUMN_LIMITS = Object.freeze({
+  name: { min: 160, max: 900, default: 180 },
+  size: { min: 72, max: 180, default: 88 },
+  modifiedAt: { min: 104, max: 280, default: 126 },
+});
 const ACTIVE_QUEUE_STATUSES = new Set(['running', 'paused', 'cancelling']);
 const MISSING_PATH_ERROR_PATTERN = /(no such file or directory|not found|os error 2|cannot find the path)/i;
 const DEFAULT_APP_SETTINGS = Object.freeze({
@@ -94,6 +99,11 @@ const DEFAULT_APP_SETTINGS = Object.freeze({
   terminalStartsInActiveFolder: true,
   editorCommand: '',
   customTools: [],
+  listColumnWidths: {
+    name: LIST_COLUMN_LIMITS.name.default,
+    size: LIST_COLUMN_LIMITS.size.default,
+    modifiedAt: LIST_COLUMN_LIMITS.modifiedAt.default,
+  },
 });
 const NAME_COLLATOR = new Intl.Collator(undefined, {
   numeric: true,
@@ -175,6 +185,19 @@ function normalizeEditorCommand(command) {
   return String(command || '').slice(0, 600);
 }
 
+function normalizeListColumnWidths(widths = {}) {
+  const value = widths && typeof widths === 'object' ? widths : {};
+
+  return Object.fromEntries(
+    Object.entries(LIST_COLUMN_LIMITS).map(([key, limits]) => {
+      const width = Number(value[key]);
+      const normalizedWidth = Number.isFinite(width) ? width : limits.default;
+
+      return [key, Math.round(Math.max(limits.min, Math.min(limits.max, normalizedWidth)))];
+    }),
+  );
+}
+
 function normalizeAppSettings(settings = {}) {
   const value = settings && typeof settings === 'object' ? settings : {};
 
@@ -195,6 +218,7 @@ function normalizeAppSettings(settings = {}) {
     terminalStartsInActiveFolder: value.terminalStartsInActiveFolder !== false,
     editorCommand: normalizeEditorCommand(value.editorCommand),
     customTools: normalizeCustomTools(value.customTools),
+    listColumnWidths: normalizeListColumnWidths(value.listColumnWidths),
   };
 }
 
