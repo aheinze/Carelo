@@ -1350,8 +1350,6 @@ onBeforeUnmount(() => {
   place-items: start center;
   padding: max(72px, 10vh) 24px 24px;
   background: var(--overlay-bg);
-  backdrop-filter: blur(14px) saturate(1.1);
-  -webkit-backdrop-filter: blur(14px) saturate(1.1);
 }
 
 /* ── Panel ────────────────────────────────────────────────── */

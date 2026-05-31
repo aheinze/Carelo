@@ -163,6 +163,7 @@ const qualityFormatLabel = computed(() => (
   currentFormat.value.label
 ));
 const supportsQuality = computed(() => ['avif', 'jpeg', 'webp'].includes(targetFormat.value));
+const conversionHint = computed(() => `Save each image as ${currentFormat.value.label}. The originals are kept.`);
 const virtualPreviewRange = computed(() => {
   const rowHeight = Math.max(1, previewRowHeight.value);
   const count = previewRows.value.length;
@@ -429,6 +430,8 @@ onBeforeUnmount(() => {
 
           <div class="image-convert-layout">
             <section class="image-convert-controls" aria-label="Conversion options">
+              <p class="image-convert-hint">{{ conversionHint }}</p>
+
               <div class="image-convert-section">
                 <span class="image-convert-eyebrow">Format</span>
                 <div class="image-convert-format-grid" role="radiogroup" aria-label="Output format">
@@ -462,10 +465,11 @@ onBeforeUnmount(() => {
                   </span>
                   <input v-model.number="imageQuality" type="range" min="1" max="100" step="1">
                 </label>
+                <span class="image-convert-help">Higher keeps more detail; lower makes smaller files.</span>
               </div>
 
               <div class="image-convert-section">
-                <span class="image-convert-eyebrow">Destination</span>
+                <span class="image-convert-eyebrow">Save to</span>
                 <div class="image-convert-segments" role="group" aria-label="Output destination">
                   <button
                     type="button"
@@ -491,18 +495,18 @@ onBeforeUnmount(() => {
               </div>
 
               <div class="image-convert-section">
-                <span class="image-convert-eyebrow">Conflicts</span>
-                <div class="image-convert-conflicts" role="radiogroup" aria-label="Name conflicts">
-                  <label
+                <span class="image-convert-eyebrow">If a name already exists</span>
+                <div class="image-convert-segments" role="radiogroup" aria-label="Name conflicts">
+                  <button
                     v-for="policy in CONFLICT_POLICIES"
                     :key="policy.value"
-                    class="image-convert-conflict"
-                    :class="{ 'image-convert-conflict--active': conflictPolicy === policy.value }"
+                    type="button"
+                    :class="{ active: conflictPolicy === policy.value }"
+                    :aria-pressed="conflictPolicy === policy.value"
+                    @click="conflictPolicy = policy.value"
                   >
-                    <input v-model="conflictPolicy" type="radio" name="image-convert-conflict" :value="policy.value">
-                    <AppIcon :name="policy.icon" :size="14" :stroke-width="1.9" />
                     <span>{{ policy.label }}</span>
-                  </label>
+                  </button>
                 </div>
               </div>
             </section>
@@ -571,8 +575,6 @@ onBeforeUnmount(() => {
   place-items: center;
   padding: 28px;
   background: var(--overlay-bg);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
 }
 
 .image-convert-panel {
@@ -609,11 +611,12 @@ onBeforeUnmount(() => {
   display: inline-flex;
   width: 34px;
   height: 34px;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   border-radius: 9px;
-  background: color-mix(in srgb, var(--folder-icon) 14%, transparent);
-  color: var(--folder-icon);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
 }
 
 .image-convert-title-copy {
@@ -669,6 +672,21 @@ onBeforeUnmount(() => {
   margin-top: 18px;
 }
 
+.image-convert-hint {
+  margin: 0 0 16px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.image-convert-help {
+  display: block;
+  margin-top: 7px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .image-convert-eyebrow {
   display: block;
   margin-bottom: 8px;
@@ -685,8 +703,7 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-.image-convert-format,
-.image-convert-conflict {
+.image-convert-format {
   position: relative;
   display: flex;
   min-width: 0;
@@ -700,8 +717,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.image-convert-format input,
-.image-convert-conflict input {
+.image-convert-format input {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -710,14 +726,22 @@ onBeforeUnmount(() => {
   clip-path: inset(50%);
 }
 
-.image-convert-format--active,
-.image-convert-conflict--active {
+.image-convert-format--active {
   border-color: color-mix(in srgb, var(--accent) 52%, var(--control-border));
   background: color-mix(in srgb, var(--accent) 12%, var(--control-glass));
 }
 
+.image-convert-format:focus-within {
+  border-color: var(--accent-border);
+  box-shadow:
+    var(--accent-focus-ring),
+    var(--input-shadow);
+}
+
 .image-convert-format-icon {
-  color: var(--folder-icon);
+  display: flex;
+  flex: 0 0 auto;
+  color: var(--accent);
 }
 
 .image-convert-format-copy {
@@ -815,22 +839,6 @@ onBeforeUnmount(() => {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.image-convert-conflicts {
-  display: grid;
-  gap: 8px;
-}
-
-.image-convert-conflict {
-  padding: 8px 10px;
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.image-convert-conflict--active {
-  color: var(--text);
 }
 
 .image-convert-preview {

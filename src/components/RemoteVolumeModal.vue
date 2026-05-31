@@ -10,6 +10,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close']);
 const store = useFileManagerStore();
+
 const nameInput = ref(null);
 const primaryFieldInput = ref(null);
 const saving = ref(false);
@@ -1149,8 +1150,6 @@ async function submit() {
   place-items: center;
   padding: 28px;
   background: var(--overlay-bg);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
 }
 
 .remote-panel {

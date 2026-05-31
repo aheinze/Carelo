@@ -709,6 +709,7 @@ dependencies = [
  "ignore",
  "image",
  "libc",
+ "lopdf",
  "notify",
  "nucleo-matcher",
  "opendal",

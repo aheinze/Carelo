@@ -94,6 +94,7 @@ pub fn run() {
             commands::fs::archives::unarchive_items,
             commands::fs::image_tools::convert_images,
             commands::fs::pdf_tools::compress_pdfs,
+            commands::fs::pdf_tools::run_pdf_tool,
             commands::fs::state::cancel_file_operation,
             commands::fs::state::pause_file_operation,
             commands::fs::state::resume_file_operation,

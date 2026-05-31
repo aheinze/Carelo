@@ -653,8 +653,6 @@ onUnmounted(() => {
   place-items: center;
   padding: 28px;
   background: var(--overlay-bg);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
 }
 
 .archive-panel {

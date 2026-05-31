@@ -1,5 +1,5 @@
 <script setup>
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onErrorCaptured, onMounted, onUnmounted, ref } from 'vue';
 import AppIcon from './AppIcon.vue';
 import FileContextMenu from './FileContextMenu.vue';
 import FileList from './FileList.vue';
@@ -17,6 +17,7 @@ import {
   openWithDefaultApp,
   revealInFileManager,
   renameItem,
+  runPdfTool as runPdfToolCommand,
   runCustomTool,
   unarchiveItems,
 } from '../composables/useFileOperations';
@@ -46,7 +47,7 @@ const BatchRenameDialog = defineAsyncComponent(() => import('./BatchRenameDialog
 const CreateArchiveDialog = defineAsyncComponent(() => import('./CreateArchiveDialog.vue'));
 const ImageConvertDialog = defineAsyncComponent(() => import('./ImageConvertDialog.vue'));
 const OpenWithDialog = defineAsyncComponent(() => import('./OpenWithDialog.vue'));
-const PdfCompressDialog = defineAsyncComponent(() => import('./PdfCompressDialog.vue'));
+const PdfToolsDialog = defineAsyncComponent(() => import('./PdfToolsDialog.vue'));
 
 const FILE_DRAG_MIME = 'application/x-carelo-files';
 const TAB_DRAG_MIME = 'application/x-carelo-tab';
@@ -317,12 +318,14 @@ const imageConvertDialog = ref({
   existingNamesByDirectory: {},
   otherPaneDirectory: '',
 });
-const pdfCompressDialog = ref({
+const pdfToolsDialog = ref({
   visible: false,
   entries: [],
   existingNamesByDirectory: {},
   otherPaneDirectory: '',
+  initialTool: 'compress',
 });
+let pdfToolsDialogErrorHandled = false;
 const openWithDialog = ref({
   visible: false,
   entry: null,
@@ -342,6 +345,29 @@ const dragGhost = ref({
   label: '',
   kind: 'file',
   operation: 'auto',
+});
+
+onErrorCaptured((error, _instance, info) => {
+  if (!pdfToolsDialog.value.visible) {
+    return undefined;
+  }
+
+  console.error('PDF tools dialog failed to render.', error, info);
+
+  if (!pdfToolsDialogErrorHandled) {
+    pdfToolsDialogErrorHandled = true;
+    closePdfToolsDialog();
+    nextTick(() => {
+      pdfToolsDialogErrorHandled = false;
+      void dialog.alert({
+        title: 'PDF Tools Failed',
+        message: error?.message || 'The PDF tools dialog could not be opened.',
+        variant: 'warning',
+      });
+    });
+  }
+
+  return false;
 });
 let pointerDrag = null;
 let pointerDragCleanup = null;
@@ -405,11 +431,62 @@ const canConvertImagesContext = computed(() => {
   return operationEntries.length > 0
     && operationEntries.every((entry) => !isArchivePath(entry.path) && isConvertibleImageEntry(entry));
 });
-const canCompressPdfsContext = computed(() => {
+const pdfToolActionsContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
 
-  return operationEntries.length > 0
-    && operationEntries.every((entry) => !isArchivePath(entry.path) && isCompressiblePdfEntry(entry));
+  if (
+    operationEntries.length === 0 ||
+    !operationEntries.every((entry) => !isArchivePath(entry.path) && isCompressiblePdfEntry(entry))
+  ) {
+    return [];
+  }
+
+  return [
+    {
+      id: 'compressPdfs',
+      action: 'pdfTool:compress',
+      label: operationEntries.length === 1 ? 'Compress PDF...' : 'Compress PDFs...',
+      icon: 'archive',
+      keywords: ['pdf compress shrink optimize reduce size ghostscript'],
+    },
+    ...(operationEntries.length > 1
+      ? [{
+          id: 'mergePdfs',
+          action: 'pdfTool:merge',
+          label: 'Merge PDFs...',
+          icon: 'copy',
+          keywords: ['pdf merge combine join'],
+        }]
+      : []),
+    {
+      id: 'extractPdfPages',
+      action: 'pdfTool:extractPages',
+      label: 'Extract PDF Pages...',
+      icon: 'extract',
+      keywords: ['pdf extract pages range'],
+    },
+    {
+      id: 'splitPdfPages',
+      action: 'pdfTool:splitPages',
+      label: operationEntries.length === 1 ? 'Split PDF Pages...' : 'Split PDFs Into Pages...',
+      icon: 'columns',
+      keywords: ['pdf split pages separate'],
+    },
+    {
+      id: 'rotatePdfPages',
+      action: 'pdfTool:rotatePages',
+      label: operationEntries.length === 1 ? 'Rotate PDF Pages...' : 'Rotate PDF Pages...',
+      icon: 'refresh',
+      keywords: ['pdf rotate pages orientation'],
+    },
+    {
+      id: 'unlockPdf',
+      action: 'pdfTool:unlock',
+      label: operationEntries.length === 1 ? 'Unlock PDF...' : 'Unlock PDFs...',
+      icon: 'lock',
+      keywords: ['pdf unlock remove password decrypt'],
+    },
+  ];
 });
 const configuredCustomTools = computed(() =>
   (store.appSettings.customTools || []).filter((tool) => tool?.enabled !== false && tool?.name && tool?.command),
@@ -2356,13 +2433,22 @@ async function handleImageConvert(payload) {
   }
 }
 
-async function openPdfCompressDialog(entries = store.operationEntriesFor(props.paneId)) {
+async function openPdfToolsDialog(entries = store.operationEntriesFor(props.paneId), initialTool = 'extractPages') {
   const operationEntries = normalizedPdfCompressEntries(entries);
 
   if (operationEntries.length === 0) {
     await dialog.alert({
-      title: 'Compress PDFs Not Available',
+      title: 'PDF Tools Not Available',
       message: 'Select one or more PDF files.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  if (initialTool === 'merge' && operationEntries.length < 2) {
+    await dialog.alert({
+      title: 'Merge PDFs Not Available',
+      message: 'Select at least two PDF files.',
       variant: 'warning',
     });
     return;
@@ -2370,7 +2456,7 @@ async function openPdfCompressDialog(entries = store.operationEntriesFor(props.p
 
   if (operationEntries.some((entry) => isArchivePath(entry.path))) {
     await dialog.alert({
-      title: 'Compress PDFs Not Available',
+      title: 'PDF Tools Not Available',
       message: 'Archive contents are read-only while browsing.',
       variant: 'warning',
     });
@@ -2384,60 +2470,98 @@ async function openPdfCompressDialog(entries = store.operationEntriesFor(props.p
     ...(canUseOtherPane ? [otherPaneDirectory] : []),
   ];
 
-  pdfCompressDialog.value = {
+  pdfToolsDialog.value = {
     visible: true,
     entries: operationEntries,
     existingNamesByDirectory: await existingNamesByDirectory(directories),
     otherPaneDirectory: canUseOtherPane ? otherPaneDirectory : '',
+    initialTool,
   };
 }
 
-function closePdfCompressDialog() {
-  pdfCompressDialog.value = {
-    ...pdfCompressDialog.value,
+function closePdfToolsDialog() {
+  pdfToolsDialog.value = {
+    ...pdfToolsDialog.value,
     visible: false,
   };
 }
 
-async function runPdfCompress(paths, options, sourceEntries = []) {
+function pdfToolQueueLabel(tool, count) {
+  const plural = count === 1 ? 'PDF' : 'PDFs';
+
+  if (tool === 'compress') return count === 1 ? 'Compressing PDF' : `Compressing ${count} PDFs`;
+  if (tool === 'merge') return `Merging ${count} PDFs`;
+  if (tool === 'extractPages') return `Extracting pages from ${count} ${plural}`;
+  if (tool === 'splitPages') return `Splitting ${count} ${plural}`;
+  if (tool === 'rotatePages') return `Rotating ${count} ${plural}`;
+  if (tool === 'unlock') return `Unlocking ${count} ${plural}`;
+
+  return `Processing ${count} ${plural}`;
+}
+
+function pdfToolCompleteMessage(tool, completedCount, skippedCount) {
+  if (skippedCount > 0) {
+    return `${completedCount} completed, ${skippedCount} skipped`;
+  }
+
+  if (tool === 'compress') return completedCount === 1 ? '1 PDF compressed' : `${completedCount} PDFs compressed`;
+  if (tool === 'merge') return 'PDFs merged';
+  if (tool === 'extractPages') return completedCount === 1 ? 'Pages extracted' : `${completedCount} PDFs extracted`;
+  if (tool === 'splitPages') return completedCount === 1 ? '1 page PDF created' : `${completedCount} page PDFs created`;
+  if (tool === 'rotatePages') return completedCount === 1 ? '1 PDF rotated' : `${completedCount} PDFs rotated`;
+  if (tool === 'unlock') return completedCount === 1 ? '1 PDF unlocked' : `${completedCount} PDFs unlocked`;
+
+  return `${completedCount} PDFs processed`;
+}
+
+function pdfToolAlertTitle(tool) {
+  if (tool === 'compress') return 'PDF Compression Failed';
+  if (tool === 'merge') return 'Merge PDFs Failed';
+  if (tool === 'extractPages') return 'Extract PDF Pages Failed';
+  if (tool === 'splitPages') return 'Split PDF Pages Failed';
+  if (tool === 'rotatePages') return 'Rotate PDF Pages Failed';
+  if (tool === 'unlock') return 'Unlock PDF Failed';
+
+  return 'PDF Tool Failed';
+}
+
+async function runPdfTool(paths, options, sourceEntries = []) {
   const sourcePaths = Array.isArray(paths) ? paths.filter(Boolean) : [];
   const targetDirectory = options?.destinationDirectory || '';
-  const label = sourcePaths.length === 1
-    ? 'Compressing PDF'
-    : `Compressing ${sourcePaths.length} PDFs`;
-  const retryAction = () => runPdfCompress(sourcePaths, options, sourceEntries);
+  const tool = options?.tool || 'extractPages';
+  const retryAction = () => runPdfTool(sourcePaths, options, sourceEntries);
   const jobId = store.startQueueJob({
-    operation: 'pdf-compress',
-    label,
+    operation: `pdf-${tool}`,
+    label: pdfToolQueueLabel(tool, sourcePaths.length),
     remotePaths: [targetDirectory, ...sourcePaths],
     retryAction,
   });
 
   try {
-    const results = await compressPdfs(sourcePaths, options, jobId);
-    const compressed = results.filter((result) => result.status === 'compressed');
+    const results = tool === 'compress'
+      ? await compressPdfs(sourcePaths, {
+          profile: options?.profile || 'balanced',
+          conflict: options?.conflict || 'keepBoth',
+          keepOnlySmaller: Boolean(options?.keepOnlySmaller),
+          destinationDirectory: targetDirectory || null,
+        }, jobId)
+      : await runPdfToolCommand(sourcePaths, options, jobId);
+    const completed = results.filter((result) => result.status !== 'skipped');
     const skipped = results.filter((result) => result.status === 'skipped');
     const refreshPaths = [
-      ...compressed.map((result) => result.outputPath ? store.parentDirectoryFor(result.outputPath) : ''),
+      ...completed.map((result) => result.outputPath ? store.parentDirectoryFor(result.outputPath) : ''),
       ...(targetDirectory ? [targetDirectory] : parentDirectoriesForEntries(sourceEntries)),
     ];
 
     await refreshDirectories(refreshPaths);
-    store.completeQueueJob(
-      jobId,
-      skipped.length > 0
-        ? `${compressed.length} compressed, ${skipped.length} skipped`
-        : compressed.length === 1
-          ? '1 PDF compressed'
-          : `${compressed.length} PDFs compressed`,
-    );
+    store.completeQueueJob(jobId, pdfToolCompleteMessage(tool, completed.length, skipped.length));
   } catch (error) {
     if (error?.code === 'operation_cancelled') {
       store.cancelQueueJobDone(jobId);
       return;
     }
 
-    store.failQueueJob(jobId, error?.message || 'PDF compression failed.', {
+    store.failQueueJob(jobId, error?.message || 'PDF tool failed.', {
       failedItems: sourcePaths.map((path) => ({
         path,
         message: error?.message || 'Failed',
@@ -2447,18 +2571,19 @@ async function runPdfCompress(paths, options, sourceEntries = []) {
   }
 }
 
-async function handlePdfCompress(payload) {
-  const sourceEntries = pdfCompressDialog.value.entries;
+async function handlePdfTool(payload) {
+  const sourceEntries = pdfToolsDialog.value.entries;
+  const tool = payload?.options?.tool || pdfToolsDialog.value.initialTool;
 
-  closePdfCompressDialog();
+  closePdfToolsDialog();
 
   try {
-    await runPdfCompress(payload?.paths || [], payload?.options || {}, sourceEntries);
+    await runPdfTool(payload?.paths || [], payload?.options || {}, sourceEntries);
   } catch (error) {
     console.error(error);
     await dialog.alert({
-      title: 'PDF Compression Failed',
-      message: error?.message || 'The selected PDFs could not be compressed.',
+      title: pdfToolAlertTitle(tool),
+      message: error?.message || 'The selected PDFs could not be processed.',
       variant: 'warning',
     });
   }
@@ -2723,7 +2848,12 @@ async function handleContextAction(action) {
     }
 
     if (action === 'compressPdfs') {
-      await openPdfCompressDialog(contextOperationEntries(menu));
+      await openPdfToolsDialog(contextOperationEntries(menu), 'compress');
+      return;
+    }
+
+    if (typeof action === 'string' && action.startsWith('pdfTool:')) {
+      await openPdfToolsDialog(contextOperationEntries(menu), action.slice('pdfTool:'.length));
       return;
     }
 
@@ -3045,7 +3175,7 @@ async function handleContextAction(action) {
       :can-custom-tools="canRunCustomToolContext"
       :custom-tools="availableCustomTools"
       :can-convert-images="canConvertImagesContext"
-      :can-compress-pdfs="canCompressPdfsContext"
+      :pdf-tool-actions="pdfToolActionsContext"
       :can-transfer="canTransferToOtherPane"
       :can-modify="canModifyContext"
       :can-rename="canRenameContext"
@@ -3097,14 +3227,15 @@ async function handleContextAction(action) {
       @convert="handleImageConvert"
     />
 
-    <PdfCompressDialog
-      v-if="pdfCompressDialog.visible"
-      :visible="pdfCompressDialog.visible"
-      :entries="pdfCompressDialog.entries"
-      :existing-names-by-directory="pdfCompressDialog.existingNamesByDirectory"
-      :other-pane-directory="pdfCompressDialog.otherPaneDirectory"
-      @cancel="closePdfCompressDialog"
-      @compress="handlePdfCompress"
+    <PdfToolsDialog
+      v-if="pdfToolsDialog.visible"
+      :visible="pdfToolsDialog.visible"
+      :entries="pdfToolsDialog.entries"
+      :existing-names-by-directory="pdfToolsDialog.existingNamesByDirectory"
+      :other-pane-directory="pdfToolsDialog.otherPaneDirectory"
+      :initial-tool="pdfToolsDialog.initialTool"
+      @cancel="closePdfToolsDialog"
+      @run="handlePdfTool"
     />
 
     <OpenWithDialog

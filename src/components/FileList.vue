@@ -20,6 +20,8 @@ const GRID_MIN_COLUMN_WIDTH = 206;
 const GRID_COLUMN_GAP = 34;
 const GRID_ROW_STRIDE = 214;
 const GRID_OVERSCAN_ROWS = 3;
+const CUSTOM_SCROLLBAR_TRACK_PADDING = 6;
+const CUSTOM_SCROLLBAR_MIN_THUMB_SIZE = 40;
 const FILE_DRAG_MIME = 'application/x-carelo-files';
 const HANDLED_FILE_DRAG_EVENT = '__careloHandledFileDragEvent';
 
@@ -142,13 +144,21 @@ const currentDirectoryDropPath = ref('');
 const localDraggedPaths = ref([]);
 const listScrollTop = ref(0);
 const listViewportHeight = ref(0);
+const listScrollHeight = ref(0);
 const gridScrollTop = ref(0);
 const gridViewportHeight = ref(0);
 const gridViewportWidth = ref(0);
+const gridScrollHeight = ref(0);
 const columnScrollTop = ref(0);
+const columnScrollLeft = ref(0);
 const columnViewportHeight = ref(0);
+const columnViewportWidth = ref(0);
+const columnScrollHeight = ref(0);
+const columnScrollWidth = ref(0);
+const customScrollbarDraggingAxis = ref('');
 let columnLoadVersion = 0;
 let scrollerResizeObserver = null;
+let customScrollbarDrag = null;
 
 const activeSearchQuery = computed(() => props.searchQuery.trim().toLowerCase());
 const isSearchFiltering = computed(() => activeSearchQuery.value.length > 0);
@@ -381,6 +391,75 @@ const virtualColumns = computed(() =>
   }),
 );
 
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function scrollbarGeometry(scrollOffset, viewportSize, scrollSize, trackSize = viewportSize) {
+  const viewport = Math.max(0, Number(viewportSize) || 0);
+  const scrollExtent = Math.max(viewport, Number(scrollSize) || 0);
+  const maxScroll = Math.max(0, scrollExtent - viewport);
+
+  if (viewport <= 0 || maxScroll <= 1) {
+    return null;
+  }
+
+  const safeTrackSize = Math.max(0, Number(trackSize) || viewport);
+  const usableTrackSize = Math.max(0, safeTrackSize - (CUSTOM_SCROLLBAR_TRACK_PADDING * 2));
+  const thumbSize = clampNumber(
+    (viewport / scrollExtent) * usableTrackSize,
+    Math.min(CUSTOM_SCROLLBAR_MIN_THUMB_SIZE, usableTrackSize),
+    usableTrackSize,
+  );
+  const maxThumbOffset = Math.max(0, usableTrackSize - thumbSize);
+  const scrollRatio = maxScroll > 0 ? clampNumber(scrollOffset / maxScroll, 0, 1) : 0;
+  const thumbOffset = CUSTOM_SCROLLBAR_TRACK_PADDING + (maxThumbOffset * scrollRatio);
+
+  return {
+    maxScroll,
+    maxThumbOffset,
+    thumbOffset,
+    thumbSize,
+  };
+}
+
+function customScrollbarStyle(scrollOffset, viewportSize, scrollSize) {
+  const geometry = scrollbarGeometry(scrollOffset, viewportSize, scrollSize);
+
+  if (!geometry) {
+    return null;
+  }
+
+  return {
+    '--file-scrollbar-thumb-offset': `${geometry.thumbOffset}px`,
+    '--file-scrollbar-thumb-size': `${geometry.thumbSize}px`,
+  };
+}
+
+const verticalScrollbarStyle = computed(() => {
+  if (props.loading && !props.loaded) {
+    return null;
+  }
+
+  if (props.viewMode === 'grid') {
+    return customScrollbarStyle(gridScrollTop.value, gridViewportHeight.value, gridScrollHeight.value);
+  }
+
+  if (props.viewMode === 'columns') {
+    return customScrollbarStyle(columnScrollTop.value, columnViewportHeight.value, columnScrollHeight.value);
+  }
+
+  return customScrollbarStyle(listScrollTop.value, listViewportHeight.value, listScrollHeight.value);
+});
+
+const horizontalScrollbarStyle = computed(() => {
+  if ((props.loading && !props.loaded) || props.viewMode !== 'columns') {
+    return null;
+  }
+
+  return customScrollbarStyle(columnScrollLeft.value, columnViewportWidth.value, columnScrollWidth.value);
+});
+
 function activeScroller() {
   if (props.viewMode === 'grid') {
     return gridScroller.value;
@@ -402,6 +481,7 @@ function updateListViewport() {
 
   listScrollTop.value = scroller.scrollTop;
   listViewportHeight.value = scroller.clientHeight;
+  listScrollHeight.value = scroller.scrollHeight;
 }
 
 function updateGridViewport() {
@@ -414,6 +494,7 @@ function updateGridViewport() {
   gridScrollTop.value = scroller.scrollTop;
   gridViewportHeight.value = scroller.clientHeight;
   gridViewportWidth.value = scroller.clientWidth;
+  gridScrollHeight.value = scroller.scrollHeight;
 }
 
 function updateColumnViewport() {
@@ -424,7 +505,11 @@ function updateColumnViewport() {
   }
 
   columnScrollTop.value = scroller.scrollTop;
+  columnScrollLeft.value = scroller.scrollLeft;
   columnViewportHeight.value = scroller.clientHeight;
+  columnViewportWidth.value = scroller.clientWidth;
+  columnScrollHeight.value = scroller.scrollHeight;
+  columnScrollWidth.value = scroller.scrollWidth;
 }
 
 function updateAllViewports() {
@@ -443,6 +528,117 @@ function handleGridScroll() {
 
 function handleColumnScroll() {
   updateColumnViewport();
+}
+
+function currentScrollbarGeometry(axis, trackSize = null) {
+  const scroller = activeScroller();
+
+  if (!scroller) {
+    return null;
+  }
+
+  const isVertical = axis === 'vertical';
+  return {
+    scroller,
+    geometry: scrollbarGeometry(
+      isVertical ? scroller.scrollTop : scroller.scrollLeft,
+      isVertical ? scroller.clientHeight : scroller.clientWidth,
+      isVertical ? scroller.scrollHeight : scroller.scrollWidth,
+      trackSize ?? (isVertical ? scroller.clientHeight : scroller.clientWidth),
+    ),
+  };
+}
+
+function setScrollbarScrollPosition(axis, scroller, pointerPosition, pointerOffset, geometry) {
+  if (!geometry || geometry.maxScroll <= 0) {
+    return;
+  }
+
+  const thumbOffset = clampNumber(
+    pointerPosition - pointerOffset,
+    CUSTOM_SCROLLBAR_TRACK_PADDING,
+    CUSTOM_SCROLLBAR_TRACK_PADDING + geometry.maxThumbOffset,
+  );
+  const ratio = geometry.maxThumbOffset > 0
+    ? (thumbOffset - CUSTOM_SCROLLBAR_TRACK_PADDING) / geometry.maxThumbOffset
+    : 0;
+
+  if (axis === 'vertical') {
+    scroller.scrollTop = ratio * geometry.maxScroll;
+    updateAllViewports();
+    return;
+  }
+
+  scroller.scrollLeft = ratio * geometry.maxScroll;
+  updateAllViewports();
+}
+
+function handleCustomScrollbarPointerMove(event) {
+  if (!customScrollbarDrag) {
+    return;
+  }
+
+  event.preventDefault();
+  const { axis, pointerOffset, scroller, track } = customScrollbarDrag;
+  const rect = track.getBoundingClientRect();
+  const pointerPosition = axis === 'vertical'
+    ? event.clientY - rect.top
+    : event.clientX - rect.left;
+  const trackSize = axis === 'vertical' ? rect.height : rect.width;
+  const next = currentScrollbarGeometry(axis, trackSize);
+
+  if (!next || next.scroller !== scroller) {
+    return;
+  }
+
+  setScrollbarScrollPosition(axis, scroller, pointerPosition, pointerOffset, next.geometry);
+}
+
+function stopCustomScrollbarDrag() {
+  if (!customScrollbarDrag) {
+    return;
+  }
+
+  customScrollbarDrag = null;
+  customScrollbarDraggingAxis.value = '';
+  window.removeEventListener('pointermove', handleCustomScrollbarPointerMove);
+  window.removeEventListener('pointerup', stopCustomScrollbarDrag);
+  window.removeEventListener('pointercancel', stopCustomScrollbarDrag);
+}
+
+function handleCustomScrollbarPointerDown(event, axis) {
+  const track = event.currentTarget;
+  const rect = track.getBoundingClientRect();
+  const trackSize = axis === 'vertical' ? rect.height : rect.width;
+  const current = currentScrollbarGeometry(axis, trackSize);
+
+  if (!current?.geometry) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  const pointerPosition = axis === 'vertical'
+    ? event.clientY - rect.top
+    : event.clientX - rect.left;
+  const thumbStart = current.geometry.thumbOffset;
+  const thumbEnd = thumbStart + current.geometry.thumbSize;
+  const pointerOffset = pointerPosition >= thumbStart && pointerPosition <= thumbEnd
+    ? pointerPosition - thumbStart
+    : current.geometry.thumbSize / 2;
+
+  setScrollbarScrollPosition(axis, current.scroller, pointerPosition, pointerOffset, current.geometry);
+  customScrollbarDrag = {
+    axis,
+    pointerOffset,
+    scroller: current.scroller,
+    track,
+  };
+  customScrollbarDraggingAxis.value = axis;
+  window.addEventListener('pointermove', handleCustomScrollbarPointerMove, { passive: false });
+  window.addEventListener('pointerup', stopCustomScrollbarDrag);
+  window.addEventListener('pointercancel', stopCustomScrollbarDrag);
 }
 
 function observeScrollers() {
@@ -1619,6 +1815,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  stopCustomScrollbarDrag();
   scrollerResizeObserver?.disconnect();
   scrollerResizeObserver = null;
   if (typeof window !== 'undefined') {
@@ -1627,16 +1824,25 @@ onBeforeUnmount(() => {
 });
 
 watch(() => props.directoryKey, () => {
+  stopCustomScrollbarDrag();
   resetColumnTrail();
   resetScroll();
 });
 watch(() => props.viewMode, () => {
+  stopCustomScrollbarDrag();
   observeScrollers();
   resetScroll();
 });
 watch(
   () => [props.loaded, props.loading, props.entries.length, parentDirectory.value],
   observeScrollers,
+  { flush: 'post' },
+);
+watch(
+  () => columnTrail.value
+    .map((column) => `${column.path}:${column.loading}:${column.entries?.length ?? 0}`)
+    .join('\u0000'),
+  () => nextTick(updateAllViewports),
   { flush: 'post' },
 );
 watch(
@@ -1703,6 +1909,7 @@ watch(
   <div
     class="file-list-root"
     :class="{ 'file-list-root--drop-target': currentDirectoryDropActive && viewMode !== 'columns' }"
+    :data-view-mode="viewMode"
     :data-drop-directory-path="activeColumnDirectory()"
     :aria-busy="loading"
     @dragstart.capture="handleDelegatedDragStart"
@@ -1773,6 +1980,7 @@ watch(
         </div>
       </div>
     </template>
+
     <div
       v-else-if="entries.length === 0 && !parentDirectory && viewMode !== 'columns'"
       class="file-list-empty-wrap"
@@ -2108,13 +2316,37 @@ watch(
         ></div>
       </div>
     </div>
+
+    <div
+      v-if="verticalScrollbarStyle"
+      class="file-custom-scrollbar file-custom-scrollbar--vertical"
+      :class="{ 'file-custom-scrollbar--dragging': customScrollbarDraggingAxis === 'vertical' }"
+      :style="verticalScrollbarStyle"
+      aria-hidden="true"
+      @pointerdown="handleCustomScrollbarPointerDown($event, 'vertical')"
+    >
+      <span class="file-custom-scrollbar-thumb"></span>
+    </div>
+
+    <div
+      v-if="horizontalScrollbarStyle"
+      class="file-custom-scrollbar file-custom-scrollbar--horizontal"
+      :class="{ 'file-custom-scrollbar--dragging': customScrollbarDraggingAxis === 'horizontal' }"
+      :style="horizontalScrollbarStyle"
+      aria-hidden="true"
+      @pointerdown="handleCustomScrollbarPointerDown($event, 'horizontal')"
+    >
+      <span class="file-custom-scrollbar-thumb"></span>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .file-list-root {
+  position: relative;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
   outline: 1px solid transparent;
   outline-offset: -1px;
   transition: outline-color 100ms ease, background 100ms ease;
@@ -2123,6 +2355,74 @@ watch(
 .file-list-root--drop-target {
   background: rgb(var(--accent-rgb) / 0.055);
   outline-color: rgb(var(--accent-rgb) / 0.42);
+}
+
+.file-custom-scrollbar {
+  position: absolute;
+  z-index: 5;
+  border-radius: 999px;
+  opacity: 0;
+  pointer-events: auto;
+  touch-action: none;
+  transition: opacity 120ms ease;
+}
+
+.file-list-root:hover .file-custom-scrollbar,
+.file-list-root:focus-within .file-custom-scrollbar,
+.file-custom-scrollbar--dragging {
+  opacity: 1;
+}
+
+.file-custom-scrollbar--vertical {
+  top: 0;
+  right: 2px;
+  bottom: 0;
+  width: 10px;
+}
+
+.file-list-root[data-view-mode="list"] .file-custom-scrollbar--vertical {
+  top: 35px;
+}
+
+.file-custom-scrollbar--horizontal {
+  right: 0;
+  bottom: 2px;
+  left: 0;
+  height: 10px;
+}
+
+.file-custom-scrollbar-thumb {
+  position: absolute;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      color-mix(in srgb, var(--text) 32%, transparent),
+      color-mix(in srgb, var(--text) 22%, transparent)
+    );
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.04);
+}
+
+.file-custom-scrollbar:hover .file-custom-scrollbar-thumb,
+.file-custom-scrollbar--dragging .file-custom-scrollbar-thumb {
+  background:
+    linear-gradient(
+      color-mix(in srgb, var(--text) 46%, transparent),
+      color-mix(in srgb, var(--text) 30%, transparent)
+    );
+}
+
+.file-custom-scrollbar--vertical .file-custom-scrollbar-thumb {
+  top: var(--file-scrollbar-thumb-offset);
+  right: 2px;
+  width: 5px;
+  height: var(--file-scrollbar-thumb-size);
+}
+
+.file-custom-scrollbar--horizontal .file-custom-scrollbar-thumb {
+  bottom: 2px;
+  left: var(--file-scrollbar-thumb-offset);
+  width: var(--file-scrollbar-thumb-size);
+  height: 5px;
 }
 
 .file-loading-state {
@@ -2201,7 +2501,16 @@ watch(
   overflow: auto;
   padding: 6px 0 18px;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: auto;
+  scrollbar-width: none;
+}
+
+.file-list::-webkit-scrollbar,
+.file-grid-scroller::-webkit-scrollbar,
+.file-column-scroller::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .file-list--loading {
@@ -2359,7 +2668,8 @@ watch(
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: auto;
+  scrollbar-width: none;
   contain: layout paint style;
 }
 
@@ -2478,7 +2788,8 @@ watch(
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  scrollbar-gutter: auto;
+  scrollbar-width: none;
   contain: layout paint style;
 }
 

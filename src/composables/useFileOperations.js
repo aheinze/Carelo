@@ -448,6 +448,10 @@ export async function compressPdfs(paths, options = {}, jobId = null) {
   return invokeCommand('compress_pdfs', { paths, options, jobId });
 }
 
+export async function runPdfTool(paths, options = {}, jobId = null) {
+  return invokeCommand('run_pdf_tool', { paths, options, jobId });
+}
+
 export async function measureItemsSize(paths, jobId = null) {
   return invokeCommand('measure_items_size', { paths, jobId });
 }
@@ -517,6 +521,7 @@ export function useFileOperations() {
     createFolder,
     convertImages,
     compressPdfs,
+    runPdfTool,
     deleteItems,
     editFile,
     getFileMetadata,

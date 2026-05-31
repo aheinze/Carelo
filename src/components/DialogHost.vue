@@ -12,6 +12,7 @@ let promptFocusFrame = 0;
 let promptFocusTimers = [];
 
 const activeDialog = computed(() => dialog.activeDialog.value);
+
 const iconName = computed(() => {
   if (activeDialog.value?.icon) {
     return activeDialog.value.icon;
@@ -318,8 +319,6 @@ function handleKeydown(event) {
   place-items: center;
   padding: 28px;
   background: var(--overlay-bg);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
 }
 
 /* ── Panel ────────────────────────────────────────────────── */

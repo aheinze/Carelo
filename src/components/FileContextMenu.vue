@@ -67,9 +67,9 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
-  canCompressPdfs: {
-    type: Boolean,
-    default: false,
+  pdfToolActions: {
+    type: Array,
+    default: () => [],
   },
   operationCount: {
     type: Number,
@@ -174,19 +174,21 @@ const actionGroups = computed(() => {
     return groups;
   }
 
-  if (props.canCompressPdfs || props.canConvertImages || visibleCustomTools.value.length > 0) {
+  if (
+    props.pdfToolActions.length > 0 ||
+    props.canConvertImages ||
+    visibleCustomTools.value.length > 0
+  ) {
     groups.push({
       id: 'tools',
       items: [
-        ...(props.canCompressPdfs
-          ? [{
-              id: 'compressPdfs',
-              action: 'compressPdfs',
-              label: props.operationCount === 1 ? 'Compress PDF...' : 'Compress PDFs...',
-              icon: 'archive',
-              keywords: ['pdf compress shrink optimize reduce size ghostscript'],
-            }]
-          : []),
+        ...props.pdfToolActions.map((action) => ({
+          id: action.id,
+          action: action.action,
+          label: action.label,
+          icon: action.icon || 'file-text',
+          keywords: action.keywords || [],
+        })),
         ...(props.canConvertImages
           ? [{
               id: 'convertImages',
@@ -196,17 +198,19 @@ const actionGroups = computed(() => {
               keywords: ['image convert format avif png jpeg jpg webp tiff bmp ico'],
             }]
           : []),
-        {
-          id: 'tools',
-          type: 'submenu',
-          label: 'Tools',
-          icon: 'tool',
-          disabled: !props.canCustomTools,
-          keywords: [
-            'custom commands external tools',
-            ...visibleCustomTools.value.flatMap((tool) => [tool.name, tool.command]),
-          ],
-        },
+        ...(visibleCustomTools.value.length > 0
+          ? [{
+              id: 'tools',
+              type: 'submenu',
+              label: 'Tools',
+              icon: 'tool',
+              disabled: !props.canCustomTools,
+              keywords: [
+                'custom commands external tools',
+                ...visibleCustomTools.value.flatMap((tool) => [tool.name, tool.command]),
+              ],
+            }]
+          : []),
       ],
     });
   }

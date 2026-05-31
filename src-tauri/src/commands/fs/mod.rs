@@ -182,7 +182,7 @@ pub(crate) mod watcher;
 pub use archives::{archive_items, unarchive_items};
 pub use git::get_git_file_info;
 pub use image_tools::convert_images;
-pub use pdf_tools::compress_pdfs;
+pub use pdf_tools::{compress_pdfs, run_pdf_tool};
 pub use preview::{
     compare_file_checksums, create_media_stream_url, read_media_preview, read_text_preview,
     MediaStreamState,

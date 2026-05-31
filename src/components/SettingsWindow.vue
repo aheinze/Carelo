@@ -10,6 +10,7 @@ import tauriConfig from '../../src-tauri/tauri.conf.json';
 import appIconUrl from '../../src-tauri/icons/128x128.png';
 
 const store = useFileManagerStore();
+
 const searchQuery = ref('');
 const activeSectionId = ref('appearance');
 const editorTemplatesVisible = ref(false);
@@ -1124,8 +1125,6 @@ onUnmounted(() => {
   place-items: center;
   padding: 28px;
   background: rgb(0 0 0 / 0.44);
-  backdrop-filter: blur(18px) saturate(1.05);
-  -webkit-backdrop-filter: blur(18px) saturate(1.05);
 }
 
 .settings-window {

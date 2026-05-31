@@ -306,8 +306,6 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   place-items: center;
   padding: 32px;
   background: var(--overlay-bg);
-  backdrop-filter: blur(22px) saturate(1.1);
-  -webkit-backdrop-filter: blur(22px) saturate(1.1);
 }
 
 /* ── Panel ────────────────────────────────────────────────── */
