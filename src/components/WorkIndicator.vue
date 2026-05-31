@@ -435,8 +435,8 @@ onUnmounted(() => {
 }
 
 .work-button.active {
-  color: var(--accent);
-  background: rgb(var(--accent-rgb) / 0.13);
+  color: color-mix(in srgb, var(--accent) 82%, var(--icon));
+  background: rgb(var(--accent-rgb) / 0.08);
 }
 
 .work-ring {
@@ -444,10 +444,11 @@ onUnmounted(() => {
   z-index: 1;
   display: grid;
   place-items: center;
+  opacity: 0.9;
 }
 
 .work-ring--active {
-  animation: work-spin 1.2s linear infinite;
+  animation: work-active-pulse 2.8s cubic-bezier(0.45, 0, 0.2, 1) infinite;
 }
 
 .work-badge {
@@ -471,8 +472,8 @@ onUnmounted(() => {
   right: 0;
   bottom: 0;
   left: 0;
-  height: 2px;
-  background: var(--accent);
+  height: 1px;
+  background: color-mix(in srgb, var(--accent) 72%, transparent);
   transform-origin: left center;
 }
 
@@ -691,9 +692,14 @@ onUnmounted(() => {
   font-weight: 560;
 }
 
-@keyframes work-spin {
-  to {
-    transform: rotate(360deg);
+@keyframes work-active-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+
+  50% {
+    opacity: 1;
   }
 }
 
@@ -704,6 +710,13 @@ onUnmounted(() => {
 
   100% {
     transform: translateX(270%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-ring--active,
+  .work-job-progress--indeterminate span {
+    animation: none;
   }
 }
 </style>
