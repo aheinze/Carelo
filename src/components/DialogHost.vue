@@ -326,7 +326,8 @@ function handleKeydown(event) {
   display: block;
   width: min(380px, calc(100vw - 48px));
   max-height: calc(100vh - 56px);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid var(--control-border);
   border-radius: 11px;
   padding: 16px;
@@ -369,6 +370,7 @@ function handleKeydown(event) {
 
 .dialog-header {
   display: grid;
+  min-width: 0;
   gap: 6px;
 }
 
@@ -380,27 +382,33 @@ function handleKeydown(event) {
 }
 
 .dialog-header h2 {
+  min-width: 0;
   margin: 0;
   color: var(--text);
   font-size: 14.5px;
   font-weight: 700;
   letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
 }
 
 .dialog-header p {
+  min-width: 0;
   margin: 0;
   color: var(--text-muted);
   font-size: 13px;
   font-weight: 480;
   line-height: 1.45;
+  overflow-wrap: anywhere;
   white-space: pre-line;
 }
 
 .dialog-header small {
+  min-width: 0;
   color: var(--text-faint);
   font-size: 11.5px;
   font-weight: 500;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 /* ── Prompt input ─────────────────────────────────────────── */

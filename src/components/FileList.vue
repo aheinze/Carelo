@@ -2765,24 +2765,27 @@ watch(
 .file-list-resize-handle::after {
   position: absolute;
   top: 3px;
-  right: 8px;
+  right: 7px;
   bottom: 3px;
-  width: 1px;
-  background: color-mix(in srgb, var(--text) 18%, transparent);
+  width: 3px;
+  background:
+    radial-gradient(circle at center, currentColor 0 1px, transparent 1.2px)
+    center top / 3px 5px repeat-y;
+  color: color-mix(in srgb, var(--text) 22%, transparent);
   content: "";
   opacity: 0;
-  transition: opacity 100ms ease, background 100ms ease;
+  transition: opacity 100ms ease, color 100ms ease;
 }
 
 .file-list-header-cell:hover .file-list-resize-handle::after {
-  opacity: 0.55;
+  opacity: 0.5;
 }
 
 .file-list-resize-handle:hover::after,
 .file-list-resize-handle:focus-visible::after,
 .file-list-resize-handle--active::after {
-  background: var(--accent);
-  opacity: 1;
+  color: var(--accent);
+  opacity: 0.85;
 }
 
 .file-list-resize-handle:focus-visible {
