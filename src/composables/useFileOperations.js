@@ -432,6 +432,10 @@ export async function restoreFromTrash(paths) {
   return invokeCommand('restore_from_trash', { paths });
 }
 
+export async function listFileTags() {
+  return invokeCommand('list_file_tags');
+}
+
 export async function setFileTags(paths, color) {
   return invokeCommand('set_file_tags', { paths, color: color || null });
 }

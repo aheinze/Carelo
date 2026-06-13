@@ -19,7 +19,6 @@ import {
   renameItem,
   runPdfTool as runPdfToolCommand,
   runCustomTool,
-  setFileTags,
   unarchiveItems,
 } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
@@ -73,6 +72,7 @@ const checksumDialog = useChecksumDialog();
 const transfers = useFileTransferGuards();
 const pane = computed(() => store.panes[props.paneId]);
 const activeTab = computed(() => store.activeTabFor(props.paneId));
+const tabTagColor = (tab) => store.tagColorForPath(tab?.currentPath);
 const isActive = computed(() => store.activePaneId === props.paneId);
 const entries = computed(() => store.visibleEntriesFor(props.paneId));
 const rawEntryCount = computed(() => activeTab.value?.entries?.length || 0);
@@ -2950,7 +2950,7 @@ async function handleContextAction(action) {
         return;
       }
 
-      await setFileTags(paths, color);
+      await store.applyFileTags(paths, color);
       await refreshDirectories(parentDirectoriesForEntries(taggable));
       return;
     }
@@ -3118,7 +3118,9 @@ async function handleContextAction(action) {
           'pane-tab--active': tab.id === pane.activeTabId,
           'pane-tab--dragging': draggedTabId === tab.id,
           'pane-tab--drop-before': tabDropIndex === tabIndex,
+          'pane-tab--tagged': Boolean(tabTagColor(tab)),
         }"
+        :style="tabTagColor(tab) ? { '--tab-tag': tabTagColor(tab) } : null"
         draggable="true"
         @dragstart.stop="handleTabDragStart(tab, $event)"
         @dragend.stop="handleTabDragEnd"
@@ -3191,9 +3193,16 @@ async function handleContextAction(action) {
             :key="`${crumb.path}-${index}`"
             type="button"
             :title="crumb.path"
+            :class="{ 'breadcrumb--tagged': Boolean(store.tagColorForPath(crumb.path)) }"
+            :style="store.tagColorForPath(crumb.path) ? { '--tag-color': store.tagColorForPath(crumb.path) } : null"
             @click.stop="navigateToBreadcrumb(crumb.path)"
             @keydown.stop
           >
+            <span
+              v-if="store.tagColorForPath(crumb.path)"
+              class="breadcrumb-tag"
+              aria-hidden="true"
+            ></span>
             {{ crumb.label }}
           </button>
         </template>
@@ -3627,6 +3636,25 @@ async function handleContextAction(action) {
   }
 }
 
+/* Tinted tabs for folders that carry a color tag. */
+.pane-tab--tagged {
+  background: color-mix(in srgb, var(--tab-tag) 18%, transparent);
+  color: var(--text-muted);
+}
+
+.pane-tab--tagged:hover {
+  background: color-mix(in srgb, var(--tab-tag) 26%, transparent);
+}
+
+.pane-tab--tagged.pane-tab--active {
+  background: color-mix(in srgb, var(--tab-tag) 34%, transparent);
+  color: var(--text);
+}
+
+.pane-tab--tagged .tab-icon {
+  color: var(--tab-tag);
+}
+
 
 .tab-label {
   overflow: hidden;
@@ -3795,6 +3823,16 @@ async function handleContextAction(action) {
 .breadcrumbs button:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -1px;
+}
+
+.breadcrumb-tag {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--tag-color);
+  box-shadow: inset 0 0 0 0.5px rgb(255 255 255 / 0.4);
 }
 
 .breadcrumbs button + button::before {

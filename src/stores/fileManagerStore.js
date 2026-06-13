@@ -16,6 +16,7 @@ import {
   listDirectory,
   listFavoriteGroups as listStoredFavoriteGroups,
   listFavorites as listStoredFavorites,
+  listFileTags,
   listVolumes,
   mountVolume,
   moveFavorite as moveStoredFavorite,
@@ -29,6 +30,7 @@ import {
   resumeFileOperation,
   saveAppSettings as saveStoredAppSettings,
   setActiveRemoteVolumes,
+  setFileTags,
   unlockVolume,
   watchActiveDirectories,
 } from '../composables/useFileOperations';
@@ -1136,6 +1138,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const volumes = ref([]);
   const favoriteGroups = ref([]);
   const favorites = ref([]);
+  // path -> color tag map, mirrors the backend store so tabs can color by folder.
+  const fileTags = ref({});
   const homeDirectory = ref('');
   const columnPreviewEntries = ref({ left: null, right: null });
   const columnSelectionStates = ref({ left: null, right: null });
@@ -1493,6 +1497,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       await Promise.all([
         loadFavoriteGroups(),
         loadFavorites(),
+        loadFileTags(),
         refreshVolumes(),
       ]);
 
@@ -2159,6 +2164,84 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       favorites.value = await listStoredFavorites();
     } catch {
       favorites.value = [];
+    }
+  }
+
+  async function loadFileTags() {
+    try {
+      fileTags.value = (await listFileTags()) || {};
+    } catch {
+      fileTags.value = {};
+    }
+  }
+
+  // Map keys are absolute paths (as the backend stores them); normalize a
+  // lookup path so `~` and trailing slashes resolve to the same key.
+  function normalizeTagPath(path) {
+    let value = String(path || '').trim();
+
+    if (!value) {
+      return '';
+    }
+
+    if (value === '~') {
+      value = homeDirectory.value || value;
+    } else if (value.startsWith('~/')) {
+      value = `${(homeDirectory.value || '').replace(/\/+$/, '')}/${value.slice(2)}`;
+    }
+
+    return value.replace(/\/+$/, '') || '/';
+  }
+
+  function tagColorForPath(path) {
+    const key = normalizeTagPath(path);
+    return (key && fileTags.value[key]) || '';
+  }
+
+  async function applyFileTags(paths, color) {
+    const targets = (Array.isArray(paths) ? paths : []).filter(Boolean);
+
+    if (targets.length === 0) {
+      return;
+    }
+
+    await setFileTags(targets, color || null);
+
+    const next = { ...fileTags.value };
+    for (const path of targets) {
+      if (color) {
+        next[normalizeTagPath(path)] = color;
+      } else {
+        delete next[normalizeTagPath(path)];
+      }
+    }
+    fileTags.value = next;
+  }
+
+  async function relocateFileTags(pairs) {
+    const moves = (Array.isArray(pairs) ? pairs : []).filter((pair) => pair?.from && pair?.to);
+
+    if (moves.length === 0) {
+      return;
+    }
+
+    await moveFileTags(moves);
+
+    const next = { ...fileTags.value };
+    let changed = false;
+    for (const { from, to } of moves) {
+      const fromKey = normalizeTagPath(from);
+      const color = next[fromKey];
+
+      if (color !== undefined) {
+        delete next[fromKey];
+        next[normalizeTagPath(to)] = color;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      fileTags.value = next;
     }
   }
 
@@ -2899,7 +2982,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         run: async (jobId) => {
           await moveItems(items, jobId);
           // Keep color tags attached as files move back/forward.
-          await moveFileTags(items.map((item) => ({ from: item.from, to: item.to }))).catch(() => {});
+          await relocateFileTags(items.map((item) => ({ from: item.from, to: item.to }))).catch(() => {});
         },
       });
     }
@@ -2915,7 +2998,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         controllable: false,
         run: async () => {
           await renameItem(from, to);
-          await moveFileTags([{ from, to }]).catch(() => {});
+          await relocateFileTags([{ from, to }]).catch(() => {});
         },
       });
     }
@@ -4156,6 +4239,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     failQueueJob,
     cancelQueueJobDone,
     removeQueueJob,
+    fileTags,
+    tagColorForPath,
+    applyFileTags,
+    relocateFileTags,
     recordHistory,
     recordTrashDelete,
     clearHistory,

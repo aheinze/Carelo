@@ -112,6 +112,11 @@ impl AppStoreState {
         &self.path
     }
 
+    /// Snapshot of every path -> color tag (for the frontend tag map).
+    pub fn all_file_tags(&self) -> HashMap<String, String> {
+        self.tags.lock().map(|tags| tags.clone()).unwrap_or_default()
+    }
+
     /// Stamp cached color tags onto a freshly listed set of entries.
     pub fn apply_file_tags(&self, entries: &mut [FileEntry]) {
         let Ok(tags) = self.tags.lock() else {

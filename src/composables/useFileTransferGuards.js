@@ -4,7 +4,6 @@ import {
   copyItems,
   isRemotePath,
   listDirectory,
-  moveFileTags,
   moveItems,
   renameItem,
 } from './useFileOperations';
@@ -794,7 +793,7 @@ export function useFileTransferGuards() {
       // Re-key color tags before the reload so the moved file keeps its dot
       // immediately (no-op when nothing was tagged).
       if (mode === 'move') {
-        await moveFileTags(runItems.map((item) => ({ from: item.from, to: item.to }))).catch(() => {});
+        await store.relocateFileTags(runItems.map((item) => ({ from: item.from, to: item.to }))).catch(() => {});
       }
 
       await Promise.all(
@@ -910,7 +909,7 @@ export function useFileTransferGuards() {
     await renameItem(entry.path, resolvedTargetPath);
     // Keep any color tag attached to the renamed item (awaited so the caller's
     // reload shows the dot in its new place). No-op when untagged.
-    await moveFileTags([{ from: entry.path, to: resolvedTargetPath }]).catch(() => {});
+    await store.relocateFileTags([{ from: entry.path, to: resolvedTargetPath }]).catch(() => {});
 
     if (isLocalUndoablePath(entry.path) && isLocalUndoablePath(resolvedTargetPath)) {
       store.recordHistory({

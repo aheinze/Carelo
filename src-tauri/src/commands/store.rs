@@ -92,6 +92,13 @@ pub struct TagMove {
 }
 
 #[tauri::command]
+pub fn list_file_tags(
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<std::collections::HashMap<String, String>> {
+    Ok(store.all_file_tags())
+}
+
+#[tauri::command]
 pub fn set_file_tags(
     paths: Vec<String>,
     color: Option<String>,
