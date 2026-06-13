@@ -9,6 +9,7 @@ import {
   closeTerminalSession,
   resizeTerminalSession,
   startTerminalSession,
+  terminalSessionCwd,
   writeTerminalSession,
 } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
@@ -32,6 +33,8 @@ let resizeObserver = null;
 let resizeFrame = 0;
 let colorSchemeMediaQuery = null;
 let colorSchemeListener = null;
+let cwdPollTimer = null;
+const CWD_POLL_INTERVAL_MS = 1200;
 
 const activeSession = computed(() =>
   sessions.value.find((session) => session.id === activeSessionId.value) || sessions.value[0] || null,
@@ -48,6 +51,64 @@ const activeCwd = computed(() => {
 function titleForShell(shell) {
   const parts = String(shell || 'shell').split('/');
   return parts.at(-1) || 'shell';
+}
+
+// Label tabs by the folder the terminal was opened in, falling back to the
+// shell name when there's no usable directory.
+function titleForCwd(cwd, shell) {
+  const value = String(cwd || '').trim();
+
+  if (!value) {
+    return titleForShell(shell);
+  }
+
+  const clean = value.replace(/\/+$/, '');
+
+  if (!clean) {
+    return '/';
+  }
+
+  return clean.split('/').filter(Boolean).at(-1) || '/';
+}
+
+// Poll each live session's shell cwd so the tab follows `cd` inside the
+// terminal (Linux reads /proc/<pid>/cwd; other platforms report nothing).
+async function refreshSessionCwds() {
+  const liveSessions = sessions.value.filter(
+    (session) => !session.exited && typeof session.id === 'number',
+  );
+
+  for (const session of liveSessions) {
+    try {
+      const cwd = await terminalSessionCwd(session.id);
+
+      if (cwd && cwd !== session.cwd) {
+        session.cwd = cwd;
+        session.title = titleForCwd(cwd, session.shell);
+      }
+    } catch {
+      // Transient failures (e.g. session closing) are ignored.
+    }
+  }
+}
+
+function startCwdPolling() {
+  if (cwdPollTimer) {
+    return;
+  }
+
+  cwdPollTimer = window.setInterval(() => {
+    if (props.visible) {
+      refreshSessionCwds();
+    }
+  }, CWD_POLL_INTERVAL_MS);
+}
+
+function stopCwdPolling() {
+  if (cwdPollTimer) {
+    window.clearInterval(cwdPollTimer);
+    cwdPollTimer = null;
+  }
 }
 
 function errorMessage(error, fallback) {
@@ -132,7 +193,7 @@ function createSessionRecord(info) {
   const disposables = [];
   const session = {
     id: info.sessionId,
-    title: titleForShell(info.shell),
+    title: titleForCwd(info.cwd, info.shell),
     shell: info.shell,
     cwd: info.cwd,
     terminal,
@@ -354,6 +415,7 @@ watch(
     } else if (visible) {
       await nextTick();
       attachActiveSession();
+      refreshSessionCwds();
     }
   },
 );
@@ -401,9 +463,12 @@ onMounted(async () => {
   if (props.visible && sessions.value.length === 0) {
     await createSession();
   }
+
+  startCwdPolling();
 });
 
 onUnmounted(() => {
+  stopCwdPolling();
   unlistenOutput?.();
   unlistenExit?.();
   resizeObserver?.disconnect();

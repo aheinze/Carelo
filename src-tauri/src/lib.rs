@@ -19,7 +19,7 @@ use commands::store::{
     save_app_settings, save_window_dimensions,
 };
 use commands::terminal::{
-    terminal_close, terminal_resize, terminal_start, terminal_write, TerminalState,
+    terminal_close, terminal_cwd, terminal_resize, terminal_start, terminal_write, TerminalState,
 };
 use fs::remote::RemoteVolumeState;
 use store::AppStoreState;
@@ -126,6 +126,7 @@ pub fn run() {
             terminal_write,
             terminal_resize,
             terminal_close,
+            terminal_cwd,
             quit_app
         ])
         .run(tauri::generate_context!())

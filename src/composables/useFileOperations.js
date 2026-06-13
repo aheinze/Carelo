@@ -520,6 +520,10 @@ export async function closeTerminalSession(sessionId) {
   return invokeCommand('terminal_close', { sessionId });
 }
 
+export async function terminalSessionCwd(sessionId) {
+  return invokeCommand('terminal_cwd', { sessionId });
+}
+
 export function useFileOperations() {
   return {
     canUseLocalFileAssets,

@@ -115,6 +115,26 @@ pub async fn terminal_close(
     }
 }
 
+/// Current working directory of a session's shell, or `None` if it can't be
+/// resolved (closed session, or unsupported platform).
+#[tauri::command]
+pub async fn terminal_cwd(
+    state: tauri::State<'_, TerminalState>,
+    session_id: u64,
+) -> Result<Option<String>, FsError> {
+    #[cfg(unix)]
+    {
+        return Ok(unix::cwd(&state.inner, session_id));
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = state;
+        let _ = session_id;
+        Ok(None)
+    }
+}
+
 #[cfg(unix)]
 mod unix {
     use super::TerminalSessionInfo;
@@ -292,6 +312,26 @@ mod unix {
         }
 
         Ok(())
+    }
+
+    pub fn cwd(registry: &TerminalRegistry, session_id: u64) -> Option<String> {
+        let sessions = registry.sessions.lock().ok()?;
+        let session = sessions.get(&session_id)?;
+        read_process_cwd(session.child.id())
+    }
+
+    // The shell is the pty's direct child, so its cwd reflects `cd`. On Linux
+    // /proc/<pid>/cwd is a symlink to that directory.
+    #[cfg(target_os = "linux")]
+    fn read_process_cwd(pid: u32) -> Option<String> {
+        std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn read_process_cwd(_pid: u32) -> Option<String> {
+        None
     }
 
     pub fn close(registry: &TerminalRegistry, session_id: u64) -> Result<(), FsError> {
