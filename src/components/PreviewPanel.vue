@@ -60,6 +60,12 @@ const hasMultipleSelection = computed(() => previewSelectionEntries.value.length
 const selectedEntry = computed(() => (
   hasMultipleSelection.value ? null : previewSelectionEntries.value[0] || null
 ));
+// `settledEntry` lags `selectedEntry` by a short debounce so that scrubbing
+// through files (arrow keys, fast clicks) coalesces into one preview update
+// instead of tearing down and reloading on every selection change.
+const settledEntry = ref(null);
+const PREVIEW_SETTLE_DELAY_MS = 120;
+let previewSettleTimer = null;
 const folderSizeMeasurement = ref(null);
 const folderSizeMeasurementLoading = ref(false);
 const folderSizeMeasurementError = ref('');
@@ -222,12 +228,12 @@ const inspectorSections = [
 ];
 
 const inspectedEntry = computed(() => {
-  if (!selectedEntry.value) {
+  if (!settledEntry.value) {
     return null;
   }
 
   return {
-    ...selectedEntry.value,
+    ...settledEntry.value,
     ...(fileMetadata.value || {}),
   };
 });
@@ -262,8 +268,42 @@ const logSummary = computed(() => {
 const fileDetailRows = computed(() => detailsForEntry(inspectedEntry.value));
 const gitCardRows = computed(() => gitRowsForEntry(inspectedEntry.value));
 
+// Drive the preview off a debounced copy of the selection. Only switching to a
+// *different* file is debounced (to coalesce fast scrubbing); clearing, the
+// first selection, and in-place refreshes of the same file apply immediately.
 watch(
-  () => selectedEntry.value?.path,
+  () => {
+    const entry = selectedEntry.value;
+    return entry ? `${entry.path} ${entry.size} ${entry.modifiedAt}` : null;
+  },
+  () => {
+    if (previewSettleTimer) {
+      clearTimeout(previewSettleTimer);
+      previewSettleTimer = null;
+    }
+
+    const entry = selectedEntry.value;
+
+    if (!entry?.path) {
+      settledEntry.value = null;
+      return;
+    }
+
+    if (!settledEntry.value || settledEntry.value.path === entry.path) {
+      settledEntry.value = entry;
+      return;
+    }
+
+    previewSettleTimer = setTimeout(() => {
+      previewSettleTimer = null;
+      settledEntry.value = selectedEntry.value;
+    }, PREVIEW_SETTLE_DELAY_MS);
+  },
+  { immediate: true },
+);
+
+watch(
+  () => settledEntry.value?.path,
   async (path) => {
     imageFailed.value = false;
     audioFailed.value = false;
@@ -303,7 +343,7 @@ watch(
 );
 
 watch(
-  () => selectedEntry.value?.path,
+  () => settledEntry.value?.path,
   async (path) => {
     gitInfo.value = null;
     gitInfoLoadVersion += 1;
@@ -511,6 +551,10 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  if (previewSettleTimer) {
+    clearTimeout(previewSettleTimer);
+    previewSettleTimer = null;
+  }
   cancelActiveFolderSizeMeasurement();
   revokeImagePreviewUrl();
   revokeAudioPreviewUrl();
@@ -2133,6 +2177,26 @@ function logDetail(entry) {
   margin: 37px 20px 0;
   border-radius: 7px;
   background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+/* Gently reveal the active preview when its type changes instead of snapping. */
+.preview-hero > * {
+  animation: preview-hero-reveal 150ms ease;
+}
+
+@keyframes preview-hero-reveal {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .preview-hero > * {
+    animation: none;
+  }
 }
 
 .preview-image,
