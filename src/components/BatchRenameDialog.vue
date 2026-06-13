@@ -849,7 +849,7 @@ onBeforeUnmount(() => {
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
   border: 1px solid var(--control-border);
-  border-radius: 11px;
+  border-radius: var(--radius-panel);
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);
   color: var(--text);

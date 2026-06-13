@@ -69,6 +69,7 @@ pub fn run() {
             commands::fs::transfer::get_file_metadata,
             commands::fs::git::get_git_file_info,
             commands::fs::preview::compare_file_checksums,
+            commands::fs::preview::compute_file_checksum,
             commands::fs::preview::read_text_preview,
             commands::fs::preview::read_media_preview,
             commands::fs::preview::create_media_stream_url,

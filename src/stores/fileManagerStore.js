@@ -8,6 +8,8 @@ import {
   canUseLocalFileAssets,
   checkRemoteVolume,
   clearRemotePreviewCache,
+  copyItems,
+  deleteItems,
   ejectVolume,
   getAppSettings as getStoredAppSettings,
   getHomeDirectory,
@@ -17,9 +19,11 @@ import {
   listVolumes,
   mountVolume,
   moveFavorite as moveStoredFavorite,
+  moveItems,
   removeFavoriteGroup as removeStoredFavoriteGroup,
   pauseFileOperation,
   removeFavorite as removeStoredFavorite,
+  renameItem,
   resumeFileOperation,
   saveAppSettings as saveStoredAppSettings,
   setActiveRemoteVolumes,
@@ -47,6 +51,8 @@ let nextTabId = 1;
 let nextTabActivityId = 1;
 let nextQueueJobId = 1;
 let nextOperationLogId = 1;
+let nextHistoryId = 1;
+let historyBusy = false;
 let remoteHealthRefreshInFlight = false;
 let activeRemoteSyncTimer = null;
 let lastReportedRemoteVolumeIds = '';
@@ -74,6 +80,7 @@ const DIRECTORY_RELOAD_BATCH_DELAY_MS = 120;
 const INACTIVE_TAB_ENTRY_CACHE_LIMIT = 2;
 const LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT = 1500;
 const OPERATION_LOG_LIMIT = 120;
+const HISTORY_LIMIT = 50;
 const WORKSPACE_LIMIT = 32;
 const WORKSPACE_TAB_LIMIT = 64;
 const WORKSPACE_NAME_LIMIT = 80;
@@ -1122,6 +1129,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const searchQuery = ref('');
   const queue = ref([]);
   const operationLog = ref([]);
+  const undoStack = ref([]);
+  const redoStack = ref([]);
   const volumes = ref([]);
   const favoriteGroups = ref([]);
   const favorites = ref([]);
@@ -1244,6 +1253,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const activePane = computed(() => activeTabFor(activePaneId.value));
   const canGoBack = computed(() => canGoBackInTab(activePane.value));
   const canGoForward = computed(() => canGoForwardInTab(activePane.value));
+  const canUndo = computed(() => undoStack.value.length > 0);
+  const canRedo = computed(() => redoStack.value.length > 0);
+  const undoLabel = computed(() => undoStack.value.at(-1)?.label || '');
+  const redoLabel = computed(() => redoStack.value.at(-1)?.label || '');
   const visibleEntriesByPane = computed(() => {
     const query = searchQuery.value.trim().toLowerCase();
 
@@ -2770,6 +2783,174 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     queue.value = queue.value.filter((job) => job.id !== id);
   }
 
+  // Undo/redo history. Operations record a reversible descriptor here on
+  // success; undo/redo replay it with existing transfer commands. Recording a
+  // new operation clears the redo stack, matching standard editor semantics.
+  function recordHistory(entry = {}) {
+    if (!entry || !entry.kind) {
+      return;
+    }
+
+    const record = {
+      id: `hist-${Date.now()}-${nextHistoryId++}`,
+      kind: entry.kind,
+      label: entry.label || 'operation',
+      items: Array.isArray(entry.items) ? entry.items.map((item) => ({ ...item })) : [],
+      createdPaths: Array.isArray(entry.createdPaths) ? [...entry.createdPaths] : [],
+      from: entry.from || '',
+      to: entry.to || '',
+      directories: Array.isArray(entry.directories)
+        ? [...new Set(entry.directories.filter(Boolean))]
+        : [],
+    };
+
+    undoStack.value = [...undoStack.value, record].slice(-HISTORY_LIMIT);
+    redoStack.value = [];
+  }
+
+  function clearHistory() {
+    undoStack.value = [];
+    redoStack.value = [];
+  }
+
+  // Runs a single undo/redo step as a queue job so it shows progress, reuses
+  // the cancel/pause plumbing, and reports failures like any other transfer.
+  // Returns true when applied, false when the user cancelled; throws on error.
+  async function runHistoryJob({ operation, label, directories = [], controllable = true, run }) {
+    const jobId = startQueueJob({
+      operation,
+      label,
+      remotePaths: directories,
+      // Only operations that forward the job id to the backend (move/copy) can
+      // honour cancel/pause; rename and trash-delete run atomically.
+      cancelable: controllable,
+      pausable: controllable,
+    });
+
+    try {
+      await run(jobId);
+      await Promise.all(
+        [...new Set(directories.filter(Boolean))].map((path) =>
+          reloadDirectoryInPanes(path).catch(() => {}),
+        ),
+      );
+      completeQueueJob(jobId, 'Done');
+      return true;
+    } catch (error) {
+      if (error?.code === 'operation_cancelled') {
+        cancelQueueJobDone(jobId);
+        return false;
+      }
+
+      failQueueJob(jobId, error?.message || `${label} failed.`);
+      throw error;
+    }
+  }
+
+  async function applyHistoryEntry(entry, direction) {
+    const undoing = direction === 'undo';
+    const verb = undoing ? 'Undo' : 'Redo';
+
+    if (entry.kind === 'move') {
+      const items = entry.items.map((item) => ({
+        from: undoing ? item.to : item.from,
+        to: undoing ? item.from : item.to,
+        overwrite: false,
+        symlinkMode: item.symlinkMode || 'preserve',
+      }));
+
+      return runHistoryJob({
+        operation: 'move',
+        label: `${verb}: ${entry.label}`,
+        directories: entry.directories,
+        run: (jobId) => moveItems(items, jobId),
+      });
+    }
+
+    if (entry.kind === 'rename') {
+      const from = undoing ? entry.to : entry.from;
+      const to = undoing ? entry.from : entry.to;
+
+      return runHistoryJob({
+        operation: 'rename',
+        label: `${verb}: ${entry.label}`,
+        directories: entry.directories,
+        controllable: false,
+        run: () => renameItem(from, to),
+      });
+    }
+
+    if (entry.kind === 'copy') {
+      if (undoing) {
+        return runHistoryJob({
+          operation: 'delete',
+          label: `${verb}: ${entry.label}`,
+          directories: entry.directories,
+          controllable: false,
+          run: () => deleteItems(entry.createdPaths, 'trash'),
+        });
+      }
+
+      return runHistoryJob({
+        operation: 'copy',
+        label: `${verb}: ${entry.label}`,
+        directories: entry.directories,
+        run: (jobId) => copyItems(entry.items.map((item) => ({ ...item })), jobId),
+      });
+    }
+
+    return false;
+  }
+
+  async function undoLastOperation() {
+    if (historyBusy || undoStack.value.length === 0) {
+      return;
+    }
+
+    const entry = undoStack.value.at(-1);
+    historyBusy = true;
+    undoStack.value = undoStack.value.slice(0, -1);
+
+    try {
+      const applied = await applyHistoryEntry(entry, 'undo');
+
+      if (applied) {
+        redoStack.value = [...redoStack.value, entry].slice(-HISTORY_LIMIT);
+      } else {
+        undoStack.value = [...undoStack.value, entry];
+      }
+    } catch {
+      // The queue job surfaces the failure; restore the entry so it can retry.
+      undoStack.value = [...undoStack.value, entry];
+    } finally {
+      historyBusy = false;
+    }
+  }
+
+  async function redoLastOperation() {
+    if (historyBusy || redoStack.value.length === 0) {
+      return;
+    }
+
+    const entry = redoStack.value.at(-1);
+    historyBusy = true;
+    redoStack.value = redoStack.value.slice(0, -1);
+
+    try {
+      const applied = await applyHistoryEntry(entry, 'redo');
+
+      if (applied) {
+        undoStack.value = [...undoStack.value, entry].slice(-HISTORY_LIMIT);
+      } else {
+        redoStack.value = [...redoStack.value, entry];
+      }
+    } catch {
+      redoStack.value = [...redoStack.value, entry];
+    } finally {
+      historyBusy = false;
+    }
+  }
+
   function setActivePane(paneId) {
     if (!panes.value[paneId]) {
       return;
@@ -3866,6 +4047,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     searchQuery,
     queue,
     operationLog,
+    undoStack,
+    redoStack,
+    canUndo,
+    canRedo,
+    undoLabel,
+    redoLabel,
     volumes,
     favoriteGroups,
     favorites,
@@ -3907,6 +4094,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     failQueueJob,
     cancelQueueJobDone,
     removeQueueJob,
+    recordHistory,
+    clearHistory,
+    undoLastOperation,
+    redoLastOperation,
     setActivePane,
     switchActivePane,
     setActiveTab,

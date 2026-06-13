@@ -1150,7 +1150,7 @@ onUnmounted(() => {
   min-height: 500px;
   overflow: hidden;
   border: 1px solid var(--control-border);
-  border-radius: 17px;
+  border-radius: var(--radius-panel);
   background: var(--modal-bg);
   box-shadow: var(--shadow-overlay);
 }
@@ -2001,7 +2001,7 @@ onUnmounted(() => {
   overflow-y: auto;
   overscroll-behavior: contain;
   border: 1px solid var(--control-border);
-  border-radius: 13px;
+  border-radius: var(--radius-panel);
   padding: 5px;
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);

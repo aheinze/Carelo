@@ -22,6 +22,7 @@ import {
   unarchiveItems,
 } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
+import { useChecksumDialog } from '../composables/useChecksumDialog';
 import {
   cleanPath,
   dropEffectFromEvent,
@@ -67,6 +68,7 @@ const props = defineProps({
 
 const store = useFileManagerStore();
 const dialog = useDialog();
+const checksumDialog = useChecksumDialog();
 const transfers = useFileTransferGuards();
 const pane = computed(() => store.panes[props.paneId]);
 const activeTab = computed(() => store.activeTabFor(props.paneId));
@@ -430,6 +432,12 @@ const canConvertImagesContext = computed(() => {
 
   return operationEntries.length > 0
     && operationEntries.every((entry) => !isArchivePath(entry.path) && isConvertibleImageEntry(entry));
+});
+const canVerifyChecksumContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  return operationEntries.length > 0
+    && operationEntries.every((entry) => entry?.kind === 'file' && !isArchivePath(entry.path));
 });
 const pdfToolActionsContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
@@ -2847,6 +2855,14 @@ async function handleContextAction(action) {
       return;
     }
 
+    if (action === 'verifyChecksum') {
+      const paths = contextOperationEntries(menu)
+        .filter((item) => item?.kind === 'file' && !isArchivePath(item.path))
+        .map((item) => item.path);
+      checksumDialog.open(paths);
+      return;
+    }
+
     if (action === 'compressPdfs') {
       await openPdfToolsDialog(contextOperationEntries(menu), 'compress');
       return;
@@ -3177,6 +3193,7 @@ async function handleContextAction(action) {
       :can-custom-tools="canRunCustomToolContext"
       :custom-tools="availableCustomTools"
       :can-convert-images="canConvertImagesContext"
+      :can-verify-checksum="canVerifyChecksumContext"
       :pdf-tool-actions="pdfToolActionsContext"
       :can-transfer="canTransferToOtherPane"
       :can-modify="canModifyContext"

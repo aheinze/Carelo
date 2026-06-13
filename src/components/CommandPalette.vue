@@ -65,6 +65,10 @@ const canBatchRenameOperationEntries = computed(() => (
   operationEntries.value.length > 1 &&
   operationEntries.value.every((entry) => canRenamePath(entry.path))
 ));
+const canVerifyChecksum = computed(() => (
+  operationEntries.value.length > 0 &&
+  operationEntries.value.every((entry) => entry.kind === 'file' && !isArchivePath(entry.path))
+));
 const canSearchRoot = computed(() => {
   const root = activeRoot.value;
   return isCommandMode.value || (canUseLocalFileAssets()
@@ -100,6 +104,26 @@ function canRenamePath(path) {
 }
 
 const commandDefinitions = [
+  {
+    id: 'edit.undo',
+    section: 'Edit',
+    title: 'Undo last operation',
+    detail: () => (store.undoLabel ? `Reverse: ${store.undoLabel}` : 'Nothing to undo'),
+    icon: 'undo',
+    shortcut: 'Ctrl Z',
+    when: () => store.canUndo,
+    keywords: 'undo revert reverse back history move copy rename',
+  },
+  {
+    id: 'edit.redo',
+    section: 'Edit',
+    title: 'Redo last operation',
+    detail: () => (store.redoLabel ? `Reapply: ${store.redoLabel}` : 'Nothing to redo'),
+    icon: 'redo',
+    shortcut: 'Ctrl Shift Z',
+    when: () => store.canRedo,
+    keywords: 'redo reapply forward history move copy rename',
+  },
   {
     id: 'palette.files',
     section: 'Search',
@@ -187,6 +211,17 @@ const commandDefinitions = [
     shortcut: 'F2',
     when: () => hasFocusedEntry.value && canRenamePath(selectedEntry.value?.path),
     keywords: 'name',
+  },
+  {
+    id: 'file.verifyChecksum',
+    section: 'File',
+    title: 'Verify checksum (SHA-256)',
+    detail: () => (operationEntries.value.length === 1
+      ? 'Compute the hash and compare it to an expected value'
+      : `Compare checksums of ${operationEntries.value.length} files`),
+    icon: 'shield',
+    when: () => canVerifyChecksum.value,
+    keywords: 'checksum hash sha256 sha-256 verify integrity digest fingerprint compare',
   },
   {
     id: 'file.batchRename',

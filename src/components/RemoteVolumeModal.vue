@@ -1172,7 +1172,7 @@ async function submit() {
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--control-border);
-  border-radius: 13px;
+  border-radius: var(--radius-panel);
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);
   color: var(--text);

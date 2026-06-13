@@ -1807,7 +1807,7 @@ h2 {
   overflow-y: auto;
   overscroll-behavior: contain;
   border: 1px solid var(--control-border);
-  border-radius: 13px;
+  border-radius: var(--radius-panel);
   padding: 5px;
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);

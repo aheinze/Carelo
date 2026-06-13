@@ -25,6 +25,8 @@ const sections = [
       { keys: ['F8'],          label: 'Delete' },
       { keys: ['Del'],         label: 'Delete' },
       { keys: ['⇧', 'F10'],   label: 'Context menu' },
+      { keys: ['⌘', 'Z'],     label: 'Undo last operation' },
+      { keys: ['⌘', '⇧', 'Z'], label: 'Redo last operation' },
     ],
   },
   {
@@ -317,7 +319,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   max-height: calc(100vh - 80px);
   overflow: hidden;
   border: 1px solid var(--control-border);
-  border-radius: 18px;
+  border-radius: var(--radius-panel);
   padding: 22px 24px 24px;
   background: var(--modal-bg);
   box-shadow: var(--shadow-overlay);

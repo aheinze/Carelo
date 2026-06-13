@@ -149,6 +149,15 @@ pub struct FileChecksumComparison {
     pub equal: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileChecksum {
+    pub algorithm: String,
+    pub path: String,
+    pub hash: String,
+    pub bytes: u64,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -184,8 +193,8 @@ pub use git::get_git_file_info;
 pub use image_tools::convert_images;
 pub use pdf_tools::{compress_pdfs, run_pdf_tool};
 pub use preview::{
-    compare_file_checksums, create_media_stream_url, read_media_preview, read_text_preview,
-    MediaStreamState,
+    compare_file_checksums, compute_file_checksum, create_media_stream_url, read_media_preview,
+    read_text_preview, MediaStreamState,
 };
 pub use remotes::{add_remote_volume, list_remote_volumes, remove_remote_volume};
 pub use search::{search_content, search_files, FileSearchIndexState};

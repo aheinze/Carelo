@@ -319,7 +319,7 @@ onUnmounted(() => {
   width: min(332px, calc(100vw - 28px));
   overflow: hidden;
   border: 1px solid var(--control-border);
-  border-radius: 13px;
+  border-radius: var(--radius-panel);
   padding: 5px;
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);

@@ -317,6 +317,26 @@ async function deleteSelection() {
 
       <div class="icon-group file-action-group" role="toolbar" aria-label="File actions">
         <button
+          v-tooltip="{ text: store.canUndo ? `Undo ${store.undoLabel}` : 'Nothing to undo', shortcut: 'Ctrl Z' }"
+          type="button"
+          class="icon-btn"
+          aria-label="Undo last operation"
+          :disabled="!store.canUndo"
+          @click="store.undoLastOperation()"
+        >
+          <AppIcon name="undo" :size="19" :stroke-width="1.8" />
+        </button>
+        <button
+          v-tooltip="{ text: store.canRedo ? `Redo ${store.redoLabel}` : 'Nothing to redo', shortcut: 'Ctrl Shift Z' }"
+          type="button"
+          class="icon-btn"
+          aria-label="Redo last operation"
+          :disabled="!store.canRedo"
+          @click="store.redoLastOperation()"
+        >
+          <AppIcon name="redo" :size="19" :stroke-width="1.8" />
+        </button>
+        <button
           v-tooltip="{ text: 'Copy path', shortcut: 'Ctrl Shift Enter' }"
           type="button"
           class="icon-btn"
@@ -637,13 +657,18 @@ h1 {
   transition: background 80ms ease, color 80ms ease;
 }
 
-.icon-btn:hover {
+.icon-btn:hover:not(:disabled) {
   background: var(--btn-hover);
   color: var(--text-muted);
 }
 
-.icon-btn:active {
+.icon-btn:active:not(:disabled) {
   background: var(--btn-active-bg);
+}
+
+.icon-btn:disabled {
+  cursor: default;
+  opacity: 0.32;
 }
 
 .icon-btn.active {

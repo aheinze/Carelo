@@ -382,6 +382,21 @@ function shouldUseFolderConflictActions(entry, existingEntry) {
   return isDirectoryEntry(entry) || isDirectoryEntry(existingEntry);
 }
 
+function isLocalUndoablePath(path) {
+  const value = String(path || '');
+  return Boolean(value) && !isRemotePath(value) && !isArchivePath(value);
+}
+
+// Undo/redo replays operations with local transfer commands; only record when
+// every endpoint is a plain local path so the inverse is well-defined.
+function transferIsUndoable(items) {
+  return (
+    Array.isArray(items) &&
+    items.length > 0 &&
+    items.every((item) => isLocalUndoablePath(item.from) && isLocalUndoablePath(item.to))
+  );
+}
+
 export function forcedTransferModeFromEvent(event) {
   if (!event) {
     return null;
@@ -780,6 +795,37 @@ export function useFileTransferGuards() {
           .map((path) => store.reloadDirectoryInPanes(path)),
       );
       store.completeQueueJob(jobId, `${itemText} ${mode === 'move' ? 'moved' : 'copied'}`);
+
+      if (transferIsUndoable(runItems)) {
+        if (mode === 'move') {
+          store.recordHistory({
+            kind: 'move',
+            label: `${itemText} moved`,
+            items: runItems.map((item) => ({
+              from: item.from,
+              to: item.to,
+              symlinkMode: item.symlinkMode,
+            })),
+            directories: [...new Set(touchedDirectories.filter(Boolean))],
+          });
+        } else {
+          // Only the items we newly created are safe to delete on undo; items
+          // that replaced an existing file can't restore the original.
+          const createdPaths = runItems
+            .filter((item) => !item.overwrite)
+            .map((item) => item.to);
+
+          if (createdPaths.length > 0) {
+            store.recordHistory({
+              kind: 'copy',
+              label: `${itemText} copied`,
+              items: runItems.map((item) => ({ ...item })),
+              createdPaths,
+              directories: [targetDirectory].filter(Boolean),
+            });
+          }
+        }
+      }
     } catch (error) {
       if (error?.code === 'operation_cancelled') {
         store.cancelQueueJobDone(jobId);
@@ -855,6 +901,17 @@ export function useFileTransferGuards() {
     }
 
     await renameItem(entry.path, resolvedTargetPath);
+
+    if (isLocalUndoablePath(entry.path) && isLocalUndoablePath(resolvedTargetPath)) {
+      store.recordHistory({
+        kind: 'rename',
+        label: `"${entry.name}" renamed`,
+        from: entry.path,
+        to: resolvedTargetPath,
+        directories: [targetDirectory],
+      });
+    }
+
     return true;
   }
 

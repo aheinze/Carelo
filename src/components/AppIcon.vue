@@ -453,6 +453,16 @@ defineProps({
       <rect x="13" y="13" width="6" height="6" rx="1.4" />
     </template>
 
+    <template v-else-if="name === 'undo'">
+      <path d="M9 14 4 9l5-5" />
+      <path d="M4 9h11a5 5 0 0 1 0 10h-5" />
+    </template>
+
+    <template v-else-if="name === 'redo'">
+      <path d="m15 14 5-5-5-5" />
+      <path d="M20 9H9a5 5 0 0 0 0 10h5" />
+    </template>
+
     <template v-else>
       <circle cx="12" cy="12" r="8" />
     </template>

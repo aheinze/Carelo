@@ -2100,6 +2100,8 @@ function logDetail(entry) {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  /* Mirror the 37px top margin of the leading content for symmetric spacing. */
+  padding-bottom: 37px;
 }
 
 .inspector-tab {

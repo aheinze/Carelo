@@ -262,6 +262,10 @@ export async function compareFileChecksums(leftPath, rightPath) {
   return invokeCommand('compare_file_checksums', { leftPath, rightPath });
 }
 
+export async function computeFileChecksum(path) {
+  return invokeCommand('compute_file_checksum', { path });
+}
+
 export async function readTextPreview(path, maxBytes = 96 * 1024) {
   if (isRemotePath(path)) {
     const cached = cachedRemotePreview('text', path, maxBytes);
@@ -517,6 +521,7 @@ export function useFileOperations() {
     createOAuthTokens,
     createMediaStreamUrl,
     compareFileChecksums,
+    computeFileChecksum,
     copyItems,
     createFolder,
     convertImages,

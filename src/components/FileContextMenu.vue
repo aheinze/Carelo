@@ -67,6 +67,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  canVerifyChecksum: {
+    type: Boolean,
+    default: false,
+  },
   pdfToolActions: {
     type: Array,
     default: () => [],
@@ -175,6 +179,7 @@ const actionGroups = computed(() => {
   }
 
   if (
+    props.canVerifyChecksum ||
     props.pdfToolActions.length > 0 ||
     props.canConvertImages ||
     visibleCustomTools.value.length > 0
@@ -182,6 +187,15 @@ const actionGroups = computed(() => {
     groups.push({
       id: 'tools',
       items: [
+        ...(props.canVerifyChecksum
+          ? [{
+              id: 'verifyChecksum',
+              action: 'verifyChecksum',
+              label: props.operationCount === 1 ? 'Verify Checksum…' : 'Compare Checksums…',
+              icon: 'shield',
+              keywords: ['checksum hash sha256 sha-256 verify integrity digest fingerprint compare'],
+            }]
+          : []),
         ...props.pdfToolActions.map((action) => ({
           id: action.id,
           action: action.action,
@@ -851,7 +865,7 @@ onUnmounted(() => {
   overflow-y: auto;
   overscroll-behavior: contain;
   border: 1px solid var(--control-border);
-  border-radius: 13px;
+  border-radius: var(--radius-panel);
   padding: 5px;
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);

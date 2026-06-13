@@ -10,17 +10,20 @@ import TooltipHost from './components/TooltipHost.vue';
 import { useDialog } from './composables/useDialog';
 import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts';
 import { useShortcutsModal } from './composables/useShortcutsModal';
+import { useChecksumDialog } from './composables/useChecksumDialog';
 import { useFileManagerStore } from './stores/fileManagerStore';
 
 const CommandPalette = defineAsyncComponent(() => import('./components/CommandPalette.vue'));
 const DialogHost = defineAsyncComponent(() => import('./components/DialogHost.vue'));
 const SettingsWindow = defineAsyncComponent(() => import('./components/SettingsWindow.vue'));
 const ShortcutsModal = defineAsyncComponent(() => import('./components/ShortcutsModal.vue'));
+const ChecksumDialog = defineAsyncComponent(() => import('./components/ChecksumDialog.vue'));
 const TerminalPanel = defineAsyncComponent(() => import('./components/TerminalPanel.vue'));
 
 const store = useFileManagerStore();
 const dialog = useDialog();
 const shortcutsModal = useShortcutsModal();
+const checksumDialog = useChecksumDialog();
 const appWindow = ref(null);
 const workspace = ref(null);
 const paneGrid = ref(null);
@@ -37,6 +40,7 @@ const layoutStyle = computed(() => ({
 }));
 const dialogVisible = computed(() => Boolean(dialog.activeDialog.value));
 const shortcutsVisible = computed(() => shortcutsModal.visible.value);
+const checksumVisible = computed(() => checksumDialog.visible.value);
 
 watch(
   () => store.terminalPanelVisible,
@@ -180,6 +184,7 @@ onBeforeUnmount(() => {
     <SettingsWindow v-if="store.settingsVisible" />
     <DialogHost v-if="dialogVisible" />
     <ShortcutsModal v-if="shortcutsVisible" />
+    <ChecksumDialog v-if="checksumVisible" />
     <TooltipHost />
     <WindowResizeHandles />
   </div>

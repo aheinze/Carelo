@@ -679,7 +679,7 @@ onUnmounted(() => {
   max-height: calc(100vh - 56px);
   overflow: hidden;
   border: 1px solid var(--control-border);
-  border-radius: 11px;
+  border-radius: var(--radius-panel);
   background: var(--popover-bg);
   box-shadow: var(--shadow-overlay);
   color: var(--text);

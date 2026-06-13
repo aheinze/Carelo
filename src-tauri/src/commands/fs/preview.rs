@@ -297,6 +297,38 @@ pub async fn compare_file_checksums(
     Ok(comparison)
 }
 
+#[tauri::command]
+pub async fn compute_file_checksum(
+    path: String,
+    remotes: tauri::State<'_, RemoteVolumeState>,
+) -> Result<FileChecksum, FsError> {
+    if archive::is_archive_uri(&path) {
+        return Err(FsError::new(
+            "checksum_unsupported",
+            "Checksum computation is available for local and remote files only.",
+            None,
+        ));
+    }
+
+    let resolved = if let Some(remote_path) = parse_remote_path(&path) {
+        materialize_remote_file(&remotes, remote_path)
+            .await?
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        path.clone()
+    };
+
+    let (hash, bytes) = run_local(move |_| file_sha256(&expand_local_path(&resolved)?)).await?;
+
+    Ok(FileChecksum {
+        algorithm: "SHA-256".to_string(),
+        path,
+        hash,
+        bytes,
+    })
+}
+
 fn read_local_text_preview(path: &str, max_bytes: usize) -> FsResult<TextPreview> {
     let path = expand_local_search_root(path)?;
     let metadata = fs::metadata(&path)

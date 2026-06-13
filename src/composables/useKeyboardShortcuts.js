@@ -14,6 +14,7 @@ import {
   useFileTransferGuards,
 } from './useFileTransferGuards';
 import { useShortcutsModal } from './useShortcutsModal';
+import { useChecksumDialog } from './useChecksumDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveRootPath, isArchiveEntry, isArchivePath } from '../utils/archivePaths';
 import {
@@ -276,9 +277,18 @@ export function useKeyboardShortcuts() {
   const dialog = useDialog();
   const transfers = useFileTransferGuards();
   const shortcutsModal = useShortcutsModal();
+  const checksumDialog = useChecksumDialog();
 
   function activePane() {
     return store.activePaneId;
+  }
+
+  function verifyChecksumForSelection() {
+    const paths = store.operationEntriesFor(activePane())
+      .filter((entry) => entry?.kind === 'file' && !isArchivePath(entry.path))
+      .map((entry) => entry.path);
+
+    checksumDialog.open(paths);
   }
 
   function activeTab() {
@@ -843,6 +853,9 @@ export function useKeyboardShortcuts() {
         case 'file.rename':
           await renameFocused();
           return;
+        case 'file.verifyChecksum':
+          verifyChecksumForSelection();
+          return;
         case 'file.batchRename':
           window.dispatchEvent(new CustomEvent(OPEN_BATCH_RENAME_EVENT, {
             detail: { paneId },
@@ -979,6 +992,12 @@ export function useKeyboardShortcuts() {
           return;
         case 'app.shortcuts':
           shortcutsModal.show();
+          return;
+        case 'edit.undo':
+          await store.undoLastOperation();
+          return;
+        case 'edit.redo':
+          await store.redoLastOperation();
           return;
         default:
           return;
@@ -1330,6 +1349,24 @@ export function useKeyboardShortcuts() {
       if (onlyCommand && lowerKey === 'v') {
         event.preventDefault();
         await pasteClipboard();
+        return;
+      }
+
+      if (command && event.shiftKey && lowerKey === 'z' && !event.altKey) {
+        event.preventDefault();
+        await store.redoLastOperation();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'z') {
+        event.preventDefault();
+        await store.undoLastOperation();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'y') {
+        event.preventDefault();
+        await store.redoLastOperation();
         return;
       }
 
