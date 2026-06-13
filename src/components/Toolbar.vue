@@ -157,6 +157,11 @@ async function deleteSelection() {
   )];
   await deleteItems(entries.map((entry) => entry.path), store.appSettings.deleteMode);
   await Promise.all(touchedDirectories.map((path) => store.reloadDirectoryInPanes(path)));
+  store.recordTrashDelete({
+    paths: entries.map((entry) => entry.path),
+    directories: touchedDirectories,
+    label: entries.length === 1 ? `Deleted "${entries[0].name}"` : `Deleted ${entries.length} items`,
+  });
 }
 </script>
 

@@ -69,6 +69,12 @@ const canVerifyChecksum = computed(() => (
   operationEntries.value.length > 0 &&
   operationEntries.value.every((entry) => entry.kind === 'file' && !isArchivePath(entry.path))
 ));
+const canCompareFolders = computed(() => {
+  const isLocalDir = (path) => Boolean(path) && !path.startsWith('remote://') && !isArchivePath(path);
+  const left = store.effectiveDirectoryFor('left') || store.activeTabFor('left')?.currentPath || '';
+  const right = store.effectiveDirectoryFor('right') || store.activeTabFor('right')?.currentPath || '';
+  return isLocalDir(left) && isLocalDir(right);
+});
 const canSearchRoot = computed(() => {
   const root = activeRoot.value;
   return isCommandMode.value || (canUseLocalFileAssets()
@@ -211,6 +217,15 @@ const commandDefinitions = [
     shortcut: 'F2',
     when: () => hasFocusedEntry.value && canRenamePath(selectedEntry.value?.path),
     keywords: 'name',
+  },
+  {
+    id: 'tools.compareFolders',
+    section: 'File',
+    title: 'Compare & sync folders (left ↔ right)',
+    detail: 'Diff the two panes and copy or mirror differences',
+    icon: 'columns',
+    when: () => canCompareFolders.value,
+    keywords: 'compare sync diff folders directories mirror merge two-way panes difference',
   },
   {
     id: 'file.verifyChecksum',

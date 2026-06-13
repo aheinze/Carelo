@@ -15,6 +15,7 @@ import {
 } from './useFileTransferGuards';
 import { useShortcutsModal } from './useShortcutsModal';
 import { useChecksumDialog } from './useChecksumDialog';
+import { useFolderCompare } from './useFolderCompare';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveRootPath, isArchiveEntry, isArchivePath } from '../utils/archivePaths';
 import {
@@ -279,9 +280,16 @@ export function useKeyboardShortcuts() {
   const transfers = useFileTransferGuards();
   const shortcutsModal = useShortcutsModal();
   const checksumDialog = useChecksumDialog();
+  const folderCompare = useFolderCompare();
 
   function activePane() {
     return store.activePaneId;
+  }
+
+  function openFolderCompare() {
+    const left = store.effectiveDirectoryFor('left') || store.activeTabFor('left')?.currentPath || '';
+    const right = store.effectiveDirectoryFor('right') || store.activeTabFor('right')?.currentPath || '';
+    folderCompare.open(left, right);
   }
 
   function verifyChecksumForSelection() {
@@ -525,6 +533,11 @@ export function useKeyboardShortcuts() {
     await deleteItems(entries.map((entry) => entry.path), store.appSettings.deleteMode);
     store.clearSelection(paneId);
     await refreshDirectories(touchedDirectories);
+    store.recordTrashDelete({
+      paths: entries.map((entry) => entry.path),
+      directories: touchedDirectories,
+      label: entries.length === 1 ? `Deleted "${entries[0].name}"` : `Deleted ${entries.length} items`,
+    });
   }
 
   async function openFocusedExternally() {
@@ -856,6 +869,9 @@ export function useKeyboardShortcuts() {
           return;
         case 'file.verifyChecksum':
           verifyChecksumForSelection();
+          return;
+        case 'tools.compareFolders':
+          openFolderCompare();
           return;
         case 'file.batchRename':
           window.dispatchEvent(new CustomEvent(OPEN_BATCH_RENAME_EVENT, {

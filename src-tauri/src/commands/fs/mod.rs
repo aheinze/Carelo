@@ -175,6 +175,7 @@ fn default_content_search_max_file_bytes() -> u64 {
 }
 
 pub(crate) mod archives;
+pub(crate) mod compare;
 pub(crate) mod git;
 pub(crate) mod image_tools;
 pub(crate) mod pdf_tools;
@@ -189,6 +190,7 @@ pub(crate) mod volumes;
 pub(crate) mod watcher;
 
 pub use archives::{archive_items, unarchive_items};
+pub use compare::compare_directories;
 pub use git::get_git_file_info;
 pub use image_tools::convert_images;
 pub use pdf_tools::{compress_pdfs, run_pdf_tool};
@@ -209,7 +211,7 @@ pub use tools::{
 };
 pub use transfer::{
     copy_items, create_folder, delete_items, get_file_metadata, get_home_directory, list_directory,
-    move_items, rename_item, same_volume,
+    move_items, rename_item, restore_from_trash, same_volume,
 };
 pub use volumes::{eject_volume, list_volumes, mount_volume, unlock_volume};
 pub use watcher::{watch_active_directories, DirectoryWatchState};

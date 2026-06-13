@@ -254,6 +254,82 @@ fn move_local_paths_to_trash(paths: Vec<String>) -> FsResult<()> {
 }
 
 #[tauri::command]
+pub async fn restore_from_trash(paths: Vec<String>) -> Result<(), FsError> {
+    for path in &paths {
+        if archive::is_archive_uri(path) || parse_remote_path(path).is_some() {
+            return Err(FsError::new(
+                "restore_unsupported",
+                "Restoring from Trash is available for local items only.",
+                Some(path.clone()),
+            ));
+        }
+    }
+
+    run_local(move |_| restore_local_paths_from_trash(paths)).await
+}
+
+#[cfg(any(
+    target_os = "windows",
+    all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+))]
+fn restore_local_paths_from_trash(paths: Vec<String>) -> FsResult<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let items = trash::os_limited::list().map_err(|error| {
+        FsError::new(
+            "trash_list_failed",
+            format!("Unable to read the Trash: {error}"),
+            None,
+        )
+    })?;
+
+    let mut to_restore = Vec::with_capacity(paths.len());
+
+    for path in &paths {
+        let target = expand_local_path(path)?;
+        // Pick the most recently trashed item matching this original path.
+        let best = items
+            .iter()
+            .filter(|item| item.original_path() == target)
+            .max_by_key(|item| item.time_deleted)
+            .cloned();
+
+        match best {
+            Some(item) => to_restore.push(item),
+            None => {
+                return Err(FsError::new(
+                    "trash_item_not_found",
+                    "This item is no longer in the Trash and cannot be restored.",
+                    Some(target.to_string_lossy().into_owned()),
+                ));
+            }
+        }
+    }
+
+    trash::os_limited::restore_all(to_restore).map_err(|error| {
+        FsError::new(
+            "trash_restore_failed",
+            format!("Unable to restore from Trash: {error}"),
+            None,
+        )
+    })
+}
+
+#[cfg(not(any(
+    target_os = "windows",
+    all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+)))]
+fn restore_local_paths_from_trash(_paths: Vec<String>) -> FsResult<()> {
+    Err(FsError::new(
+        "trash_restore_unsupported",
+        "Restoring from Trash is not supported on this platform.",
+        None,
+    ))
+}
+
+#[tauri::command]
 pub async fn copy_items(
     app: AppHandle,
     operation_state: tauri::State<'_, FileOperationState>,

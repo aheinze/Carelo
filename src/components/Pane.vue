@@ -3006,6 +3006,11 @@ async function handleContextAction(action) {
         await deleteItems(deleteEntries.map((item) => item.path), store.appSettings.deleteMode);
         store.clearSelection(props.paneId);
         await refreshDirectories(touchedDirectories);
+        store.recordTrashDelete({
+          paths: deleteEntries.map((item) => item.path),
+          directories: touchedDirectories,
+          label: deleteEntries.length === 1 ? `Deleted "${deleteEntries[0].name}"` : `Deleted ${deleteEntries.length} items`,
+        });
       }
       return;
     }

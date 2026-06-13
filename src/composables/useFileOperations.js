@@ -266,6 +266,10 @@ export async function computeFileChecksum(path) {
   return invokeCommand('compute_file_checksum', { path });
 }
 
+export async function compareDirectories(left, right, options = {}) {
+  return invokeCommand('compare_directories', { left, right, options });
+}
+
 export async function readTextPreview(path, maxBytes = 96 * 1024) {
   if (isRemotePath(path)) {
     const cached = cachedRemotePreview('text', path, maxBytes);
@@ -424,6 +428,10 @@ export async function deleteItems(paths, deleteMode = 'trash') {
   return invokeCommand('delete_items', { paths, deleteMode: mode }, { sudo: mode === 'permanent' });
 }
 
+export async function restoreFromTrash(paths) {
+  return invokeCommand('restore_from_trash', { paths });
+}
+
 export async function copyItems(items, jobId = null) {
   return invokeCommand('copy_items', { items, jobId }, { sudo: true });
 }
@@ -522,6 +530,7 @@ export function useFileOperations() {
     createMediaStreamUrl,
     compareFileChecksums,
     computeFileChecksum,
+    compareDirectories,
     copyItems,
     createFolder,
     convertImages,

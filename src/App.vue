@@ -11,6 +11,7 @@ import { useDialog } from './composables/useDialog';
 import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts';
 import { useShortcutsModal } from './composables/useShortcutsModal';
 import { useChecksumDialog } from './composables/useChecksumDialog';
+import { useFolderCompare } from './composables/useFolderCompare';
 import { useFileManagerStore } from './stores/fileManagerStore';
 
 const CommandPalette = defineAsyncComponent(() => import('./components/CommandPalette.vue'));
@@ -18,12 +19,14 @@ const DialogHost = defineAsyncComponent(() => import('./components/DialogHost.vu
 const SettingsWindow = defineAsyncComponent(() => import('./components/SettingsWindow.vue'));
 const ShortcutsModal = defineAsyncComponent(() => import('./components/ShortcutsModal.vue'));
 const ChecksumDialog = defineAsyncComponent(() => import('./components/ChecksumDialog.vue'));
+const FolderCompareDialog = defineAsyncComponent(() => import('./components/FolderCompareDialog.vue'));
 const TerminalPanel = defineAsyncComponent(() => import('./components/TerminalPanel.vue'));
 
 const store = useFileManagerStore();
 const dialog = useDialog();
 const shortcutsModal = useShortcutsModal();
 const checksumDialog = useChecksumDialog();
+const folderCompare = useFolderCompare();
 const appWindow = ref(null);
 const workspace = ref(null);
 const paneGrid = ref(null);
@@ -41,6 +44,7 @@ const layoutStyle = computed(() => ({
 const dialogVisible = computed(() => Boolean(dialog.activeDialog.value));
 const shortcutsVisible = computed(() => shortcutsModal.visible.value);
 const checksumVisible = computed(() => checksumDialog.visible.value);
+const folderCompareVisible = computed(() => folderCompare.visible.value);
 
 watch(
   () => store.terminalPanelVisible,
@@ -185,6 +189,7 @@ onBeforeUnmount(() => {
     <DialogHost v-if="dialogVisible" />
     <ShortcutsModal v-if="shortcutsVisible" />
     <ChecksumDialog v-if="checksumVisible" />
+    <FolderCompareDialog v-if="folderCompareVisible" />
     <TooltipHost />
     <WindowResizeHandles />
   </div>

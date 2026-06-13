@@ -1,5 +1,5 @@
 import { computed, ref, watch } from 'vue';
-import { defineStore } from 'pinia';
+import { acceptHMRUpdate, defineStore } from 'pinia';
 import { listen } from '@tauri-apps/api/event';
 import {
   addFavorite as addStoredFavorite,
@@ -24,6 +24,7 @@ import {
   pauseFileOperation,
   removeFavorite as removeStoredFavorite,
   renameItem,
+  restoreFromTrash,
   resumeFileOperation,
   saveAppSettings as saveStoredAppSettings,
   setActiveRemoteVolumes,
@@ -1254,9 +1255,23 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const canGoBack = computed(() => canGoBackInTab(activePane.value));
   const canGoForward = computed(() => canGoForwardInTab(activePane.value));
   const canUndo = computed(() => undoStack.value.length > 0);
-  const canRedo = computed(() => redoStack.value.length > 0);
+  const canRedo = computed(() => {
+    const next = redoStack.value.at(-1);
+
+    if (!next) {
+      return false;
+    }
+
+    // Re-deleting is only offered while Trash mode is on, so a redone delete
+    // stays reversible.
+    if (next.kind === 'delete' && appSettings.value.deleteMode !== 'trash') {
+      return false;
+    }
+
+    return true;
+  });
   const undoLabel = computed(() => undoStack.value.at(-1)?.label || '');
-  const redoLabel = computed(() => redoStack.value.at(-1)?.label || '');
+  const redoLabel = computed(() => (canRedo.value ? redoStack.value.at(-1)?.label || '' : ''));
   const visibleEntriesByPane = computed(() => {
     const query = searchQuery.value.trim().toLowerCase();
 
@@ -2797,6 +2812,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       label: entry.label || 'operation',
       items: Array.isArray(entry.items) ? entry.items.map((item) => ({ ...item })) : [],
       createdPaths: Array.isArray(entry.createdPaths) ? [...entry.createdPaths] : [],
+      paths: Array.isArray(entry.paths) ? [...entry.paths] : [],
       from: entry.from || '',
       to: entry.to || '',
       directories: Array.isArray(entry.directories)
@@ -2806,6 +2822,22 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     undoStack.value = [...undoStack.value, record].slice(-HISTORY_LIMIT);
     redoStack.value = [];
+  }
+
+  // Only Trash deletes are reversible (undo restores from Trash); permanent
+  // deletes are never recorded.
+  function recordTrashDelete({ paths = [], directories = [], label = 'Deleted items' } = {}) {
+    // Only local Trash deletes are restorable — remote deletes bypass the
+    // Trash and archives are read-only.
+    const targets = (Array.isArray(paths) ? paths : []).filter(
+      (path) => path && !String(path).startsWith('remote://') && !isArchivePath(path),
+    );
+
+    if (appSettings.value.deleteMode !== 'trash' || targets.length === 0) {
+      return;
+    }
+
+    recordHistory({ kind: 'delete', label, paths: targets, directories });
   }
 
   function clearHistory() {
@@ -2899,6 +2931,28 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       });
     }
 
+    if (entry.kind === 'delete') {
+      if (undoing) {
+        return runHistoryJob({
+          operation: 'restore',
+          label: `${verb}: ${entry.label}`,
+          directories: entry.directories,
+          controllable: false,
+          run: () => restoreFromTrash(entry.paths),
+        });
+      }
+
+      // Redo re-deletes to Trash so it stays reversible; only reachable when
+      // Trash mode is enabled (see canRedo).
+      return runHistoryJob({
+        operation: 'delete',
+        label: `${verb}: ${entry.label}`,
+        directories: entry.directories,
+        controllable: false,
+        run: () => deleteItems(entry.paths, 'trash'),
+      });
+    }
+
     return false;
   }
 
@@ -2928,7 +2982,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   }
 
   async function redoLastOperation() {
-    if (historyBusy || redoStack.value.length === 0) {
+    if (historyBusy || !canRedo.value) {
       return;
     }
 
@@ -4095,6 +4149,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     cancelQueueJobDone,
     removeQueueJob,
     recordHistory,
+    recordTrashDelete,
     clearHistory,
     undoLastOperation,
     redoLastOperation,
@@ -4165,3 +4220,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     toggleFileSearch,
   };
 });
+
+// Hot-swap the store on edit instead of leaving a stale instance (which made
+// newly added actions appear `undefined` until a full reload).
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useFileManagerStore, import.meta.hot));
+}
