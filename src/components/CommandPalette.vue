@@ -394,6 +394,15 @@ const commandDefinitions = [
     keywords: 'root filesystem',
   },
   {
+    id: 'pane.editPath',
+    section: 'Navigation',
+    title: 'Go to path…',
+    detail: 'Type or paste a path in the active pane',
+    icon: 'folder',
+    shortcut: 'Ctrl L',
+    keywords: 'address bar location path edit go to jump type navigate',
+  },
+  {
     id: 'pane.openInOtherPane',
     section: 'Navigation',
     title: 'Open focused folder in other pane',

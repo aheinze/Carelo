@@ -43,6 +43,7 @@ const sections = [
       { keys: ['⌘', '['],     label: 'Go back' },
       { keys: ['⌘', ']'],     label: 'Go forward' },
       { keys: ['⌘', '\\'],   label: 'Go to root' },
+      { keys: ['⌘', 'L'],     label: 'Edit path / go to path' },
       { keys: ['⌘', 'PgUp'], label: 'Go to parent' },
       { keys: ['⌘', 'PgDn'], label: 'Open selected folder' },
       { keys: ['⌘', '←'],    label: 'Open focused folder in other pane' },

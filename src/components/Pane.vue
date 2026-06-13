@@ -1,5 +1,5 @@
 <script setup>
-import { computed, defineAsyncComponent, nextTick, onErrorCaptured, onMounted, onUnmounted, ref } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onErrorCaptured, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
 import FileContextMenu from './FileContextMenu.vue';
 import FileList from './FileList.vue';
@@ -41,7 +41,7 @@ import {
   shouldConfirmDelete,
 } from '../utils/deleteConfirmation';
 import { extensionForName, isCompressiblePdfEntry, isConvertibleImageEntry } from '../utils/fileTypes';
-import { OPEN_BATCH_RENAME_EVENT } from '../utils/appEvents';
+import { EDIT_PATH_EVENT, OPEN_BATCH_RENAME_EVENT } from '../utils/appEvents';
 import { renamePromptInputSelection } from '../utils/renamePrompt';
 
 const BatchRenameDialog = defineAsyncComponent(() => import('./BatchRenameDialog.vue'));
@@ -557,12 +557,14 @@ function updateColumnSummary(summary) {
 
 onMounted(async () => {
   window.addEventListener(OPEN_BATCH_RENAME_EVENT, handleOpenBatchRenameEvent);
+  window.addEventListener(EDIT_PATH_EVENT, handleEditPathEvent);
   await store.initialize();
   store.loadPane(props.paneId);
 });
 
 onUnmounted(() => {
   window.removeEventListener(OPEN_BATCH_RENAME_EVENT, handleOpenBatchRenameEvent);
+  window.removeEventListener(EDIT_PATH_EVENT, handleEditPathEvent);
   cleanupPointerDrag();
   clearFileDragNow();
 });
@@ -838,6 +840,65 @@ function toggleSortDirection() {
 function navigateToBreadcrumb(path) {
   store.setPanePath(props.paneId, path);
 }
+
+const editingPath = ref(false);
+const pathDraft = ref('');
+const pathInput = ref(null);
+
+function beginPathEdit() {
+  if (editingPath.value) {
+    return;
+  }
+
+  pathDraft.value = activeTab.value?.currentPath || '~';
+  editingPath.value = true;
+  nextTick(() => {
+    pathInput.value?.focus();
+    pathInput.value?.select();
+  });
+}
+
+function commitPathEdit() {
+  const next = pathDraft.value.trim();
+  editingPath.value = false;
+
+  if (next && next !== (activeTab.value?.currentPath || '')) {
+    store.setPanePath(props.paneId, next);
+  }
+}
+
+function cancelPathEdit() {
+  editingPath.value = false;
+}
+
+function onPathKeydown(event) {
+  // Keep path typing (letters, etc.) from reaching global shortcut handlers.
+  event.stopPropagation();
+
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    commitPathEdit();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    cancelPathEdit();
+  }
+}
+
+function handleEditPathEvent() {
+  if (store.activePaneId !== props.paneId) {
+    return;
+  }
+
+  beginPathEdit();
+}
+
+// Drop the editor if the tab or its path changes underneath it.
+watch(
+  () => [activeTab.value?.id, activeTab.value?.currentPath],
+  () => {
+    editingPath.value = false;
+  },
+);
 
 function handleFileSelect(payload) {
   const index = typeof payload === 'number' ? payload : payload?.index;
@@ -3066,18 +3127,40 @@ async function handleContextAction(action) {
     </nav>
 
     <header class="pane-header">
-      <nav class="breadcrumbs" aria-label="Current path">
+      <nav
+        class="breadcrumbs"
+        :class="{ 'breadcrumbs--editing': editingPath }"
+        aria-label="Current path"
+        :title="editingPath ? '' : 'Click to edit path'"
+        @click="beginPathEdit"
+      >
         <AppIcon name="folder" :size="13" :stroke-width="1.9" class="breadcrumbs-icon" />
-        <button
-          v-for="(crumb, index) in breadcrumbs"
-          :key="`${crumb.path}-${index}`"
-          type="button"
-          :title="crumb.path"
-          @click.stop="navigateToBreadcrumb(crumb.path)"
-          @keydown.stop
-        >
-          {{ crumb.label }}
-        </button>
+        <input
+          v-if="editingPath"
+          ref="pathInput"
+          v-model="pathDraft"
+          class="breadcrumbs-input"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          autocapitalize="off"
+          aria-label="Edit path"
+          @click.stop
+          @keydown="onPathKeydown"
+          @blur="cancelPathEdit"
+        />
+        <template v-else>
+          <button
+            v-for="(crumb, index) in breadcrumbs"
+            :key="`${crumb.path}-${index}`"
+            type="button"
+            :title="crumb.path"
+            @click.stop="navigateToBreadcrumb(crumb.path)"
+            @keydown.stop
+          >
+            {{ crumb.label }}
+          </button>
+        </template>
       </nav>
 
       <div class="pane-header-bottom">
@@ -3598,6 +3681,7 @@ async function handleContextAction(action) {
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+  cursor: text;
 }
 
 .breadcrumbs::-webkit-scrollbar {
@@ -3606,6 +3690,27 @@ async function handleContextAction(action) {
 
 .breadcrumbs-icon {
   flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.breadcrumbs-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 22px;
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  padding: 0 8px;
+  background: var(--input-bg);
+  box-shadow: var(--accent-focus-ring);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 560;
+  letter-spacing: 0;
+  outline: 0;
+}
+
+.breadcrumbs-input::placeholder {
   color: var(--text-faint);
 }
 
@@ -3628,6 +3733,7 @@ async function handleContextAction(action) {
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
   transition:
     background 90ms ease,
     color 90ms ease;

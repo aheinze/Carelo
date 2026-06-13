@@ -25,6 +25,7 @@ import { renamePromptInputSelection } from '../utils/renamePrompt';
 import {
   OPEN_BATCH_RENAME_EVENT,
   CREATE_SIDEBAR_GROUP_EVENT,
+  EDIT_PATH_EVENT,
   OPEN_REMOTE_STORAGE_EVENT,
   RUN_COMMAND_EVENT,
 } from '../utils/appEvents';
@@ -918,6 +919,9 @@ export function useKeyboardShortcuts() {
         case 'pane.newTabFromFocused':
           createTabFromFocused();
           return;
+        case 'pane.editPath':
+          window.dispatchEvent(new CustomEvent(EDIT_PATH_EVENT));
+          return;
         case 'pane.refresh':
           await reloadPane();
           return;
@@ -1175,6 +1179,12 @@ export function useKeyboardShortcuts() {
       if (onlyCommand && lowerKey === 'r') {
         event.preventDefault();
         await reloadPane();
+        return;
+      }
+
+      if (onlyCommand && lowerKey === 'l') {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent(EDIT_PATH_EVENT));
         return;
       }
 
