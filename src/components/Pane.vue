@@ -19,6 +19,7 @@ import {
   renameItem,
   runPdfTool as runPdfToolCommand,
   runCustomTool,
+  setFileTags,
   unarchiveItems,
 } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
@@ -438,6 +439,21 @@ const canVerifyChecksumContext = computed(() => {
 
   return operationEntries.length > 0
     && operationEntries.every((entry) => entry?.kind === 'file' && !isArchivePath(entry.path));
+});
+const canTagContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  return operationEntries.length > 0 && operationEntries.every((entry) => !isArchivePath(entry.path));
+});
+const activeTagColorContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  if (operationEntries.length === 0) {
+    return '';
+  }
+
+  const first = operationEntries[0]?.tagColor || '';
+  return operationEntries.every((entry) => (entry?.tagColor || '') === first) ? first : '';
 });
 const pdfToolActionsContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
@@ -2924,6 +2940,21 @@ async function handleContextAction(action) {
       return;
     }
 
+    if (typeof action === 'string' && action.startsWith('tag:')) {
+      const value = action.slice('tag:'.length);
+      const color = value === 'clear' ? null : value;
+      const taggable = contextOperationEntries(menu).filter((item) => !isArchivePath(item.path));
+      const paths = taggable.map((item) => item.path);
+
+      if (paths.length === 0) {
+        return;
+      }
+
+      await setFileTags(paths, color);
+      await refreshDirectories(parentDirectoriesForEntries(taggable));
+      return;
+    }
+
     if (action === 'compressPdfs') {
       await openPdfToolsDialog(contextOperationEntries(menu), 'compress');
       return;
@@ -3282,6 +3313,8 @@ async function handleContextAction(action) {
       :custom-tools="availableCustomTools"
       :can-convert-images="canConvertImagesContext"
       :can-verify-checksum="canVerifyChecksumContext"
+      :can-tag="canTagContext"
+      :active-tag-color="activeTagColorContext"
       :pdf-tool-actions="pdfToolActionsContext"
       :can-transfer="canTransferToOtherPane"
       :can-modify="canModifyContext"

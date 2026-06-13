@@ -83,3 +83,32 @@ pub fn get_app_settings(store: tauri::State<'_, AppStoreState>) -> FsResult<Opti
 pub fn save_app_settings(settings: Value, store: tauri::State<'_, AppStoreState>) -> FsResult<()> {
     store.save_app_settings(settings)
 }
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagMove {
+    pub from: String,
+    pub to: String,
+}
+
+#[tauri::command]
+pub fn set_file_tags(
+    paths: Vec<String>,
+    color: Option<String>,
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<()> {
+    for path in paths {
+        store.set_file_tag(path, color.clone())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn move_file_tags(moves: Vec<TagMove>, store: tauri::State<'_, AppStoreState>) -> FsResult<()> {
+    for entry in moves {
+        store.move_file_tag(&entry.from, &entry.to)?;
+    }
+
+    Ok(())
+}

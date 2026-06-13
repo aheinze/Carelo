@@ -71,6 +71,14 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  canTag: {
+    type: Boolean,
+    default: false,
+  },
+  activeTagColor: {
+    type: String,
+    default: '',
+  },
   pdfToolActions: {
     type: Array,
     default: () => [],
@@ -82,6 +90,17 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['action', 'close']);
+
+// Finder-style fixed tag palette. Stored value is the CSS color the row dot uses.
+const TAG_COLORS = [
+  { name: 'Red', value: '#ff453a' },
+  { name: 'Orange', value: '#ff9f0a' },
+  { name: 'Yellow', value: '#ffd60a' },
+  { name: 'Green', value: '#32d74b' },
+  { name: 'Blue', value: '#0a84ff' },
+  { name: 'Purple', value: '#bf5af2' },
+  { name: 'Gray', value: '#98989d' },
+];
 
 const menuRef = ref(null);
 const filterInput = ref(null);
@@ -829,6 +848,33 @@ onUnmounted(() => {
       <div v-else class="context-menu-empty">
         No matching actions
       </div>
+
+      <template v-if="canTag && !normalizedActionFilter">
+        <div class="context-menu-separator"></div>
+        <div class="context-menu-tags" role="group" aria-label="Tag color">
+          <button
+            v-for="tag in TAG_COLORS"
+            :key="tag.value"
+            type="button"
+            class="context-menu-swatch"
+            :class="{ 'context-menu-swatch--active': activeTagColor === tag.value }"
+            :style="{ '--swatch-color': tag.value }"
+            :title="tag.name"
+            :aria-label="`Tag ${tag.name}`"
+            @click="emitAction(`tag:${tag.value}`)"
+          ></button>
+          <button
+            type="button"
+            class="context-menu-swatch context-menu-swatch--clear"
+            :class="{ 'context-menu-swatch--active': !activeTagColor }"
+            title="No tag"
+            aria-label="Remove tag"
+            @click="emitAction('tag:clear')"
+          >
+            <AppIcon name="x" :size="11" :stroke-width="2.4" />
+          </button>
+        </div>
+      </template>
     </div>
 
     <div
@@ -1104,5 +1150,47 @@ onUnmounted(() => {
   height: 1px;
   margin: 4px 2px;
   background: var(--hairline);
+}
+
+.context-menu-tags {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px 6px;
+}
+
+.context-menu-swatch {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 50%;
+  background: var(--swatch-color, transparent);
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.22);
+  cursor: pointer;
+  transition: transform 90ms ease, box-shadow 90ms ease;
+}
+
+.context-menu-swatch:hover {
+  transform: scale(1.18);
+}
+
+.context-menu-swatch--active {
+  box-shadow:
+    0 0 0 2px var(--popover-bg),
+    0 0 0 4px var(--accent);
+}
+
+.context-menu-swatch--clear {
+  background: transparent;
+  color: var(--text-muted);
+  box-shadow: inset 0 0 0 1px var(--control-border);
+}
+
+.context-menu-swatch--clear:hover {
+  color: var(--text);
 }
 </style>

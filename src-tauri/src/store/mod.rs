@@ -1,9 +1,10 @@
-use crate::fs::models::{FsError, FsResult};
+use crate::fs::models::{FileEntry, FsError, FsResult};
 use crate::fs::remote::RemoteVolumeConfig;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -77,6 +78,8 @@ pub struct OpenWithDefaultEntry {
 pub struct AppStoreState {
     connection: Mutex<Connection>,
     path: PathBuf,
+    // In-memory cache of path -> color so directory listings don't hit the DB.
+    tags: Mutex<HashMap<String, String>>,
 }
 
 impl AppStoreState {
@@ -96,15 +99,110 @@ impl AppStoreState {
 
         migrate(&connection, &path)?;
         seed_default_favorites(&connection, &path)?;
+        let tags = load_file_tags(&connection, &path)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
             path,
+            tags: Mutex::new(tags),
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Stamp cached color tags onto a freshly listed set of entries.
+    pub fn apply_file_tags(&self, entries: &mut [FileEntry]) {
+        let Ok(tags) = self.tags.lock() else {
+            return;
+        };
+
+        if tags.is_empty() {
+            return;
+        }
+
+        for entry in entries.iter_mut() {
+            if let Some(color) = tags.get(&entry.path) {
+                entry.tag_color = Some(color.clone());
+            }
+        }
+    }
+
+    /// Set (Some) or clear (None) the color tag for a path.
+    pub fn set_file_tag(&self, path: String, color: Option<String>) -> FsResult<()> {
+        {
+            let connection = self.connection()?;
+
+            match color.as_deref() {
+                Some(value) => {
+                    connection
+                        .execute(
+                            "INSERT INTO file_tags(path, color, updated_at) VALUES(?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET color = excluded.color, updated_at = excluded.updated_at",
+                            params![path, value, unix_timestamp()],
+                        )
+                        .map_err(|error| store_sql_error("Unable to save file tag", &self.path, error))?;
+                }
+                None => {
+                    connection
+                        .execute("DELETE FROM file_tags WHERE path = ?1", params![path])
+                        .map_err(|error| store_sql_error("Unable to clear file tag", &self.path, error))?;
+                }
+            }
+        }
+
+        let mut tags = self.tags_guard()?;
+
+        match color {
+            Some(value) => {
+                tags.insert(path, value);
+            }
+            None => {
+                tags.remove(&path);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Re-key a tag when its file is renamed or moved, so the tag follows it.
+    pub fn move_file_tag(&self, from: &str, to: &str) -> FsResult<()> {
+        if from == to {
+            return Ok(());
+        }
+
+        let color = self.tags_guard()?.get(from).cloned();
+        let Some(color) = color else {
+            return Ok(());
+        };
+
+        {
+            let connection = self.connection()?;
+            connection
+                .execute("DELETE FROM file_tags WHERE path = ?1", params![from])
+                .map_err(|error| store_sql_error("Unable to move file tag", &self.path, error))?;
+            connection
+                .execute(
+                    "INSERT INTO file_tags(path, color, updated_at) VALUES(?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET color = excluded.color, updated_at = excluded.updated_at",
+                    params![to, color, unix_timestamp()],
+                )
+                .map_err(|error| store_sql_error("Unable to move file tag", &self.path, error))?;
+        }
+
+        let mut tags = self.tags_guard()?;
+        tags.remove(from);
+        tags.insert(to.to_string(), color);
+        Ok(())
+    }
+
+    fn tags_guard(&self) -> FsResult<std::sync::MutexGuard<'_, HashMap<String, String>>> {
+        self.tags.lock().map_err(|error| {
+            FsError::new(
+                "store_lock_failed",
+                format!("Unable to lock file tags: {error}"),
+                None,
+            )
+        })
     }
 
     pub fn list_favorites(&self) -> FsResult<Vec<FavoriteEntry>> {
@@ -659,6 +757,12 @@ fn migrate(connection: &Connection, path: &Path) -> FsResult<()> {
               app_name TEXT NOT NULL,
               updated_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS file_tags (
+              path TEXT PRIMARY KEY,
+              color TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
             "#,
         )
         .map_err(|error| store_sql_error("Unable to migrate app store", path, error))?;
@@ -1115,6 +1219,27 @@ fn unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn load_file_tags(connection: &Connection, path: &Path) -> FsResult<HashMap<String, String>> {
+    let mut statement = connection
+        .prepare("SELECT path, color FROM file_tags")
+        .map_err(|error| store_sql_error("Unable to read file tags", path, error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| store_sql_error("Unable to read file tags", path, error))?;
+
+    let mut map = HashMap::new();
+
+    for row in rows {
+        let (entry_path, color) =
+            row.map_err(|error| store_sql_error("Unable to read file tags", path, error))?;
+        map.insert(entry_path, color);
+    }
+
+    Ok(map)
 }
 
 pub fn window_dimensions(width: f64, height: f64) -> WindowDimensions {

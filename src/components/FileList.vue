@@ -2218,7 +2218,7 @@ watch(
 
         <div
           v-else
-          v-memo="[slot.entry.path, slot.entry.name, slot.entry.size, slot.entry.modifiedAt, isEntrySelected(slot.index), entryDropPath === slot.entry.path, dateFormat]"
+          v-memo="[slot.entry.path, slot.entry.name, slot.entry.size, slot.entry.modifiedAt, slot.entry.tagColor, isEntrySelected(slot.index), entryDropPath === slot.entry.path, dateFormat]"
           class="file-grid-item"
           :class="{ 'file-drop-target': entryDropPath === slot.entry.path }"
           :data-file-index="slot.index"
@@ -2349,7 +2349,15 @@ watch(
                   :stroke-width="1.8"
                 />
               </span>
-              <span class="file-column-name">{{ item.entry.name }}</span>
+              <span class="file-column-main">
+                <span class="file-column-name">{{ item.entry.name }}</span>
+                <span
+                  v-if="item.entry.tagColor"
+                  class="file-column-tag"
+                  :style="{ '--tag-color': item.entry.tagColor }"
+                  aria-hidden="true"
+                ></span>
+              </span>
               <AppIcon
                 v-if="isBrowsableEntry(item.entry)"
                 class="file-column-chevron"
@@ -2528,7 +2536,7 @@ watch(
         <div
           v-for="item in virtualListItems"
           :key="item.entry.path"
-          v-memo="[item.index, item.entry.path, item.entry.name, item.entry.size, item.entry.modifiedAt, isEntrySelected(item.index), entryDropPath === item.entry.path, dateFormat, alternateRowColors, listStripeOffset]"
+          v-memo="[item.index, item.entry.path, item.entry.name, item.entry.size, item.entry.modifiedAt, item.entry.tagColor, isEntrySelected(item.index), entryDropPath === item.entry.path, dateFormat, alternateRowColors, listStripeOffset]"
           class="file-list-item"
           :class="{ 'file-drop-target': entryDropPath === item.entry.path }"
           :data-file-index="item.index"
@@ -3246,10 +3254,30 @@ watch(
   color: rgb(255 255 255 / 0.88);
 }
 
+.file-column-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
 .file-column-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-column-tag {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--tag-color);
+  box-shadow:
+    inset 0 0 0 0.5px rgb(255 255 255 / 0.35),
+    0 1px 2px rgb(0 0 0 / 0.22);
 }
 
 .file-column-chevron {

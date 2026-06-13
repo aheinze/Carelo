@@ -19,6 +19,7 @@ import {
   listVolumes,
   mountVolume,
   moveFavorite as moveStoredFavorite,
+  moveFileTags,
   moveItems,
   removeFavoriteGroup as removeStoredFavoriteGroup,
   pauseFileOperation,
@@ -2895,7 +2896,11 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         operation: 'move',
         label: `${verb}: ${entry.label}`,
         directories: entry.directories,
-        run: (jobId) => moveItems(items, jobId),
+        run: async (jobId) => {
+          await moveItems(items, jobId);
+          // Keep color tags attached as files move back/forward.
+          await moveFileTags(items.map((item) => ({ from: item.from, to: item.to }))).catch(() => {});
+        },
       });
     }
 
@@ -2908,7 +2913,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         label: `${verb}: ${entry.label}`,
         directories: entry.directories,
         controllable: false,
-        run: () => renameItem(from, to),
+        run: async () => {
+          await renameItem(from, to);
+          await moveFileTags([{ from, to }]).catch(() => {});
+        },
       });
     }
 

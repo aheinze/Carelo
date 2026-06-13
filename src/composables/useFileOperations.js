@@ -432,6 +432,14 @@ export async function restoreFromTrash(paths) {
   return invokeCommand('restore_from_trash', { paths });
 }
 
+export async function setFileTags(paths, color) {
+  return invokeCommand('set_file_tags', { paths, color: color || null });
+}
+
+export async function moveFileTags(moves) {
+  return invokeCommand('move_file_tags', { moves });
+}
+
 export async function copyItems(items, jobId = null) {
   return invokeCommand('copy_items', { items, jobId }, { sudo: true });
 }

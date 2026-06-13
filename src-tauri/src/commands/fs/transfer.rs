@@ -5,22 +5,24 @@ pub async fn list_directory(
     path: String,
     sudo_password: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
+    app_store: tauri::State<'_, AppStoreState>,
 ) -> Result<Vec<FileEntry>, FsError> {
-    if let Some(archive_path) = archive::parse_archive_uri(&path) {
-        return run_local(move |_| archive::list_archive_directory(&archive_path)).await;
-    }
+    let mut entries = if let Some(archive_path) = archive::parse_archive_uri(&path) {
+        run_local(move |_| archive::list_archive_directory(&archive_path)).await?
+    } else if let Some(remote_path) = parse_remote_path(&path) {
+        list_remote_directory(&remotes, remote_path).await?
+    } else {
+        let sudo_path = path.clone();
+        run_local_with_sudo(
+            sudo_password,
+            move |provider| provider.list(&path),
+            move |password| sudo::list_directory(&password, &sudo_path),
+        )
+        .await?
+    };
 
-    if let Some(remote_path) = parse_remote_path(&path) {
-        return list_remote_directory(&remotes, remote_path).await;
-    }
-
-    let sudo_path = path.clone();
-    run_local_with_sudo(
-        sudo_password,
-        move |provider| provider.list(&path),
-        move |password| sudo::list_directory(&password, &sudo_path),
-    )
-    .await
+    app_store.apply_file_tags(&mut entries);
+    Ok(entries)
 }
 
 #[tauri::command]

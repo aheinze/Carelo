@@ -206,6 +206,12 @@ onBeforeUnmount(stopThumbnailObserver);
       <AppIcon v-else :name="fileTypeIconName(entry)" :size="46" :stroke-width="1.55" />
     </span>
     <span class="file-card-name">{{ entry.name }}</span>
+    <span
+      v-if="entry.tagColor"
+      class="file-card-tag"
+      :style="{ '--tag-color': entry.tagColor }"
+      aria-hidden="true"
+    ></span>
   </button>
 
   <button
@@ -383,6 +389,7 @@ onBeforeUnmount(stopThumbnailObserver);
 
 /* ── Grid card ────────────────────────────────────────────── */
 .file-card {
+  position: relative;
   display: grid;
   width: 194px;
   min-width: 0;
@@ -395,6 +402,19 @@ onBeforeUnmount(stopThumbnailObserver);
   color: var(--text);
   text-align: center;
   transition: background 100ms ease;
+}
+
+.file-card-tag {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--tag-color);
+  box-shadow:
+    inset 0 0 0 0.5px rgb(255 255 255 / 0.4),
+    0 1px 3px rgb(0 0 0 / 0.35);
 }
 
 .file-card:hover {

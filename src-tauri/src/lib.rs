@@ -15,8 +15,8 @@ use commands::fs::{
 use commands::oauth::create_oauth_tokens;
 use commands::store::{
     add_favorite, add_favorite_group, app_store_path, get_app_settings, get_window_dimensions,
-    list_favorite_groups, list_favorites, move_favorite, remove_favorite, remove_favorite_group,
-    save_app_settings, save_window_dimensions,
+    list_favorite_groups, list_favorites, move_favorite, move_file_tags, remove_favorite,
+    remove_favorite_group, save_app_settings, save_window_dimensions, set_file_tags,
 };
 use commands::terminal::{
     terminal_close, terminal_cwd, terminal_resize, terminal_start, terminal_write, TerminalState,
@@ -117,6 +117,8 @@ pub fn run() {
             app_store_path,
             get_app_settings,
             save_app_settings,
+            set_file_tags,
+            move_file_tags,
             get_window_dimensions,
             save_window_dimensions,
             create_oauth_tokens,
