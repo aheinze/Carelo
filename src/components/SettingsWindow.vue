@@ -263,6 +263,10 @@ function setBooleanSetting(key, event) {
   store.setAppSetting(key, event.target.checked);
 }
 
+function setTransferParallelism(event) {
+  store.setAppSetting('transferParallelism', event.target.checked ? 'auto' : 'off');
+}
+
 function setEditorTemplate(template) {
   store.setAppSetting('editorCommand', template.command);
   editorTemplatesVisible.value = false;
@@ -855,6 +859,20 @@ onUnmounted(() => {
                       type="checkbox"
                       :checked="store.appSettings.confirmDelete"
                       @change="setBooleanSetting('confirmDelete', $event)"
+                    />
+                    <span class="settings-switch" aria-hidden="true"></span>
+                  </label>
+
+                  <label class="setting-row setting-row--switch">
+                    <span class="setting-copy">
+                      <strong>Parallel transfers</strong>
+                      <span>Copy and move several files at once. Speeds up remote and SSD transfers; turn off for slow spinning disks.</span>
+                    </span>
+                    <input
+                      class="switch-input"
+                      type="checkbox"
+                      :checked="store.appSettings.transferParallelism !== 'off'"
+                      @change="setTransferParallelism($event)"
                     />
                     <span class="settings-switch" aria-hidden="true"></span>
                   </label>

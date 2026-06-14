@@ -465,12 +465,12 @@ export async function clearRecentLocations() {
   return invokeCommand('clear_recent_locations');
 }
 
-export async function copyItems(items, jobId = null) {
-  return invokeCommand('copy_items', { items, jobId }, { sudo: true });
+export async function copyItems(items, jobId = null, maxConcurrency = null) {
+  return invokeCommand('copy_items', { items, jobId, maxConcurrency }, { sudo: true });
 }
 
-export async function moveItems(items, jobId = null) {
-  return invokeCommand('move_items', { items, jobId }, { sudo: true });
+export async function moveItems(items, jobId = null, maxConcurrency = null) {
+  return invokeCommand('move_items', { items, jobId, maxConcurrency }, { sudo: true });
 }
 
 export async function archiveItems(paths, destination, options = {}, overwrite = false, jobId = null) {

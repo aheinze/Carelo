@@ -255,7 +255,8 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), FsError> {
 
 #[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), FsError> {
-    let is_web = url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:");
+    let is_web =
+        url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:");
 
     if !is_web {
         return Err(FsError::new(
@@ -266,7 +267,11 @@ pub async fn open_external_url(url: String) -> Result<(), FsError> {
     }
 
     tauri_plugin_opener::open_url(url, None::<&str>).map_err(|error| {
-        FsError::new("open_url_failed", format!("Unable to open link: {error}"), None)
+        FsError::new(
+            "open_url_failed",
+            format!("Unable to open link: {error}"),
+            None,
+        )
     })
 }
 

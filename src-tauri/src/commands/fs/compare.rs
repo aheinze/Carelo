@@ -112,7 +112,9 @@ fn compare_local_directories(
     };
 
     ctx.compare_dir("", 0)?;
-    ctx.result.entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    ctx.result
+        .entries
+        .sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(ctx.result)
 }
 
@@ -129,8 +131,10 @@ impl CompareCtx<'_> {
             return Ok(());
         }
 
-        let left_children = read_children(&join_rel(self.left_root, rel), self.options.include_hidden);
-        let right_children = read_children(&join_rel(self.right_root, rel), self.options.include_hidden);
+        let left_children =
+            read_children(&join_rel(self.left_root, rel), self.options.include_hidden);
+        let right_children =
+            read_children(&join_rel(self.right_root, rel), self.options.include_hidden);
 
         let mut names: Vec<&String> = left_children.keys().collect();
         for name in right_children.keys() {
@@ -167,12 +171,24 @@ impl CompareCtx<'_> {
                         // Common directory — recurse, its contents are compared individually.
                         self.compare_dir(&child_rel, depth + 1)?;
                     } else if left_meta.is_dir != right_meta.is_dir {
-                        self.record("type_conflict", &child_rel, name, Some(left_meta), Some(right_meta));
+                        self.record(
+                            "type_conflict",
+                            &child_rel,
+                            name,
+                            Some(left_meta),
+                            Some(right_meta),
+                        );
                         self.result.differing += 1;
                     } else {
                         match classify_files(left_meta, right_meta) {
                             Some(status) => {
-                                self.record(status, &child_rel, name, Some(left_meta), Some(right_meta));
+                                self.record(
+                                    status,
+                                    &child_rel,
+                                    name,
+                                    Some(left_meta),
+                                    Some(right_meta),
+                                );
                                 self.result.differing += 1;
                             }
                             None => self.result.identical += 1,
@@ -199,7 +215,10 @@ impl CompareCtx<'_> {
             return;
         }
 
-        let is_dir = left.map(|m| m.is_dir).or_else(|| right.map(|m| m.is_dir)).unwrap_or(false);
+        let is_dir = left
+            .map(|m| m.is_dir)
+            .or_else(|| right.map(|m| m.is_dir))
+            .unwrap_or(false);
         self.result.entries.push(CompareEntry {
             relative_path: rel.to_string(),
             name: name.to_string(),
@@ -307,7 +326,10 @@ mod tests {
     use std::time::Duration;
 
     fn set_mtime(path: &Path, secs: u64) {
-        let file = fs::File::options().write(true).open(path).expect("open for mtime");
+        let file = fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open for mtime");
         file.set_modified(UNIX_EPOCH + Duration::from_secs(secs))
             .expect("set mtime");
     }
@@ -326,7 +348,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("carelo-compare-{}-{nonce}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("carelo-compare-{}-{nonce}", std::process::id()));
         let left = root.join("left");
         let right = root.join("right");
         fs::create_dir_all(&left).unwrap();
@@ -390,7 +413,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("carelo-compare-hidden-{}-{nonce}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "carelo-compare-hidden-{}-{nonce}",
+            std::process::id()
+        ));
         let left = root.join("left");
         let right = root.join("right");
         fs::create_dir_all(&left).unwrap();

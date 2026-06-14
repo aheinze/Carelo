@@ -183,6 +183,309 @@ fn finalize_failures(mut failures: Vec<FsError>) -> FsResult<()> {
     }
 }
 
+#[derive(Default)]
+struct CopyPlan {
+    /// (from, to, source metadata) — created depth-first before files.
+    dirs: Vec<(PathBuf, PathBuf, fs::Metadata)>,
+    files: Vec<FileCopyTask>,
+    /// (from, to, overwrite)
+    symlinks: Vec<(PathBuf, PathBuf, bool)>,
+    total_bytes: u64,
+    total_entries: u64,
+    /// Items that couldn't even be planned (unreadable, cycles).
+    failures: Vec<FsError>,
+}
+
+struct FileCopyTask {
+    from: PathBuf,
+    to: PathBuf,
+    metadata: fs::Metadata,
+    overwrite: bool,
+}
+
+/// Walk the tree (single-threaded) producing a flat plan the worker pool can
+/// execute. Mirrors `copy_path`'s structure decisions; cycle detection matches
+/// `measure_path` so a symlinked loop in Follow mode can't recurse forever.
+fn plan_copy_path(
+    from: &Path,
+    to: &Path,
+    overwrite: bool,
+    symlink_mode: SymlinkMode,
+    visited_directories: &mut HashSet<PathBuf>,
+    plan: &mut CopyPlan,
+) -> FsResult<()> {
+    let symlink_metadata = fs::symlink_metadata(from)
+        .map_err(|error| FsError::io("Unable to read source metadata", from, error))?;
+
+    if symlink_metadata.file_type().is_symlink() && matches!(symlink_mode, SymlinkMode::Preserve) {
+        if !overwrite && path_exists(to)? {
+            return Err(destination_exists_error(to));
+        }
+
+        plan.symlinks
+            .push((from.to_path_buf(), to.to_path_buf(), overwrite));
+        plan.total_entries = plan.total_entries.saturating_add(1);
+        return Ok(());
+    }
+
+    let metadata = if symlink_metadata.file_type().is_symlink() {
+        fs::metadata(from)
+            .map_err(|error| FsError::io("Unable to read symlink target metadata", from, error))?
+    } else {
+        symlink_metadata
+    };
+
+    if !overwrite && path_exists(to)? {
+        return Err(destination_exists_error(to));
+    }
+
+    if metadata.is_dir() {
+        if overwrite && path_exists(to)? {
+            return Err(destination_type_error(to));
+        }
+
+        let canonical = fs::canonicalize(from)
+            .map_err(|error| FsError::io("Unable to resolve source directory", from, error))?;
+
+        if !visited_directories.insert(canonical) {
+            return Err(FsError::new(
+                "directory_cycle",
+                "Refusing to transfer a directory cycle.",
+                Some(from.to_string_lossy().into_owned()),
+            ));
+        }
+
+        plan.dirs
+            .push((from.to_path_buf(), to.to_path_buf(), metadata.clone()));
+        plan.total_entries = plan.total_entries.saturating_add(1);
+
+        for child in fs::read_dir(from)
+            .map_err(|error| FsError::io("Unable to read source directory", from, error))?
+        {
+            let child = child.map_err(|error| {
+                FsError::io("Unable to read source directory entry", from, error)
+            })?;
+            plan_copy_path(
+                &child.path(),
+                &to.join(child.file_name()),
+                overwrite,
+                symlink_mode,
+                visited_directories,
+                plan,
+            )?;
+        }
+
+        return Ok(());
+    }
+
+    if overwrite && path_exists(to)? {
+        let target_metadata = fs::symlink_metadata(to)
+            .map_err(|error| FsError::io("Unable to read destination metadata", to, error))?;
+
+        if target_metadata.is_dir() {
+            return Err(destination_type_error(to));
+        }
+    }
+
+    plan.total_bytes = plan.total_bytes.saturating_add(metadata.len());
+    plan.total_entries = plan.total_entries.saturating_add(1);
+    plan.files.push(FileCopyTask {
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+        metadata,
+        overwrite,
+    });
+
+    Ok(())
+}
+
+/// Copy a batch using a bounded pool of worker threads. Directories are created
+/// first, files are copied in parallel (reusing `copy_file`, so reflink /
+/// copy_file_range / metadata preservation all apply per file), then directory
+/// timestamps are restored. Continue-on-error and cancellation are honored.
+///
+/// This is genuinely multi-threaded, so it's only used when the caller has
+/// decided the storage is solid-state/remote; spinning disks use the sequential
+/// `copy_items_with_progress` instead.
+pub fn copy_items_parallel<F, C>(
+    items: &[LocalTransferItem],
+    concurrency: usize,
+    on_progress: F,
+    checkpoint: C,
+) -> FsResult<()>
+where
+    F: Fn(OperationProgress) + Sync,
+    C: Fn(Option<&Path>) -> FsResult<()> + Sync,
+{
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let resolved_items = resolve_items(items)?;
+    let mut plan = CopyPlan::default();
+    let mut visited_directories = HashSet::new();
+
+    for item in &resolved_items {
+        checkpoint(Some(&item.from))?;
+
+        if let Err(error) = plan_copy_path(
+            &item.from,
+            &item.to,
+            item.overwrite,
+            item.symlink_mode,
+            &mut visited_directories,
+            &mut plan,
+        ) {
+            if is_cancellation_error(&error) {
+                return Err(error);
+            }
+
+            plan.failures.push(error);
+        }
+    }
+
+    let total_bytes = plan.total_bytes;
+    let total_entries = plan.total_entries;
+    let emit = |processed_bytes: u64, processed_entries: u64, current: Option<&Path>| {
+        on_progress(OperationProgress {
+            processed_bytes: processed_bytes.min(total_bytes),
+            total_bytes,
+            processed_entries: processed_entries.min(total_entries),
+            total_entries,
+            current_path: current.map(|path| path.to_string_lossy().into_owned()),
+            current_bytes: 0,
+            current_total_bytes: 0,
+        });
+    };
+
+    emit(0, 0, None);
+
+    // 1. Create directories (depth-first order from the plan). create_dir_all is
+    //    idempotent, so a merge into an existing tree is fine.
+    let mut failures = plan.failures;
+    let mut processed_entries = 0_u64;
+
+    for (from, to, _metadata) in &plan.dirs {
+        checkpoint(Some(from))?;
+
+        if let Err(error) = fs::create_dir_all(to)
+            .map_err(|error| FsError::io("Unable to create destination directory", to, error))
+        {
+            failures.push(error);
+        } else {
+            processed_entries += 1;
+        }
+    }
+
+    // 2. Copy files across a bounded worker pool.
+    let files = &plan.files;
+    let next = AtomicUsize::new(0);
+    let processed_bytes = AtomicU64::new(0);
+    let entries_done = AtomicU64::new(processed_entries);
+    let last_emitted = AtomicU64::new(0);
+    let cancelled = AtomicBool::new(false);
+    let file_failures: Mutex<Vec<FsError>> = Mutex::new(Vec::new());
+    let workers = concurrency.max(1).min(files.len().max(1));
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let mut scratch = ProgressState::default();
+                let mut noop = |_progress: OperationProgress| {};
+                let mut worker_checkpoint = |path: Option<&Path>| checkpoint(path);
+
+                loop {
+                    if cancelled.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= files.len() {
+                        break;
+                    }
+
+                    let task = &files[index];
+
+                    match copy_file(
+                        &task.from,
+                        &task.to,
+                        &task.metadata,
+                        task.overwrite,
+                        &mut scratch,
+                        &mut noop,
+                        &mut worker_checkpoint,
+                    ) {
+                        Ok(()) => {
+                            let bytes = processed_bytes
+                                .fetch_add(task.metadata.len(), Ordering::Relaxed)
+                                + task.metadata.len();
+                            let done = entries_done.fetch_add(1, Ordering::Relaxed) + 1;
+
+                            // Throttle progress events; one worker claims each step.
+                            let last = last_emitted.load(Ordering::Relaxed);
+                            if (bytes.saturating_sub(last) >= PROGRESS_BYTE_STEP
+                                || bytes >= total_bytes)
+                                && last_emitted
+                                    .compare_exchange(
+                                        last,
+                                        bytes,
+                                        Ordering::Relaxed,
+                                        Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                            {
+                                emit(bytes, done, Some(&task.from));
+                            }
+                        }
+                        Err(error) => {
+                            if is_cancellation_error(&error) {
+                                cancelled.store(true, Ordering::Relaxed);
+                            }
+                            file_failures.lock().unwrap().push(error);
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    // A cancellation anywhere aborts the whole operation.
+    let mut file_failures = file_failures.into_inner().unwrap();
+    if file_failures.iter().any(is_cancellation_error) {
+        return Err(FsError::new(
+            "operation_cancelled",
+            "The file operation was cancelled.",
+            None,
+        ));
+    }
+
+    failures.append(&mut file_failures);
+    processed_entries = entries_done.load(Ordering::Relaxed);
+    let copied_bytes = processed_bytes.load(Ordering::Relaxed);
+
+    // 3. Symlinks (cheap; done sequentially after files).
+    for (from, to, overwrite) in &plan.symlinks {
+        checkpoint(Some(from))?;
+
+        match copy_symlink(from, to, *overwrite) {
+            Ok(()) => {
+                processed_entries += 1;
+                emit(copied_bytes, processed_entries, Some(from));
+            }
+            Err(error) => failures.push(error),
+        }
+    }
+
+    // 4. Restore directory permissions/timestamps now that their contents exist.
+    for (_from, to, metadata) in &plan.dirs {
+        if let Ok(directory) = File::open(to) {
+            preserve_metadata(&directory, metadata);
+        }
+    }
+
+    emit(total_bytes, total_entries, None);
+    finalize_failures(failures)
+}
+
 fn resolve_items(items: &[LocalTransferItem]) -> FsResult<Vec<ResolvedTransferItem>> {
     items
         .iter()
@@ -640,7 +943,14 @@ where
         checkpoint(Some(from))?;
         // SAFETY: descriptors are valid; null offsets advance the file positions.
         let copied = unsafe {
-            libc::copy_file_range(src, std::ptr::null_mut(), dst, std::ptr::null_mut(), CHUNK, 0)
+            libc::copy_file_range(
+                src,
+                std::ptr::null_mut(),
+                dst,
+                std::ptr::null_mut(),
+                CHUNK,
+                0,
+            )
         };
 
         if copied < 0 {
@@ -1033,6 +1343,142 @@ mod tests {
         )
     }
 
+    fn dir_item(from: &Path, to: &Path) -> LocalTransferItem {
+        LocalTransferItem {
+            from: from.to_string_lossy().into_owned(),
+            to: to.to_string_lossy().into_owned(),
+            overwrite: false,
+            symlink_mode: SymlinkMode::Preserve,
+        }
+    }
+
+    #[test]
+    fn parallel_copy_replicates_a_nested_tree_byte_for_byte() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_root("parallel-tree");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(src.join("sub/deeper")).expect("nested src");
+
+        // Many files so the worker pool genuinely overlaps; varied content so a
+        // mixed-up copy would be detected.
+        for index in 0..120 {
+            let payload = format!("file-{index}-").repeat(64);
+            fs::write(src.join(format!("f{index}.bin")), &payload).expect("write file");
+        }
+        for index in 0..40 {
+            fs::write(
+                src.join("sub").join(format!("g{index}.bin")),
+                format!("g{index}"),
+            )
+            .expect("write sub file");
+        }
+        fs::write(src.join("sub/deeper/leaf.txt"), "leaf").expect("write leaf");
+        #[cfg(unix)]
+        fs::set_permissions(&src.join("f0.bin"), fs::Permissions::from_mode(0o640)).expect("chmod");
+
+        copy_items_parallel(&[dir_item(&src, &dst)], 8, |_progress| {}, |_path| Ok(()))
+            .expect("parallel copy");
+
+        for index in 0..120 {
+            let payload = format!("file-{index}-").repeat(64);
+            assert_eq!(
+                fs::read(dst.join(format!("f{index}.bin"))).expect("read copied file"),
+                payload.into_bytes(),
+                "f{index} content mismatch"
+            );
+        }
+        for index in 0..40 {
+            assert_eq!(
+                fs::read_to_string(dst.join("sub").join(format!("g{index}.bin")))
+                    .expect("read sub file"),
+                format!("g{index}")
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(dst.join("sub/deeper/leaf.txt")).expect("read leaf"),
+            "leaf"
+        );
+        // Per-file metadata is preserved on the parallel path too.
+        assert_eq!(
+            fs::metadata(dst.join("f0.bin"))
+                .expect("dst meta")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn parallel_copy_continues_past_a_failed_item_and_reports() {
+        let root = test_root("parallel-continue");
+        let src = root.join("src");
+        let good_dst = root.join("good");
+        fs::create_dir_all(&src).expect("src");
+        for index in 0..10 {
+            fs::write(src.join(format!("f{index}.txt")), format!("c{index}")).expect("write");
+        }
+
+        let result = copy_items_parallel(
+            &[
+                // A missing source aborts only its own item.
+                dir_item(&root.join("does-not-exist"), &root.join("missing-dst")),
+                dir_item(&src, &good_dst),
+            ],
+            4,
+            |_progress| {},
+            |_path| Ok(()),
+        );
+
+        assert!(result.is_err());
+        for index in 0..10 {
+            assert_eq!(
+                fs::read_to_string(good_dst.join(format!("f{index}.txt"))).expect("good copy"),
+                format!("c{index}")
+            );
+        }
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn parallel_copy_aborts_on_cancellation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = test_root("parallel-cancel");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).expect("src");
+        for index in 0..40 {
+            fs::write(src.join(format!("f{index}.txt")), "data").expect("write");
+        }
+
+        let calls = AtomicUsize::new(0);
+        let result = copy_items_parallel(
+            &[dir_item(&src, &dst)],
+            4,
+            |_progress| {},
+            |_path| {
+                if calls.fetch_add(1, Ordering::Relaxed) > 2 {
+                    Err(FsError::new("operation_cancelled", "cancelled", None))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("cancelled copy should error").code,
+            "operation_cancelled"
+        );
+
+        cleanup(&root);
+    }
+
     #[test]
     fn copy_handles_empty_file() {
         let root = test_root("copy-empty");
@@ -1084,7 +1530,10 @@ mod tests {
     fn missing_item(root: &Path, name: &str) -> LocalTransferItem {
         LocalTransferItem {
             from: root.join(name).to_string_lossy().into_owned(),
-            to: root.join(format!("{name}-copy")).to_string_lossy().into_owned(),
+            to: root
+                .join(format!("{name}-copy"))
+                .to_string_lossy()
+                .into_owned(),
             overwrite: false,
             symlink_mode: SymlinkMode::Preserve,
         }

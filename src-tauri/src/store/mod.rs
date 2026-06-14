@@ -123,7 +123,10 @@ impl AppStoreState {
 
     /// Snapshot of every path -> color tag (for the frontend tag map).
     pub fn all_file_tags(&self) -> HashMap<String, String> {
-        self.tags.lock().map(|tags| tags.clone()).unwrap_or_default()
+        self.tags
+            .lock()
+            .map(|tags| tags.clone())
+            .unwrap_or_default()
     }
 
     /// Stamp cached color tags onto a freshly listed set of entries.
@@ -160,7 +163,9 @@ impl AppStoreState {
                 None => {
                     connection
                         .execute("DELETE FROM file_tags WHERE path = ?1", params![path])
-                        .map_err(|error| store_sql_error("Unable to clear file tag", &self.path, error))?;
+                        .map_err(|error| {
+                            store_sql_error("Unable to clear file tag", &self.path, error)
+                        })?;
                 }
             }
         }
@@ -234,16 +239,16 @@ impl AppStoreState {
                     visited_at: row.get(2)?,
                 })
             })
-            .map_err(|error| store_sql_error("Unable to read recent locations", &self.path, error))?;
+            .map_err(|error| {
+                store_sql_error("Unable to read recent locations", &self.path, error)
+            })?;
 
         let mut entries = Vec::new();
 
         for row in rows {
-            entries.push(
-                row.map_err(|error| {
-                    store_sql_error("Unable to read recent locations", &self.path, error)
-                })?,
-            );
+            entries.push(row.map_err(|error| {
+                store_sql_error("Unable to read recent locations", &self.path, error)
+            })?);
         }
 
         Ok(entries)
@@ -281,7 +286,9 @@ impl AppStoreState {
                 "DELETE FROM recent_locations WHERE path = ?1",
                 params![path],
             )
-            .map_err(|error| store_sql_error("Unable to remove recent location", &self.path, error))?;
+            .map_err(|error| {
+                store_sql_error("Unable to remove recent location", &self.path, error)
+            })?;
 
         Ok(())
     }
@@ -290,7 +297,9 @@ impl AppStoreState {
         let connection = self.connection()?;
         connection
             .execute("DELETE FROM recent_locations", [])
-            .map_err(|error| store_sql_error("Unable to clear recent locations", &self.path, error))?;
+            .map_err(|error| {
+                store_sql_error("Unable to clear recent locations", &self.path, error)
+            })?;
 
         Ok(())
     }

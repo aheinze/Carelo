@@ -431,7 +431,10 @@ mod unix {
 
     fn emit_output(app: &tauri::AppHandle, session_id: u64, data: String) {
         if !data.is_empty() {
-            let _ = app.emit("terminal://output", TerminalOutputPayload { session_id, data });
+            let _ = app.emit(
+                "terminal://output",
+                TerminalOutputPayload { session_id, data },
+            );
         }
     }
 

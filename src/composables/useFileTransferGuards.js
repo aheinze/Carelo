@@ -783,11 +783,15 @@ export function useFileTransferGuards() {
       retryAction,
     });
 
+    // 'off' forces serial transfers; otherwise the backend picks concurrency
+    // by storage type (high for remote, serial for spinning disks).
+    const maxConcurrency = store.transferMaxConcurrency();
+
     try {
       if (mode === 'move') {
-        await moveItems(runItems, jobId);
+        await moveItems(runItems, jobId, maxConcurrency);
       } else {
-        await copyItems(runItems, jobId);
+        await copyItems(runItems, jobId, maxConcurrency);
       }
 
       // Re-key color tags before the reload so the moved file keeps its dot

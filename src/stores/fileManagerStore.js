@@ -111,6 +111,8 @@ const DEFAULT_APP_SETTINGS = Object.freeze({
   restoreTerminalPanel: false,
   confirmDelete: true,
   deleteMode: 'trash',
+  // 'auto' lets the backend pick concurrency by storage type; 'off' forces serial.
+  transferParallelism: 'auto',
   terminalStartsInActiveFolder: true,
   editorCommand: '',
   customTools: [],
@@ -230,6 +232,7 @@ function normalizeAppSettings(settings = {}) {
     restoreTerminalPanel: value.restoreTerminalPanel === true,
     confirmDelete: value.confirmDelete !== false,
     deleteMode: normalizeDeleteMode(value.deleteMode),
+    transferParallelism: value.transferParallelism === 'off' ? 'off' : 'auto',
     terminalStartsInActiveFolder: value.terminalStartsInActiveFolder !== false,
     editorCommand: normalizeEditorCommand(value.editorCommand),
     customTools: normalizeCustomTools(value.customTools),
@@ -3046,6 +3049,13 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     redoStack.value = [];
   }
 
+  // Concurrency cap to pass to copy/move commands: 1 when the user turned
+  // parallel transfers off, otherwise null so the backend picks by storage type.
+  // Centralized so every caller (transfers, undo/redo, folder sync) agrees.
+  function transferMaxConcurrency() {
+    return appSettings.value.transferParallelism === 'off' ? 1 : null;
+  }
+
   // Runs a single undo/redo step as a queue job so it shows progress, reuses
   // the cancel/pause plumbing, and reports failures like any other transfer.
   // Returns true when applied, false when the user cancelled; throws on error.
@@ -3097,7 +3107,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         label: `${verb}: ${entry.label}`,
         directories: entry.directories,
         run: async (jobId) => {
-          await moveItems(items, jobId);
+          await moveItems(items, jobId, transferMaxConcurrency());
           // Keep color tags attached as files move back/forward.
           await relocateFileTags(items.map((item) => ({ from: item.from, to: item.to }))).catch(() => {});
         },
@@ -3135,7 +3145,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         operation: 'copy',
         label: `${verb}: ${entry.label}`,
         directories: entry.directories,
-        run: (jobId) => copyItems(entry.items.map((item) => ({ ...item })), jobId),
+        run: (jobId) => copyItems(entry.items.map((item) => ({ ...item })), jobId, transferMaxConcurrency()),
       });
     }
 
@@ -4340,6 +4350,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     fileSearchVisible,
     fileSearchMode,
     appSettings,
+    transferMaxConcurrency,
     searchQuery,
     queue,
     operationLog,

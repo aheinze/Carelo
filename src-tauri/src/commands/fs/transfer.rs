@@ -1,5 +1,149 @@
 use super::*;
 
+/// One queued remote transfer, classified up front so a batch can be run
+/// concurrently rather than one blocking `await` at a time.
+enum RemoteTransfer {
+    RemoteToRemote {
+        from: RemotePath,
+        to: RemotePath,
+    },
+    RemoteToLocal {
+        from: RemotePath,
+        to: std::path::PathBuf,
+    },
+    LocalToRemote {
+        from: std::path::PathBuf,
+        to: RemotePath,
+        symlink_mode: operations::SymlinkMode,
+    },
+}
+
+struct RemoteTask {
+    transfer: RemoteTransfer,
+    overwrite: bool,
+    /// Path shown in progress events as the "current" item.
+    label: String,
+}
+
+async fn run_one_remote_task(
+    remotes: &RemoteVolumeState,
+    is_move: bool,
+    task: &RemoteTask,
+) -> Result<(), FsError> {
+    match &task.transfer {
+        RemoteTransfer::RemoteToRemote { from, to } => {
+            if is_move {
+                move_remote_item(remotes, from.clone(), to.clone(), task.overwrite).await
+            } else {
+                copy_remote_item(remotes, from.clone(), to.clone(), task.overwrite).await
+            }
+        }
+        RemoteTransfer::RemoteToLocal { from, to } => {
+            if is_move {
+                move_remote_to_local_item(remotes, from.clone(), to, task.overwrite).await
+            } else {
+                copy_remote_to_local_item(remotes, from.clone(), to, task.overwrite).await
+            }
+        }
+        RemoteTransfer::LocalToRemote {
+            from,
+            to,
+            symlink_mode,
+        } => {
+            if is_move {
+                move_local_to_remote_item(remotes, from, to.clone(), task.overwrite, *symlink_mode)
+                    .await
+            } else {
+                copy_local_to_remote_item(remotes, from, to.clone(), task.overwrite, *symlink_mode)
+                    .await
+            }
+        }
+    }
+}
+
+/// Run a batch of remote transfers with bounded concurrency. `buffer_unordered`
+/// drives the futures cooperatively on one task (concurrent I/O, not parallel
+/// threads), so there are no data races — only network latency is overlapped.
+/// Individual failures are collected and aggregated (continue-on-error);
+/// cancellation aborts the batch.
+async fn run_remote_tasks<P>(
+    remotes: &RemoteVolumeState,
+    op_state: &FileOperationState,
+    job_id: &Option<String>,
+    is_move: bool,
+    tasks: Vec<RemoteTask>,
+    concurrency: usize,
+    processed: &std::sync::atomic::AtomicU64,
+    total: u64,
+    on_progress: P,
+) -> Result<(), FsError>
+where
+    P: Fn(u64, u64, String),
+{
+    use futures::stream::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    let concurrency = concurrency.max(1);
+    let on_progress = &on_progress;
+
+    // Each future owns its task (rather than borrowing an iterator item), which
+    // keeps the command's boxed future `Send` without higher-ranked lifetimes.
+    let results: Vec<Result<(), FsError>> = futures::stream::iter(tasks)
+        .map(|task| async move {
+            // Cancellation is checked (non-blocking) before each transfer starts.
+            if op_state.cancel_requested(job_id) {
+                return Err(FsError::new(
+                    "operation_cancelled",
+                    "The file operation was cancelled.",
+                    None,
+                ));
+            }
+
+            run_one_remote_task(remotes, is_move, &task).await?;
+
+            let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+            on_progress(done, total, task.label);
+            Ok(())
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+    let mut failures = Vec::new();
+
+    for result in results {
+        if let Err(error) = result {
+            if error.code == "operation_cancelled" {
+                return Err(error);
+            }
+
+            failures.push(error);
+        }
+    }
+
+    aggregate_transfer_failures(failures)
+}
+
+/// A lone failure is returned verbatim (so its code still drives sudo
+/// escalation); multiple failures aggregate into one reported error.
+fn aggregate_transfer_failures(mut failures: Vec<FsError>) -> Result<(), FsError> {
+    match failures.len() {
+        0 => Ok(()),
+        1 => Err(failures.remove(0)),
+        count => {
+            let first = failures.remove(0);
+            Err(FsError::new(
+                "operation_partial_failure",
+                format!(
+                    "{count} items could not be completed. First error: {}",
+                    first.message
+                ),
+                first.path,
+            ))
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn list_directory(
     path: String,
@@ -295,7 +439,12 @@ pub async fn restore_from_trash(paths: Vec<String>) -> Result<(), FsError> {
 
 #[cfg(any(
     target_os = "windows",
-    all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+    all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    )
 ))]
 fn restore_local_paths_from_trash(paths: Vec<String>) -> FsResult<()> {
     if paths.is_empty() {
@@ -344,7 +493,12 @@ fn restore_local_paths_from_trash(paths: Vec<String>) -> FsResult<()> {
 
 #[cfg(not(any(
     target_os = "windows",
-    all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+    all(
+        unix,
+        not(target_os = "macos"),
+        not(target_os = "ios"),
+        not(target_os = "android")
+    )
 )))]
 fn restore_local_paths_from_trash(_paths: Vec<String>) -> FsResult<()> {
     Err(FsError::new(
@@ -361,12 +515,14 @@ pub async fn copy_items(
     items: Vec<TransferItem>,
     job_id: Option<String>,
     sudo_password: Option<String>,
+    max_concurrency: Option<u32>,
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<(), FsError> {
     let _operation_cleanup =
         OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
     let mut archive_items = Vec::new();
     let mut local_items = Vec::new();
+    let mut remote_tasks: Vec<RemoteTask> = Vec::new();
     let total_items = items.len() as u64;
     let mut processed_items = 0_u64;
 
@@ -390,69 +546,84 @@ pub async fn copy_items(
                 ));
             }
             (None, None, Some(remote_from), Some(remote_to)) => {
-                let target_uri =
+                let label =
                     crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
-                copy_remote_item(&remotes, remote_from, remote_to, item.overwrite).await?;
-                processed_items = processed_items.saturating_add(1);
-                emit_file_operation_progress(
-                    &app,
-                    &job_id,
-                    "copy",
-                    "running",
-                    ProgressSnapshot {
-                        processed_entries: processed_items,
-                        total_entries: total_items,
-                        current_path: Some(target_uri),
-                        ..ProgressSnapshot::default()
+                remote_tasks.push(RemoteTask {
+                    transfer: RemoteTransfer::RemoteToRemote {
+                        from: remote_from,
+                        to: remote_to,
                     },
-                );
+                    overwrite: item.overwrite,
+                    label,
+                });
             }
             (None, None, Some(remote_from), None) => {
                 let target = expand_local_path(&item.to)?;
-                copy_remote_to_local_item(&remotes, remote_from, &target, item.overwrite).await?;
-                processed_items = processed_items.saturating_add(1);
-                emit_file_operation_progress(
-                    &app,
-                    &job_id,
-                    "copy",
-                    "running",
-                    ProgressSnapshot {
-                        processed_entries: processed_items,
-                        total_entries: total_items,
-                        current_path: Some(item.to.clone()),
-                        ..ProgressSnapshot::default()
+                remote_tasks.push(RemoteTask {
+                    transfer: RemoteTransfer::RemoteToLocal {
+                        from: remote_from,
+                        to: target,
                     },
-                );
+                    overwrite: item.overwrite,
+                    label: item.to.clone(),
+                });
             }
             (None, None, None, Some(remote_to)) => {
                 let source = expand_local_path(&item.from)?;
-                let target_uri =
+                let label =
                     crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
-                copy_local_to_remote_item(
-                    &remotes,
-                    &source,
-                    remote_to,
-                    item.overwrite,
-                    item.symlink_mode,
-                )
-                .await?;
-                processed_items = processed_items.saturating_add(1);
-                emit_file_operation_progress(
-                    &app,
-                    &job_id,
-                    "copy",
-                    "running",
-                    ProgressSnapshot {
-                        processed_entries: processed_items,
-                        total_entries: total_items,
-                        current_path: Some(target_uri),
-                        ..ProgressSnapshot::default()
+                remote_tasks.push(RemoteTask {
+                    transfer: RemoteTransfer::LocalToRemote {
+                        from: source,
+                        to: remote_to,
+                        symlink_mode: item.symlink_mode,
                     },
-                );
+                    overwrite: item.overwrite,
+                    label,
+                });
             }
             (None, None, None, None) => local_items.push(item),
         }
     }
+
+    let processed = std::sync::atomic::AtomicU64::new(processed_items);
+
+    if !remote_tasks.is_empty() {
+        let concurrency = crate::fs::storage::resolve_concurrency(
+            crate::fs::storage::StorageClass::Remote,
+            max_concurrency.map(|value| value as usize),
+        );
+        let progress_app = app.clone();
+        let progress_job_id = job_id.clone();
+
+        run_remote_tasks(
+            &remotes,
+            &operation_state,
+            &job_id,
+            false,
+            remote_tasks,
+            concurrency,
+            &processed,
+            total_items,
+            |done, total, label| {
+                emit_file_operation_progress(
+                    &progress_app,
+                    &progress_job_id,
+                    "copy",
+                    "running",
+                    ProgressSnapshot {
+                        processed_entries: done,
+                        total_entries: total,
+                        current_path: Some(label),
+                        ..ProgressSnapshot::default()
+                    },
+                );
+            },
+        )
+        .await?;
+    }
+
+    processed_items = processed.load(std::sync::atomic::Ordering::Relaxed);
 
     if !archive_items.is_empty() {
         let archive_app = app.clone();
@@ -496,6 +667,13 @@ pub async fn copy_items(
         return Ok(());
     }
 
+    // Choose how parallel the local copy may run, based on the destination's
+    // storage type (spinning disks stay serial) and the user's override.
+    let local_concurrency = crate::fs::storage::resolve_concurrency(
+        crate::fs::storage::classify_path(&local_items[0].to),
+        max_concurrency.map(|value| value as usize),
+    );
+
     let sudo_items = local_items.clone();
     let native_app = app.clone();
     let native_job_id = job_id.clone();
@@ -508,6 +686,26 @@ pub async fn copy_items(
         move |provider| {
             if native_job_id.is_some() {
                 let operation_items = transfer_items_for_operations(&local_items);
+
+                // Closures are passed inline (not via a `let`) so the compiler
+                // infers the higher-ranked lifetime the checkpoint signature needs.
+                if local_concurrency > 1 {
+                    return operations::copy_items_parallel(
+                        &operation_items,
+                        local_concurrency,
+                        |progress| {
+                            emit_transfer_operation_progress(
+                                &native_app,
+                                &native_job_id,
+                                "copy",
+                                "running",
+                                progress,
+                            );
+                        },
+                        |path| native_operation_state.checkpoint(&native_job_id, path),
+                    );
+                }
+
                 return operations::copy_items_with_progress(
                     &operation_items,
                     |progress| {
@@ -568,13 +766,15 @@ pub async fn move_items(
     items: Vec<TransferItem>,
     job_id: Option<String>,
     sudo_password: Option<String>,
+    max_concurrency: Option<u32>,
     remotes: tauri::State<'_, RemoteVolumeState>,
 ) -> Result<(), FsError> {
     let _operation_cleanup =
         OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
     let mut local_items = Vec::new();
+    let mut remote_tasks: Vec<RemoteTask> = Vec::new();
     let total_items = items.len() as u64;
-    let mut processed_items = 0_u64;
+    let processed_items = 0_u64;
 
     for item in items {
         operation_state.checkpoint(&job_id, None)?;
@@ -593,68 +793,80 @@ pub async fn move_items(
 
         match (parse_remote_path(&item.from), parse_remote_path(&item.to)) {
             (Some(remote_from), Some(remote_to)) => {
-                let target_uri =
+                let label =
                     crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
-                move_remote_item(&remotes, remote_from, remote_to, item.overwrite).await?;
-                processed_items = processed_items.saturating_add(1);
-                emit_file_operation_progress(
-                    &app,
-                    &job_id,
-                    "move",
-                    "running",
-                    ProgressSnapshot {
-                        processed_entries: processed_items,
-                        total_entries: total_items,
-                        current_path: Some(target_uri),
-                        ..ProgressSnapshot::default()
+                remote_tasks.push(RemoteTask {
+                    transfer: RemoteTransfer::RemoteToRemote {
+                        from: remote_from,
+                        to: remote_to,
                     },
-                );
+                    overwrite: item.overwrite,
+                    label,
+                });
             }
             (Some(remote_from), None) => {
                 let target = expand_local_path(&item.to)?;
-                move_remote_to_local_item(&remotes, remote_from, &target, item.overwrite).await?;
-                processed_items = processed_items.saturating_add(1);
-                emit_file_operation_progress(
-                    &app,
-                    &job_id,
-                    "move",
-                    "running",
-                    ProgressSnapshot {
-                        processed_entries: processed_items,
-                        total_entries: total_items,
-                        current_path: Some(item.to.clone()),
-                        ..ProgressSnapshot::default()
+                remote_tasks.push(RemoteTask {
+                    transfer: RemoteTransfer::RemoteToLocal {
+                        from: remote_from,
+                        to: target,
                     },
-                );
+                    overwrite: item.overwrite,
+                    label: item.to.clone(),
+                });
             }
             (None, Some(remote_to)) => {
                 let source = expand_local_path(&item.from)?;
-                let target_uri =
+                let label =
                     crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
-                move_local_to_remote_item(
-                    &remotes,
-                    &source,
-                    remote_to,
-                    item.overwrite,
-                    item.symlink_mode,
-                )
-                .await?;
-                processed_items = processed_items.saturating_add(1);
-                emit_file_operation_progress(
-                    &app,
-                    &job_id,
-                    "move",
-                    "running",
-                    ProgressSnapshot {
-                        processed_entries: processed_items,
-                        total_entries: total_items,
-                        current_path: Some(target_uri),
-                        ..ProgressSnapshot::default()
+                remote_tasks.push(RemoteTask {
+                    transfer: RemoteTransfer::LocalToRemote {
+                        from: source,
+                        to: remote_to,
+                        symlink_mode: item.symlink_mode,
                     },
-                );
+                    overwrite: item.overwrite,
+                    label,
+                });
             }
             (None, None) => local_items.push(item),
         }
+    }
+
+    if !remote_tasks.is_empty() {
+        let concurrency = crate::fs::storage::resolve_concurrency(
+            crate::fs::storage::StorageClass::Remote,
+            max_concurrency.map(|value| value as usize),
+        );
+        let processed = std::sync::atomic::AtomicU64::new(processed_items);
+        let progress_app = app.clone();
+        let progress_job_id = job_id.clone();
+
+        run_remote_tasks(
+            &remotes,
+            &operation_state,
+            &job_id,
+            true,
+            remote_tasks,
+            concurrency,
+            &processed,
+            total_items,
+            |done, total, label| {
+                emit_file_operation_progress(
+                    &progress_app,
+                    &progress_job_id,
+                    "move",
+                    "running",
+                    ProgressSnapshot {
+                        processed_entries: done,
+                        total_entries: total,
+                        current_path: Some(label),
+                        ..ProgressSnapshot::default()
+                    },
+                );
+            },
+        )
+        .await?;
     }
 
     if local_items.is_empty() {
@@ -741,4 +953,189 @@ fn transfer_items_for_operations(items: &[TransferItem]) -> Vec<operations::Loca
             symlink_mode: item.symlink_mode,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_base(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "carelo-remote-tasks-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn fs_remote_state(root: &std::path::Path) -> RemoteVolumeState {
+        let state = RemoteVolumeState::default();
+        state
+            .add(RemoteVolumeConfig {
+                id: "test".to_string(),
+                name: "Test".to_string(),
+                scheme: "fs".to_string(),
+                root: Some(root.to_string_lossy().into_owned()),
+                options: HashMap::new(),
+            })
+            .expect("fs remote should register");
+        state
+    }
+
+    fn local_to_remote_task(from: PathBuf, remote: &str, label: &str) -> RemoteTask {
+        RemoteTask {
+            transfer: RemoteTransfer::LocalToRemote {
+                from,
+                to: parse_remote_path(remote).expect("remote path parses"),
+                symlink_mode: operations::SymlinkMode::Preserve,
+            },
+            overwrite: false,
+            label: label.to_string(),
+        }
+    }
+
+    #[test]
+    fn run_remote_tasks_runs_concurrently_and_continues_past_failures() {
+        let base = unique_base("continue");
+        let src = base.join("src");
+        let remote_root = base.join("remote");
+        fs::create_dir_all(&src).expect("src dir");
+        fs::create_dir_all(&remote_root).expect("remote dir");
+
+        let mut tasks = Vec::new();
+        for index in 0..6 {
+            let file = src.join(format!("f{index}.txt"));
+            fs::write(&file, format!("content-{index}")).expect("write source");
+            tasks.push(local_to_remote_task(
+                file,
+                &format!("remote://test/f{index}.txt"),
+                &format!("f{index}"),
+            ));
+        }
+        // A missing source in the middle must not abort the healthy transfers.
+        tasks.push(local_to_remote_task(
+            src.join("missing.txt"),
+            "remote://test/missing.txt",
+            "missing",
+        ));
+
+        let state = fs_remote_state(&remote_root);
+        let op_state = FileOperationState::default();
+        let processed = AtomicU64::new(0);
+        let progress_calls = AtomicU64::new(0);
+
+        let result = tauri::async_runtime::block_on(run_remote_tasks(
+            &state,
+            &op_state,
+            &None,
+            false,
+            tasks,
+            4,
+            &processed,
+            7,
+            |_done, _total, _label| {
+                progress_calls.fetch_add(1, Ordering::Relaxed);
+            },
+        ));
+
+        // One failure (the missing source) is reported, verbatim (not aggregated).
+        assert!(result.is_err());
+        assert_ne!(result.unwrap_err().code, "operation_partial_failure");
+
+        for index in 0..6 {
+            assert!(
+                remote_root.join(format!("f{index}.txt")).is_file(),
+                "f{index} should have been copied despite the failing item"
+            );
+        }
+        assert_eq!(processed.load(Ordering::Relaxed), 6);
+        assert_eq!(progress_calls.load(Ordering::Relaxed), 6);
+        assert!(!remote_root.join("missing.txt").exists());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn run_remote_tasks_aggregates_multiple_failures() {
+        let base = unique_base("aggregate");
+        let src = base.join("src");
+        let remote_root = base.join("remote");
+        fs::create_dir_all(&src).expect("src dir");
+        fs::create_dir_all(&remote_root).expect("remote dir");
+
+        let good = src.join("good.txt");
+        fs::write(&good, "good").expect("write good");
+
+        let tasks = vec![
+            local_to_remote_task(src.join("missing-a.txt"), "remote://test/a.txt", "a"),
+            local_to_remote_task(good, "remote://test/good.txt", "good"),
+            local_to_remote_task(src.join("missing-b.txt"), "remote://test/b.txt", "b"),
+        ];
+
+        let state = fs_remote_state(&remote_root);
+        let op_state = FileOperationState::default();
+        let processed = AtomicU64::new(0);
+
+        let result = tauri::async_runtime::block_on(run_remote_tasks(
+            &state,
+            &op_state,
+            &None,
+            false,
+            tasks,
+            4,
+            &processed,
+            3,
+            |_d, _t, _l| {},
+        ));
+
+        let error = result.expect_err("two failures should be reported");
+        assert_eq!(error.code, "operation_partial_failure");
+        assert!(remote_root.join("good.txt").is_file());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn run_remote_tasks_aborts_when_cancelled() {
+        let base = unique_base("cancel");
+        let src = base.join("src");
+        let remote_root = base.join("remote");
+        fs::create_dir_all(&src).expect("src dir");
+        fs::create_dir_all(&remote_root).expect("remote dir");
+        let file = src.join("f.txt");
+        fs::write(&file, "data").expect("write source");
+
+        let tasks = vec![local_to_remote_task(file, "remote://test/f.txt", "f")];
+        let state = fs_remote_state(&remote_root);
+        let op_state = FileOperationState::default();
+        op_state.request_cancel("job-1");
+        let processed = AtomicU64::new(0);
+
+        let result = tauri::async_runtime::block_on(run_remote_tasks(
+            &state,
+            &op_state,
+            &Some("job-1".to_string()),
+            false,
+            tasks,
+            4,
+            &processed,
+            1,
+            |_d, _t, _l| {},
+        ));
+
+        assert_eq!(
+            result.expect_err("cancelled batch should error").code,
+            "operation_cancelled"
+        );
+        assert_eq!(processed.load(Ordering::Relaxed), 0);
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }

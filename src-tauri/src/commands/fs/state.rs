@@ -57,6 +57,12 @@ impl FileOperationState {
             .unwrap_or(false)
     }
 
+    /// Non-blocking cancellation check, for async contexts (remote transfers)
+    /// that must not block a runtime worker the way `checkpoint` does on pause.
+    pub(super) fn cancel_requested(&self, job_id: &Option<String>) -> bool {
+        self.is_cancelled(job_id)
+    }
+
     pub(super) fn checkpoint(&self, job_id: &Option<String>, path: Option<&Path>) -> FsResult<()> {
         loop {
             if self.is_cancelled(job_id) {

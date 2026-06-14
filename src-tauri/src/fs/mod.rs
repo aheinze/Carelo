@@ -6,4 +6,5 @@ pub mod provider;
 pub mod remote;
 pub mod sftp_mount;
 pub mod smb;
+pub mod storage;
 pub mod sudo;

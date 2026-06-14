@@ -637,10 +637,7 @@ mod tests {
             .create_file(&target.to_string_lossy())
             .expect("create empty file");
         assert!(target.is_file());
-        assert_eq!(
-            fs::read_to_string(&target).expect("read created file"),
-            ""
-        );
+        assert_eq!(fs::read_to_string(&target).expect("read created file"), "");
 
         // A second create must not truncate the now-populated file.
         fs::write(&target, "keep me").expect("write content");

@@ -289,7 +289,7 @@ async function runSync() {
 
   try {
     if (copies.length > 0) {
-      await copyItems(copies, jobId);
+      await copyItems(copies, jobId, store.transferMaxConcurrency());
     }
 
     if (deletes.length > 0) {
