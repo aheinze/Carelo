@@ -17,6 +17,7 @@ const FAVORITES_SEEDED_KEY: &str = "favorites.seeded.v1";
 const DEFAULT_FAVORITE_GROUP_ID: &str = "favorites";
 const DEFAULT_FAVORITE_GROUP_NAME: &str = "Favorites";
 const WINDOW_DIMENSIONS_KEY: &str = "window.dimensions.v1";
+const RECENT_LOCATIONS_LIMIT: i64 = 50;
 const APP_SETTINGS_KEY: &str = "app.settings.v1";
 const REMOTE_VOLUMES_KEY: &str = "remote.volumes.v1";
 const MIN_WINDOW_WIDTH: f64 = 960.0;
@@ -73,6 +74,14 @@ pub struct OpenWithDefaultEntry {
     pub app_id: String,
     pub app_name: String,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentLocationEntry {
+    pub path: String,
+    pub name: String,
+    pub visited_at: i64,
 }
 
 pub struct AppStoreState {
@@ -208,6 +217,82 @@ impl AppStoreState {
                 None,
             )
         })
+    }
+
+    pub fn list_recent_locations(&self) -> FsResult<Vec<RecentLocationEntry>> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT path, name, visited_at FROM recent_locations ORDER BY visited_at DESC LIMIT ?1",
+            )
+            .map_err(|error| store_sql_error("Unable to read recent locations", &self.path, error))?;
+        let rows = statement
+            .query_map(params![RECENT_LOCATIONS_LIMIT], |row| {
+                Ok(RecentLocationEntry {
+                    path: row.get(0)?,
+                    name: row.get(1)?,
+                    visited_at: row.get(2)?,
+                })
+            })
+            .map_err(|error| store_sql_error("Unable to read recent locations", &self.path, error))?;
+
+        let mut entries = Vec::new();
+
+        for row in rows {
+            entries.push(
+                row.map_err(|error| {
+                    store_sql_error("Unable to read recent locations", &self.path, error)
+                })?,
+            );
+        }
+
+        Ok(entries)
+    }
+
+    pub fn record_recent_location(&self, path: String, name: String) -> FsResult<()> {
+        let path = path.trim().to_string();
+
+        if path.is_empty() {
+            return Ok(());
+        }
+
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "INSERT INTO recent_locations(path, name, visited_at) VALUES(?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET name = excluded.name, visited_at = excluded.visited_at",
+                params![path, name, unix_timestamp_millis()],
+            )
+            .map_err(|error| store_sql_error("Unable to record recent location", &self.path, error))?;
+        // Keep only the most-recent entries so the table never grows unbounded.
+        connection
+            .execute(
+                "DELETE FROM recent_locations WHERE path NOT IN (SELECT path FROM recent_locations ORDER BY visited_at DESC LIMIT ?1)",
+                params![RECENT_LOCATIONS_LIMIT],
+            )
+            .map_err(|error| store_sql_error("Unable to trim recent locations", &self.path, error))?;
+
+        Ok(())
+    }
+
+    pub fn remove_recent_location(&self, path: String) -> FsResult<()> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "DELETE FROM recent_locations WHERE path = ?1",
+                params![path],
+            )
+            .map_err(|error| store_sql_error("Unable to remove recent location", &self.path, error))?;
+
+        Ok(())
+    }
+
+    pub fn clear_recent_locations(&self) -> FsResult<()> {
+        let connection = self.connection()?;
+        connection
+            .execute("DELETE FROM recent_locations", [])
+            .map_err(|error| store_sql_error("Unable to clear recent locations", &self.path, error))?;
+
+        Ok(())
     }
 
     pub fn list_favorites(&self) -> FsResult<Vec<FavoriteEntry>> {
@@ -768,6 +853,14 @@ fn migrate(connection: &Connection, path: &Path) -> FsResult<()> {
               color TEXT NOT NULL,
               updated_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS recent_locations (
+              path TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              visited_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_recent_locations_visited_at ON recent_locations(visited_at);
             "#,
         )
         .map_err(|error| store_sql_error("Unable to migrate app store", path, error))?;
@@ -1226,6 +1319,15 @@ fn unix_timestamp() -> i64 {
         .unwrap_or(0)
 }
 
+// Epoch milliseconds, used where sub-second ordering matters (recent locations
+// are recorded in rapid succession as the user navigates).
+fn unix_timestamp_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn load_file_tags(connection: &Connection, path: &Path) -> FsResult<HashMap<String, String>> {
     let mut statement = connection
         .prepare("SELECT path, color FROM file_tags")
@@ -1364,6 +1466,71 @@ mod tests {
         assert!(store
             .list_remote_volume_configs()
             .expect("remote configs should list after removal")
+            .is_empty());
+    }
+
+    #[test]
+    fn recent_locations_dedupe_order_and_persist() {
+        let path = TestStorePath::new("recent-locations");
+
+        {
+            let store =
+                AppStoreState::initialize_at(path.store.clone()).expect("store should initialize");
+
+            // Brief pauses keep the millisecond timestamps distinct so the
+            // visited_at ordering is deterministic.
+            let tick = || std::thread::sleep(std::time::Duration::from_millis(2));
+
+            store
+                .record_recent_location("/tmp/a".to_string(), "a".to_string())
+                .expect("record a");
+            tick();
+            store
+                .record_recent_location("/tmp/b".to_string(), "b".to_string())
+                .expect("record b");
+            tick();
+            // Re-visiting a known path moves it to the front without duplicating.
+            store
+                .record_recent_location("/tmp/a".to_string(), "a".to_string())
+                .expect("re-record a");
+
+            let recents = store.list_recent_locations().expect("list recents");
+            let paths: Vec<String> = recents.iter().map(|entry| entry.path.clone()).collect();
+            assert_eq!(paths, vec!["/tmp/a".to_string(), "/tmp/b".to_string()]);
+
+            // Blank paths are ignored.
+            store
+                .record_recent_location("   ".to_string(), "blank".to_string())
+                .expect("blank is a no-op");
+            assert_eq!(store.list_recent_locations().expect("list").len(), 2);
+
+            store
+                .remove_recent_location("/tmp/a".to_string())
+                .expect("remove a");
+            let after_remove = store.list_recent_locations().expect("list after remove");
+            assert_eq!(after_remove.len(), 1);
+            assert_eq!(after_remove[0].path, "/tmp/b");
+        }
+
+        // Reopen to confirm persistence, then verify the size cap and clear.
+        let store = AppStoreState::initialize_at(path.store.clone()).expect("store should reopen");
+        assert_eq!(store.list_recent_locations().expect("reload").len(), 1);
+
+        for index in 0..(RECENT_LOCATIONS_LIMIT + 10) {
+            store
+                .record_recent_location(format!("/tmp/dir-{index}"), format!("dir-{index}"))
+                .expect("record many");
+        }
+
+        assert_eq!(
+            store.list_recent_locations().expect("list capped").len() as i64,
+            RECENT_LOCATIONS_LIMIT
+        );
+
+        store.clear_recent_locations().expect("clear recents");
+        assert!(store
+            .list_recent_locations()
+            .expect("list after clear")
             .is_empty());
     }
 }

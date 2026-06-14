@@ -7,6 +7,7 @@ import {
   cancelFileOperation,
   canUseLocalFileAssets,
   checkRemoteVolume,
+  clearRecentLocations as clearStoredRecentLocations,
   clearRemotePreviewCache,
   copyItems,
   deleteItems,
@@ -17,6 +18,7 @@ import {
   listFavoriteGroups as listStoredFavoriteGroups,
   listFavorites as listStoredFavorites,
   listFileTags,
+  listRecentLocations as listStoredRecentLocations,
   listVolumes,
   mountVolume,
   moveFavorite as moveStoredFavorite,
@@ -24,7 +26,9 @@ import {
   moveItems,
   removeFavoriteGroup as removeStoredFavoriteGroup,
   pauseFileOperation,
+  recordRecentLocation as recordStoredRecentLocation,
   removeFavorite as removeStoredFavorite,
+  removeRecentLocation as removeStoredRecentLocation,
   renameItem,
   restoreFromTrash,
   resumeFileOperation,
@@ -1140,6 +1144,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   const favorites = ref([]);
   // path -> color tag map, mirrors the backend store so tabs can color by folder.
   const fileTags = ref({});
+  // Most-recently visited directories, newest first; mirrors the backend store.
+  const recentLocations = ref([]);
+  // Last path handed to recordRecentLocation, so in-place refreshes don't spam.
+  let lastRecordedRecentPath = '';
   const homeDirectory = ref('');
   const columnPreviewEntries = ref({ left: null, right: null });
   const columnSelectionStates = ref({ left: null, right: null });
@@ -1246,9 +1254,25 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       items: groupedFavorites.get(group.id) || [],
     }));
 
+    const recentItems = recentLocations.value.slice(0, 12).map((entry) => ({
+      name: entry.name || tabTitleForPath(entry.path),
+      path: entry.path,
+      detail: recentLocationDetail(entry.path),
+      icon: 'clock',
+      color: '#8E8E93',
+      isRecent: true,
+      matchPrefix: false,
+    }));
+
     return [
       ...sections,
       ...favoriteSections,
+      ...(recentItems.length > 0 ? [{
+        id: 'recent-locations',
+        title: 'Recent',
+        isRecentGroup: true,
+        items: recentItems,
+      }] : []),
       ...(remoteItems.length > 0 ? [{
         title: 'Remote Storage',
         items: remoteItems,
@@ -1498,6 +1522,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         loadFavoriteGroups(),
         loadFavorites(),
         loadFileTags(),
+        loadRecentLocations(),
         refreshVolumes(),
       ]);
 
@@ -2175,6 +2200,91 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     }
   }
 
+  async function loadRecentLocations() {
+    try {
+      recentLocations.value = (await listStoredRecentLocations()) || [];
+    } catch {
+      recentLocations.value = [];
+    }
+  }
+
+  // Record a freshly navigated-to directory. Skips in-place refreshes (same
+  // path as last time), search-result views, and transient/blank paths.
+  function recordRecentLocation(path) {
+    const value = String(path || '').trim();
+
+    if (!value || value === lastRecordedRecentPath || value.startsWith('search://')) {
+      return;
+    }
+
+    lastRecordedRecentPath = value;
+    const name = tabTitleForPath(value);
+
+    // Optimistic local update (newest first, de-duplicated) so the sidebar
+    // reacts instantly; the backend trims and persists.
+    const entry = { path: value, name, visitedAt: Date.now() };
+    recentLocations.value = [
+      entry,
+      ...recentLocations.value.filter((item) => item.path !== value),
+    ].slice(0, 50);
+
+    recordStoredRecentLocation(value, name).catch(() => {});
+  }
+
+  function removeRecentLocation(path) {
+    const value = String(path || '').trim();
+
+    if (!value) {
+      return;
+    }
+
+    recentLocations.value = recentLocations.value.filter((item) => item.path !== value);
+
+    if (lastRecordedRecentPath === value) {
+      lastRecordedRecentPath = '';
+    }
+
+    removeStoredRecentLocation(value).catch(() => {});
+  }
+
+  async function clearRecentLocations() {
+    recentLocations.value = [];
+    lastRecordedRecentPath = '';
+
+    try {
+      await clearStoredRecentLocations();
+    } catch {
+      // Best-effort; the list is already cleared locally.
+    }
+  }
+
+  // The parent directory of a recent path, with the home dir shown as `~`, so
+  // sibling folders with the same name stay distinguishable in the sidebar.
+  function recentLocationDetail(path) {
+    const value = String(path || '').replace(/\/+$/, '');
+
+    // Only local paths get a parent subtitle; remote:// and archive paths read
+    // better with just their name.
+    if (!value.startsWith('/') && !value.startsWith('~/')) {
+      return '';
+    }
+
+    const cut = value.lastIndexOf('/');
+    const parent = cut > 0 ? value.slice(0, cut) : '';
+
+    if (!parent) {
+      return '';
+    }
+
+    const home = (homeDirectory.value || '').replace(/\/+$/, '');
+
+    if (home && (parent === home || parent.startsWith(`${home}/`))) {
+      return `~${parent.slice(home.length)}`;
+    }
+
+    return parent;
+  }
+
   // Map keys are absolute paths (as the backend stores them); normalize a
   // lookup path so `~` and trailing slashes resolve to the same key.
   function normalizeTagPath(path) {
@@ -2437,6 +2547,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       }
 
       applyLoadedEntries(entries, requestedPath);
+
+      // Record only genuine navigations, not in-place refreshes (file-watcher
+      // reloads, manual refresh), so recents reflect where the user went.
+      if (!isRefreshingLoadedPath) {
+        recordRecentLocation(requestedPath);
+      }
     } catch (error) {
       if (tab.loadVersion !== loadVersion) {
         return;
@@ -2458,6 +2574,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
           }
 
           applyLoadedEntries(entries, mountRecovery.path);
+          recordRecentLocation(mountRecovery.path);
 
           if (mountRecovery.mounted) {
             addOperationLog({
@@ -3464,6 +3581,40 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     tab.selectionAnchorIndex = nextIndex;
   }
 
+  // Type-ahead: select the first visible entry whose name starts with `query`.
+  // When `advance` is set the search begins after the current selection so
+  // repeated keystrokes cycle through same-prefix matches. Returns whether a
+  // match was found (caller uses this to decide whether to consume the key).
+  function typeAheadSelect(paneId, query, options = {}) {
+    const tab = activeTabFor(paneId);
+    const entries = visibleEntriesFor(paneId);
+    const q = String(query || '').toLowerCase();
+
+    if (!tab || !q || entries.length === 0) {
+      return false;
+    }
+
+    const current = tab.selectedIndex;
+    const begin = options.advance
+      ? (current >= 0 ? current + 1 : 0)
+      : (current >= 0 ? current : 0);
+
+    for (let offset = 0; offset < entries.length; offset += 1) {
+      const index = (begin + offset) % entries.length;
+      const name = String(entries[index]?.name || '').toLowerCase();
+
+      if (name.startsWith(q)) {
+        clearColumnPreviewEntry(paneId);
+        tab.selectedIndex = index;
+        tab.selectionAnchorIndex = index;
+        tab.selectedPaths = [];
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   function pageSelection(paneId, delta, options = {}) {
     moveSelection(paneId, delta * 12, options);
   }
@@ -4201,6 +4352,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     volumes,
     favoriteGroups,
     favorites,
+    recentLocations,
     columnRefreshRequests,
     columnSelectionResetKeys,
     dragOperation,
@@ -4243,6 +4395,9 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     tagColorForPath,
     applyFileTags,
     relocateFileTags,
+    loadRecentLocations,
+    removeRecentLocation,
+    clearRecentLocations,
     recordHistory,
     recordTrashDelete,
     clearHistory,
@@ -4264,6 +4419,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     operationEntriesFor,
     isEntrySelected,
     moveSelection,
+    typeAheadSelect,
     pageSelection,
     selectFirstEntry,
     selectLastEntry,

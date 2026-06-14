@@ -1,7 +1,7 @@
 use crate::fs::models::{FsError, FsResult};
 use crate::store::{
     window_dimensions as build_window_dimensions, AppStoreState, FavoriteEntry, FavoriteGroupEntry,
-    FavoriteInput, WindowDimensions,
+    FavoriteInput, RecentLocationEntry, WindowDimensions,
 };
 use serde_json::Value;
 
@@ -118,4 +118,33 @@ pub fn move_file_tags(moves: Vec<TagMove>, store: tauri::State<'_, AppStoreState
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn list_recent_locations(
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<Vec<RecentLocationEntry>> {
+    store.list_recent_locations()
+}
+
+#[tauri::command]
+pub fn record_recent_location(
+    path: String,
+    name: String,
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<()> {
+    store.record_recent_location(path, name)
+}
+
+#[tauri::command]
+pub fn remove_recent_location(
+    path: String,
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<()> {
+    store.remove_recent_location(path)
+}
+
+#[tauri::command]
+pub fn clear_recent_locations(store: tauri::State<'_, AppStoreState>) -> FsResult<()> {
+    store.clear_recent_locations()
 }

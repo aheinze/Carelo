@@ -67,6 +67,10 @@ const sidebarItemMenuDetail = computed(() => {
     return 'Remote Storage';
   }
 
+  if (item.isRecent) {
+    return 'Recent';
+  }
+
   if (item.needsUnlock) {
     return 'Encrypted Device';
   }
@@ -190,6 +194,21 @@ const sidebarItemMenuGroups = computed(() => {
           label: 'Eject',
           icon: 'eject',
           disabled: item.devicePath && mountingDevicePath.value === item.devicePath,
+        },
+      ],
+    });
+  }
+
+  if (item.isRecent) {
+    groups.push({
+      id: 'recent',
+      items: [
+        {
+          id: 'removeRecent',
+          action: 'removeRecent',
+          label: 'Remove from Recent',
+          icon: 'x',
+          danger: true,
         },
       ],
     });
@@ -722,6 +741,11 @@ async function runSidebarItemContextAction(menuItem) {
 
     if (menuItem.action === 'ejectDevice') {
       await ejectSidebarDevice(item);
+      return;
+    }
+
+    if (menuItem.action === 'removeRecent') {
+      store.removeRecentLocation(item.path);
     }
   } catch (error) {
     await dialog.alert({
@@ -1278,6 +1302,16 @@ onUnmounted(() => {
             @click="removeFavoriteGroup(section, $event)"
           >
             <AppIcon name="x" :size="13" :stroke-width="2.2" />
+          </button>
+          <button
+            v-if="section.isRecentGroup"
+            type="button"
+            class="sidebar-section-action"
+            aria-label="Clear recent locations"
+            title="Clear recent"
+            @click.stop="store.clearRecentLocations()"
+          >
+            <AppIcon name="trash" :size="13" :stroke-width="2" />
           </button>
         </div>
         <div

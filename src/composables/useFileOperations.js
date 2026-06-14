@@ -444,6 +444,22 @@ export async function moveFileTags(moves) {
   return invokeCommand('move_file_tags', { moves });
 }
 
+export async function listRecentLocations() {
+  return invokeCommand('list_recent_locations');
+}
+
+export async function recordRecentLocation(path, name) {
+  return invokeCommand('record_recent_location', { path, name });
+}
+
+export async function removeRecentLocation(path) {
+  return invokeCommand('remove_recent_location', { path });
+}
+
+export async function clearRecentLocations() {
+  return invokeCommand('clear_recent_locations');
+}
+
 export async function copyItems(items, jobId = null) {
   return invokeCommand('copy_items', { items, jobId }, { sudo: true });
 }

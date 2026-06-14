@@ -40,6 +40,9 @@ function isCommand(event) {
   return event.metaKey || event.ctrlKey;
 }
 
+// Reset the type-ahead buffer after this many ms of no typing.
+const TYPE_AHEAD_TIMEOUT_MS = 700;
+
 function isEditableTarget(target) {
   return Boolean(
     target?.closest?.('input, textarea, select, [contenteditable="true"], .terminal-panel'),
@@ -283,6 +286,11 @@ export function useKeyboardShortcuts() {
   const checksumDialog = useChecksumDialog();
   const folderCompare = useFolderCompare();
   const quickLook = useQuickLook();
+
+  // Type-ahead find: accumulate typed characters and jump to the matching
+  // entry. The buffer resets after a short pause so a new query starts fresh.
+  let typeAheadBuffer = '';
+  let typeAheadAt = 0;
 
   function activePane() {
     return store.activePaneId;
@@ -1548,6 +1556,44 @@ export function useKeyboardShortcuts() {
       if (code === 'NumpadDivide' || key === '/') {
         event.preventDefault();
         store.clearSelection(paneId);
+        return;
+      }
+
+      // Type-ahead find: any other single printable character jumps to the
+      // matching entry. Reserved selection keys (handled above) are excluded,
+      // as is the QuickLook overlay so typing doesn't move the list beneath it.
+      if (
+        key.length === 1
+        && !command
+        && !event.altKey
+        && key !== ' '
+        && key !== '+'
+        && key !== '-'
+        && key !== '*'
+        && key !== '/'
+        && !quickLook.visible.value
+      ) {
+        event.preventDefault();
+
+        const char = key.toLowerCase();
+        const now = Date.now();
+        const continuation = now - typeAheadAt < TYPE_AHEAD_TIMEOUT_MS;
+        typeAheadAt = now;
+
+        let advance = false;
+
+        if (continuation && typeAheadBuffer === char) {
+          // Same single character pressed again: cycle to the next match.
+          advance = true;
+        } else if (continuation) {
+          typeAheadBuffer += char;
+        } else {
+          typeAheadBuffer = char;
+          advance = true;
+        }
+
+        store.typeAheadSelect(paneId, typeAheadBuffer, { advance });
+        return;
       }
     } catch (error) {
       console.error(error);

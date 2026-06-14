@@ -4,7 +4,13 @@ import AppIcon from './AppIcon.vue';
 import { useQuickLook } from '../composables/useQuickLook';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import hljs from 'highlight.js/lib/common';
-import { createMediaStreamUrl, localFileAssetUrl, readTextPreview } from '../composables/useFileOperations';
+import {
+  createMediaStreamUrl,
+  isRemotePath,
+  localFileAssetUrl,
+  readMediaPreview,
+  readTextPreview,
+} from '../composables/useFileOperations';
 import {
   extensionForName,
   isAudioEntry,
@@ -100,27 +106,31 @@ const isLightTheme = computed(() => {
 });
 
 const mediaUrl = ref('');
+const imageUrl = ref('');
+const imageLoading = ref(false);
 const textContent = ref('');
 const textTruncated = ref(false);
 const textError = ref('');
 const textLoading = ref(false);
 let loadVersion = 0;
 
+// Matches PreviewPanel: cap how much a single preview will pull (relevant for
+// remote images fetched over the network).
+const IMAGE_PREVIEW_MAX_BYTES = 128 * 1024 * 1024;
+
 const entry = computed(() => quickLook.current.value);
 const isDirectory = computed(() => entry.value?.kind === 'directory');
 const isLocalFile = computed(() => entry.value && !isArchivePath(entry.value.path));
 
-const imageUrl = computed(() => (
-  entry.value && isImageEntry(entry.value) && isLocalFile.value
-    ? localFileAssetUrl(entry.value.path)
-    : ''
-));
-const isImage = computed(() => Boolean(imageUrl.value));
+const isImage = computed(() => Boolean(entry.value) && isImageEntry(entry.value) && isLocalFile.value);
 const isVideo = computed(() => Boolean(entry.value) && isVideoEntry(entry.value) && isLocalFile.value);
 const isAudio = computed(() => Boolean(entry.value) && isAudioEntry(entry.value) && isLocalFile.value);
 const isPdf = computed(() => Boolean(entry.value) && isPdfEntry(entry.value) && isLocalFile.value);
 const isText = computed(() => Boolean(entry.value) && isTextEntry(entry.value) && isLocalFile.value);
-const isMediaLoading = computed(() => (isVideo.value || isAudio.value) && !mediaUrl.value);
+const isMediaLoading = computed(() => (
+  (isImage.value && imageLoading.value && !imageUrl.value)
+  || ((isVideo.value || isAudio.value) && !mediaUrl.value)
+));
 const highlightedCode = computed(() => (
   isText.value && textContent.value ? highlightCode(textContent.value, entry.value?.name) : ''
 ));
@@ -173,17 +183,86 @@ const metaLine = computed(() => {
   return parts.join(' · ');
 });
 
+function mediaPayloadToBytes(payload) {
+  if (payload instanceof ArrayBuffer || ArrayBuffer.isView(payload)) {
+    return payload;
+  }
+
+  if (Array.isArray(payload)) {
+    return new Uint8Array(payload);
+  }
+
+  throw new Error('Unexpected media preview payload.');
+}
+
+function imageMimeType(name) {
+  const extension = extensionForName(name);
+
+  if (extension === 'jpg' || extension === 'jpeg' || extension === 'jfif') return 'image/jpeg';
+  if (extension === 'png') return 'image/png';
+  if (extension === 'gif') return 'image/gif';
+  if (extension === 'webp') return 'image/webp';
+  if (extension === 'svg') return 'image/svg+xml';
+  if (extension === 'bmp') return 'image/bmp';
+  if (extension === 'avif') return 'image/avif';
+  if (extension === 'ico') return 'image/x-icon';
+  if (extension === 'tif' || extension === 'tiff') return 'image/tiff';
+  return '';
+}
+
+function revokeImageUrl() {
+  if (imageUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(imageUrl.value);
+  }
+
+  imageUrl.value = '';
+}
+
 async function loadPreview() {
   const token = ++loadVersion;
   const item = entry.value;
 
   mediaUrl.value = '';
+  revokeImageUrl();
+  imageLoading.value = false;
   textContent.value = '';
   textTruncated.value = false;
   textError.value = '';
   textLoading.value = false;
 
   if (!item) {
+    return;
+  }
+
+  if (isImageEntry(item) && isLocalFile.value) {
+    // Local files load straight from the asset protocol; remote files have no
+    // asset URL, so pull the bytes and render them from an object URL.
+    if (!isRemotePath(item.path)) {
+      imageUrl.value = localFileAssetUrl(item.path);
+      return;
+    }
+
+    if (typeof item.size === 'number' && item.size > IMAGE_PREVIEW_MAX_BYTES) {
+      return;
+    }
+
+    imageLoading.value = true;
+
+    try {
+      const payload = await readMediaPreview(item.path, IMAGE_PREVIEW_MAX_BYTES);
+      if (token === loadVersion) {
+        const blob = new Blob([mediaPayloadToBytes(payload)], {
+          type: imageMimeType(item.name) || 'application/octet-stream',
+        });
+        imageUrl.value = URL.createObjectURL(blob);
+      }
+    } catch {
+      // Leave imageUrl empty so the generic icon view is shown.
+    } finally {
+      if (token === loadVersion) {
+        imageLoading.value = false;
+      }
+    }
     return;
   }
 
@@ -270,6 +349,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown, true);
   appearanceQuery?.removeEventListener?.('change', onAppearanceChange);
+  revokeImageUrl();
 });
 </script>
 
@@ -300,7 +380,7 @@ onUnmounted(() => {
 
           <div class="quicklook-body">
             <div class="quicklook-stage">
-              <img v-if="isImage" class="quicklook-image" :src="imageUrl" :alt="entry?.name" />
+              <img v-if="isImage && imageUrl" class="quicklook-image" :src="imageUrl" :alt="entry?.name" />
 
               <video
                 v-else-if="isVideo && mediaUrl"
