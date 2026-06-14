@@ -1,6 +1,6 @@
 [package]
 name = "carelo"
-version = "0.10.1"
+version = "0.11.0"
 description = "Fast, local-first file management with dual panes and custom tools."
 authors = ["Agentejo - Artur Heinze"]
 edition = "2021"
