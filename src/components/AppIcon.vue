@@ -133,6 +133,11 @@ defineProps({
       <path d="m16 16 4 4" />
     </template>
 
+    <template v-else-if="name === 'clock'">
+      <circle cx="12" cy="12" r="8.4" />
+      <path d="M12 7.6V12l3 1.8" />
+    </template>
+
     <template v-else-if="name === 'settings'">
       <circle cx="12" cy="12" r="3" />
       <path d="M12 3.8v2.1" />

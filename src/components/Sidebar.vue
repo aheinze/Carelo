@@ -978,11 +978,6 @@ async function handleFavoriteSectionDrop(section, event) {
   );
 }
 
-async function removeFavoriteItem(item, event) {
-  event?.stopPropagation?.();
-  await store.removeFavorite(item.id);
-}
-
 async function removeFavoriteGroup(section, event) {
   event?.stopPropagation?.();
 
@@ -1301,7 +1296,7 @@ onUnmounted(() => {
             title="Delete group"
             @click="removeFavoriteGroup(section, $event)"
           >
-            <AppIcon name="x" :size="13" :stroke-width="2.2" />
+            <AppIcon name="trash" :size="13" :stroke-width="2" />
           </button>
           <button
             v-if="section.isRecentGroup"
@@ -1389,16 +1384,6 @@ onUnmounted(() => {
             @click="ejectSidebarDevice(item, $event)"
           >
             <AppIcon name="eject" :size="13" :stroke-width="2.2" />
-          </button>
-          <button
-            v-else-if="item.isFavorite"
-            type="button"
-            class="sidebar-item-action"
-            aria-label="Remove favorite"
-            title="Remove favorite"
-            @click="removeFavoriteItem(item, $event)"
-          >
-            <AppIcon name="x" :size="13" :stroke-width="2.2" />
           </button>
         </div>
       </div>

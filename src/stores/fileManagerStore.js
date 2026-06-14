@@ -1257,7 +1257,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       items: groupedFavorites.get(group.id) || [],
     }));
 
-    const recentItems = recentLocations.value.slice(0, 12).map((entry) => ({
+    const recentItems = recentLocations.value.slice(0, 5).map((entry) => ({
       name: entry.name || tabTitleForPath(entry.path),
       path: entry.path,
       detail: recentLocationDetail(entry.path),

@@ -13,6 +13,7 @@ import {
   readTextPreview,
 } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
+import { usePermissionsDialog } from '../composables/usePermissionsDialog';
 import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
 import { formatFileDateTime } from '../utils/dateFormat';
 import {
@@ -239,6 +240,25 @@ const inspectedEntry = computed(() => {
 });
 
 const permissions = computed(() => fileMetadata.value?.permissions || null);
+const permissionsDialog = usePermissionsDialog();
+// Editable for local items, and for remote volumes that expose POSIX permissions.
+const canEditPermissions = computed(() => {
+  const entry = inspectedEntry.value;
+
+  if (!entry || !permissions.value || isArchivePath(entry.path)) {
+    return false;
+  }
+
+  return isRemotePath(entry.path) ? store.remotePermissionsCapable(entry.path) : true;
+});
+
+function openPermissionsEditor() {
+  const entry = inspectedEntry.value;
+
+  if (entry && canEditPermissions.value) {
+    permissionsDialog.open(entry);
+  }
+}
 const runningJobs = computed(() =>
   store.queue.filter((job) => ['running', 'paused', 'cancelling'].includes(job.status)),
 );
@@ -340,6 +360,39 @@ watch(
     }
   },
   { immediate: true },
+);
+
+// Re-read metadata after the permissions editor closes — a chmod changes the
+// mode but not the path/size/name the main watcher keys on, so it wouldn't
+// otherwise refresh the displayed permissions.
+async function refreshMetadata() {
+  const path = settledEntry.value?.path;
+
+  if (!path) {
+    return;
+  }
+
+  metadataLoadVersion += 1;
+  const loadVersion = metadataLoadVersion;
+
+  try {
+    const metadata = await getFileMetadata(path);
+
+    if (metadataLoadVersion === loadVersion) {
+      fileMetadata.value = metadata;
+    }
+  } catch {
+    // Keep the previously loaded metadata if the refresh fails.
+  }
+}
+
+watch(
+  () => permissionsDialog.visible.value,
+  (visible, wasVisible) => {
+    if (wasVisible && !visible) {
+      refreshMetadata();
+    }
+  },
 );
 
 watch(
@@ -1927,6 +1980,16 @@ function logDetail(entry) {
                 </dd>
               </div>
             </dl>
+
+            <button
+              v-if="canEditPermissions"
+              type="button"
+              class="perm-edit-btn"
+              @click="openPermissionsEditor"
+            >
+              <AppIcon name="lock" :size="13" :stroke-width="1.9" />
+              <span>Edit Permissions…</span>
+            </button>
           </div>
           <div v-else class="permissions-unavailable">
             {{ metadataLoading ? 'Loading permissions...' : 'Permissions unavailable' }}
@@ -3067,6 +3130,27 @@ dd {
 .permissions-block dl {
   border-radius: 0;
   background: transparent;
+}
+
+.perm-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 3px 6px 8px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 110ms ease, color 110ms ease;
+}
+
+.perm-edit-btn:hover {
+  background: var(--btn-hover);
+  color: var(--text-muted);
 }
 
 .perm-bits {
