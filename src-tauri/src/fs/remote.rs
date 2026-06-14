@@ -271,7 +271,7 @@ impl RemoteVolumeState {
         Ok(())
     }
 
-    fn invalidate_cache_for_path(&self, path: &RemotePath) -> FsResult<()> {
+    pub(crate) fn invalidate_cache_for_path(&self, path: &RemotePath) -> FsResult<()> {
         let object_path = normalize_remote_object_path(&path.path);
         let path_key = remote_cache_key_parts(&path.volume_id, &object_path);
         let subtree_prefix = if object_path.is_empty() {
@@ -1793,10 +1793,14 @@ async fn direct_sftp_metadata_details(
         .map(remote_metadata_details_from_sftp)
 }
 
-async fn direct_sftp_metadata(
-    config: &RemoteVolumeConfig,
-    object_path: &str,
-) -> Result<SftpMetadata, String> {
+// True when permission changes can be applied over the direct openssh-sftp
+// client (key/agent-authenticated SFTP). Password SFTP and object stores go
+// through opendal, which has no chmod equivalent.
+fn is_direct_sftp_config(config: &RemoteVolumeConfig) -> bool {
+    config.scheme.eq_ignore_ascii_case("sftp") && !is_password_sftp_config(config)
+}
+
+async fn connect_direct_sftp(config: &RemoteVolumeConfig) -> Result<Sftp, String> {
     let endpoint = config
         .options
         .get("endpoint")
@@ -1830,13 +1834,99 @@ async fn direct_sftp_metadata(
         .connect(endpoint)
         .await
         .map_err(|error| error.to_string())?;
-    let sftp = Sftp::from_session(session, SftpOptions::default())
+    Sftp::from_session(session, SftpOptions::default())
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())
+}
+
+async fn direct_sftp_metadata(
+    config: &RemoteVolumeConfig,
+    object_path: &str,
+) -> Result<SftpMetadata, String> {
+    let sftp = connect_direct_sftp(config).await?;
     let mut fs = sftp.fs();
     fs.metadata(sftp_metadata_path(config, object_path)?)
         .await
         .map_err(|error| error.to_string())
+}
+
+/// For a mount-backed remote (fs / SMB / password-SFTP, all accessed through a
+/// local mount), resolve the object's real local path so permission changes can
+/// reuse the local chmod (which supports recursion and sudo). Returns None for
+/// remotes that have no local mount (e.g. key-authenticated SFTP).
+pub fn remote_local_object_path(
+    state: &RemoteVolumeState,
+    path: &RemotePath,
+) -> FsResult<Option<PathBuf>> {
+    let config = state.config(&path.volume_id)?;
+    let scheme = config.scheme.to_ascii_lowercase();
+
+    let Some(options) = config.fs_operator_options(&scheme)? else {
+        return Ok(None);
+    };
+    let Some(root) = fs_root_from_options(&options) else {
+        return Ok(None);
+    };
+
+    Ok(local_path_for_remote_object(
+        &root,
+        &normalize_remote_object_path(&path.path),
+    ))
+}
+
+/// Change POSIX permissions on a key-authenticated SFTP item via SSH_FXP_SETSTAT.
+/// Non-recursive (recursive remote chmod would be one round-trip per item).
+pub async fn set_remote_sftp_permissions(
+    state: &RemoteVolumeState,
+    path: RemotePath,
+    mode: u32,
+) -> FsResult<()> {
+    let config = state.config(&path.volume_id)?;
+
+    if !is_direct_sftp_config(&config) {
+        return Err(FsError::new(
+            "unsupported_target",
+            "Editing permissions over this storage isn't supported (only local files and key-authenticated SFTP).",
+            Some(format_remote_uri(&path.volume_id, &path.path)),
+        ));
+    }
+
+    // Resolve the same way the read path does so the item we chmod is exactly
+    // the one whose mode the dialog displayed.
+    let object_path = normalize_remote_object_path(&path.path);
+    let target = sftp_metadata_path(&config, &object_path).map_err(|message| {
+        FsError::new(
+            "remote_set_permissions_failed",
+            message,
+            Some(format_remote_uri(&path.volume_id, &path.path)),
+        )
+    })?;
+
+    let sftp = connect_direct_sftp(&config).await.map_err(|message| {
+        FsError::new(
+            "remote_set_permissions_failed",
+            message,
+            Some(format_remote_uri(&path.volume_id, &path.path)),
+        )
+    })?;
+    let permissions = SftpPermissions::from((mode & 0o7777) as u16);
+    let result = sftp
+        .fs()
+        .set_permissions(target, permissions)
+        .await
+        .map_err(|error| {
+            FsError::new(
+                "remote_set_permissions_failed",
+                error.to_string(),
+                Some(format_remote_uri(&path.volume_id, &path.path)),
+            )
+        });
+
+    if result.is_ok() {
+        state.invalidate_cache_for_path(&path)?;
+    }
+
+    result
 }
 
 fn known_hosts_strategy_for_config(config: &RemoteVolumeConfig) -> Result<KnownHosts, String> {

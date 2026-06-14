@@ -122,6 +122,7 @@ const sudoActions = {
   get_file_metadata: 'read this item',
   create_folder: 'create this folder',
   create_file: 'create this file',
+  set_permissions: 'change permissions on this item',
   rename_item: 'rename this item',
   delete_items: 'delete the selected items',
   copy_items: 'copy the selected items',
@@ -421,6 +422,10 @@ export async function createFolder(path) {
 
 export async function createFile(path) {
   return invokeCommand('create_file', { path }, { sudo: true });
+}
+
+export async function setPermissions(path, mode, recursive = false) {
+  return invokeCommand('set_permissions', { path, mode, recursive }, { sudo: true });
 }
 
 export async function renameItem(from, to) {

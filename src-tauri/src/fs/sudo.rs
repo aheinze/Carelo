@@ -101,6 +101,58 @@ pub fn create_file(password: &str, path: &str) -> FsResult<()> {
     .map(|_| ())
 }
 
+pub fn set_permissions(password: &str, path: &str, mode: u32, recursive: bool) -> FsResult<()> {
+    let path = expand_path(path)?;
+    let mode = mode & 0o7777;
+    let mode_octal = format!("{mode:o}");
+
+    if !recursive {
+        return run_sudo_command(
+            password,
+            "chmod",
+            [OsString::from(mode_octal), OsString::from(path.as_os_str())],
+            Some(&path),
+        )
+        .map(|_| ());
+    }
+
+    // Smart recursive (matches the native path): the item and regular files get
+    // the chosen mode; sub-directories get the search bit wherever read is set so
+    // the tree stays navigable. Args are positional ($1=path, $2=mode, $3=dirMode).
+    let mut dir_mode = mode;
+    if mode & 0o400 != 0 {
+        dir_mode |= 0o100;
+    }
+    if mode & 0o040 != 0 {
+        dir_mode |= 0o010;
+    }
+    if mode & 0o004 != 0 {
+        dir_mode |= 0o001;
+    }
+    let dir_octal = format!("{dir_mode:o}");
+
+    run_sudo_command(
+        password,
+        "sh",
+        [
+            OsString::from("-c"),
+            OsString::from(
+                // Descendants first, then the item itself, so a no-search mode on
+                // a directory doesn't block traversal mid-operation.
+                "find \"$1\" -mindepth 1 -type d -exec chmod \"$3\" {} +; \
+                 find \"$1\" -mindepth 1 -type f -exec chmod \"$2\" {} +; \
+                 chmod \"$2\" \"$1\"",
+            ),
+            OsString::from("sh"),
+            OsString::from(path.as_os_str()),
+            OsString::from(mode_octal),
+            OsString::from(dir_octal),
+        ],
+        Some(&path),
+    )
+    .map(|_| ())
+}
+
 pub fn rename_item(password: &str, from: &str, to: &str) -> FsResult<()> {
     move_item(password, from, to, true)
 }

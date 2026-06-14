@@ -322,6 +322,21 @@ impl FileProvider for LocalFileProvider {
             .map_err(|error| FsError::io("Unable to create file", &path, error))
     }
 
+    #[cfg(unix)]
+    fn set_permissions(&self, path: &str, mode: u32, recursive: bool) -> FsResult<()> {
+        let path = self.expand_path(path)?;
+        apply_mode(&path, mode & 0o7777, recursive)
+    }
+
+    #[cfg(not(unix))]
+    fn set_permissions(&self, path: &str, _mode: u32, _recursive: bool) -> FsResult<()> {
+        Err(FsError::new(
+            "unsupported_operation",
+            "Editing POSIX permissions is only available on Unix systems.",
+            Some(path.to_string()),
+        ))
+    }
+
     fn rename(&self, from: &str, to: &str) -> FsResult<()> {
         let from = self.expand_path(from)?;
         let to = self.expand_path(to)?;
@@ -431,6 +446,77 @@ fn create_symlink(_target: &Path, link: &Path, _source_link: &Path) -> FsResult<
         "Preserving symbolic links is not supported on this platform.",
         Some(link.to_string_lossy().into_owned()),
     ))
+}
+
+// Add the search/execute bit wherever the matching read bit is set. Applied to
+// sub-directories during a recursive chmod so the tree stays navigable even when
+// the chosen mode (e.g. 0o644) has no execute bit — the classic `chmod -R` trap.
+#[cfg(unix)]
+fn with_search_bits(mode: u32) -> u32 {
+    let mut result = mode;
+    if mode & 0o400 != 0 {
+        result |= 0o100;
+    }
+    if mode & 0o040 != 0 {
+        result |= 0o010;
+    }
+    if mode & 0o004 != 0 {
+        result |= 0o001;
+    }
+    result
+}
+
+#[cfg(unix)]
+fn chmod_one(path: &Path, mode: u32) -> FsResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|error| FsError::io("Unable to set permissions", path, error))
+}
+
+#[cfg(unix)]
+fn apply_mode(path: &Path, mode: u32, recursive: bool) -> FsResult<()> {
+    if recursive {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| FsError::io("Unable to read item metadata", path, error))?;
+
+        if metadata.is_dir() {
+            apply_mode_to_children(path, mode)?;
+        }
+    }
+
+    // The item itself is chmod'd last (bottom-up) so that choosing a mode without
+    // the search bit on a directory doesn't block descending into it first.
+    chmod_one(path, mode)
+}
+
+#[cfg(unix)]
+fn apply_mode_to_children(dir: &Path, mode: u32) -> FsResult<()> {
+    let dir_mode = with_search_bits(mode);
+
+    for child in fs::read_dir(dir)
+        .map_err(|error| FsError::io("Unable to read source directory", dir, error))?
+    {
+        let child =
+            child.map_err(|error| FsError::io("Unable to read directory entry", dir, error))?;
+        let child_path = child.path();
+        let metadata = fs::symlink_metadata(&child_path)
+            .map_err(|error| FsError::io("Unable to read item metadata", &child_path, error))?;
+
+        // Symlinks are skipped: chmod would follow to the target, which is rarely
+        // intended during a recursive permission change.
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        if metadata.is_dir() {
+            apply_mode_to_children(&child_path, mode)?;
+            chmod_one(&child_path, dir_mode)?;
+        } else {
+            chmod_one(&child_path, mode)?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -648,6 +734,66 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&target).expect("read preserved file"),
             "keep me"
+        );
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_permissions_applies_mode_and_keeps_subdirs_navigable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_root("set-perms");
+        let provider = LocalFileProvider::new();
+
+        // Non-recursive: the exact mode is applied to a single file.
+        let file = root.join("f.txt");
+        fs::write(&file, "x").expect("write file");
+        provider
+            .set_permissions(&file.to_string_lossy(), 0o640, false)
+            .expect("chmod file");
+        assert_eq!(
+            fs::metadata(&file).expect("file meta").permissions().mode() & 0o777,
+            0o640
+        );
+
+        // Recursive with a no-execute mode (0o644): files get it literally, but
+        // sub-directories gain the search bit (0o755) so the tree stays navigable.
+        // Bottom-up ordering means this must not deadlock on the lost search bit.
+        let dir = root.join("d");
+        let sub = dir.join("sub");
+        fs::create_dir_all(&sub).expect("nested dirs");
+        let inner = sub.join("g.txt");
+        fs::write(&inner, "y").expect("write inner");
+
+        provider
+            .set_permissions(&dir.to_string_lossy(), 0o644, true)
+            .expect("recursive chmod");
+
+        assert_eq!(
+            fs::metadata(&dir).expect("dir meta").permissions().mode() & 0o777,
+            0o644,
+            "top directory keeps the literal chosen mode"
+        );
+
+        // Restore the top dir's search bit so the test can inspect descendants
+        // (setting a directory to a no-execute mode locks traversal into it).
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("restore search");
+
+        assert_eq!(
+            fs::metadata(&sub).expect("sub meta").permissions().mode() & 0o777,
+            0o755,
+            "sub-directory gains the search bit"
+        );
+        assert_eq!(
+            fs::metadata(&inner)
+                .expect("inner meta")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644,
+            "nested file gets the literal mode"
         );
 
         cleanup(&root);

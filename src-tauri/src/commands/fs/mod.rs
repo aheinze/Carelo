@@ -7,9 +7,9 @@ use crate::fs::remote::{
     format_remote_uri, list_remote_directory, materialize_remote_file,
     measure_remote_items_size as measure_remote_paths_size, move_local_to_remote_item,
     move_remote_item, move_remote_to_local_item, parse_remote_path, read_remote_file_prefix,
-    release_remote_volume_resources, rename_remote_item, stat_remote_item, RemotePath,
-    RemoteReleaseResult, RemoteSizeMeasure, RemoteVolumeConfig, RemoteVolumeInfo,
-    RemoteVolumeState,
+    release_remote_volume_resources, remote_local_object_path, rename_remote_item,
+    set_remote_sftp_permissions, stat_remote_item, RemotePath, RemoteReleaseResult,
+    RemoteSizeMeasure, RemoteVolumeConfig, RemoteVolumeInfo, RemoteVolumeState,
 };
 use crate::fs::sudo;
 use crate::fs::{archive, operations};

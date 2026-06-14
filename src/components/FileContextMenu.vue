@@ -71,6 +71,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  canEditPermissions: {
+    type: Boolean,
+    default: false,
+  },
   canTag: {
     type: Boolean,
     default: false,
@@ -325,6 +329,15 @@ const actionGroups = computed(() => {
         disabled: !canRenameItem.value,
         keywords: ['name move'],
       },
+      ...(props.canEditPermissions
+        ? [{
+            id: 'editPermissions',
+            action: 'editPermissions',
+            label: 'Permissions…',
+            icon: 'lock',
+            keywords: ['permissions chmod mode access rights rwx octal owner group execute'],
+          }]
+        : []),
       {
         id: 'batchRename',
         action: 'batchRename',

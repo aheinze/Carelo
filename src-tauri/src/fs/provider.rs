@@ -5,6 +5,7 @@ pub trait FileProvider: Send + Sync {
     fn stat(&self, path: &str) -> FsResult<FileMetadata>;
     fn create_dir(&self, path: &str) -> FsResult<()>;
     fn create_file(&self, path: &str) -> FsResult<()>;
+    fn set_permissions(&self, path: &str, mode: u32, recursive: bool) -> FsResult<()>;
     fn rename(&self, from: &str, to: &str) -> FsResult<()>;
     fn delete(&self, path: &str) -> FsResult<()>;
     fn copy(&self, from: &str, to: &str, overwrite: bool) -> FsResult<()>;

@@ -2311,6 +2311,19 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     return (key && fileTags.value[key]) || '';
   }
 
+  // Whether the remote volume backing a remote:// path reports POSIX permissions
+  // (SFTP / mount-backed) — used to decide if the permissions editor applies.
+  function remotePermissionsCapable(path) {
+    const id = remoteVolumeIdFromPath(path);
+
+    if (!id) {
+      return false;
+    }
+
+    const volume = volumes.value.find((item) => remoteVolumeIdFromPath(item.path) === id);
+    return Boolean(volume?.capabilities?.hasPosixPermissions);
+  }
+
   async function applyFileTags(paths, color) {
     const targets = (Array.isArray(paths) ? paths : []).filter(Boolean);
 
@@ -4404,6 +4417,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     removeQueueJob,
     fileTags,
     tagColorForPath,
+    remotePermissionsCapable,
     applyFileTags,
     relocateFileTags,
     loadRecentLocations,

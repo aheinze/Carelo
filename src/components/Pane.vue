@@ -24,6 +24,7 @@ import {
 } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useChecksumDialog } from '../composables/useChecksumDialog';
+import { usePermissionsDialog } from '../composables/usePermissionsDialog';
 import {
   cleanPath,
   dropEffectFromEvent,
@@ -70,6 +71,7 @@ const props = defineProps({
 const store = useFileManagerStore();
 const dialog = useDialog();
 const checksumDialog = useChecksumDialog();
+const permissionsDialog = usePermissionsDialog();
 const transfers = useFileTransferGuards();
 const pane = computed(() => store.panes[props.paneId]);
 const activeTab = computed(() => store.activeTabFor(props.paneId));
@@ -440,6 +442,25 @@ const canVerifyChecksumContext = computed(() => {
 
   return operationEntries.length > 0
     && operationEntries.every((entry) => entry?.kind === 'file' && !isArchivePath(entry.path));
+});
+const canEditPermissionsContext = computed(() => {
+  const operationEntries = contextOperationEntries(contextMenu.value);
+
+  if (operationEntries.length !== 1) {
+    return false;
+  }
+
+  const path = String(operationEntries[0].path || '');
+
+  if (isArchivePath(path)) {
+    return false;
+  }
+
+  // Local items always; remote only when the volume exposes POSIX permissions
+  // (SFTP). The dialog + backend still guard the precise capability.
+  return path.startsWith('remote://')
+    ? store.remotePermissionsCapable(path)
+    : true;
 });
 const canTagContext = computed(() => {
   const operationEntries = contextOperationEntries(contextMenu.value);
@@ -2975,6 +2996,14 @@ async function handleContextAction(action) {
       return;
     }
 
+    if (action === 'editPermissions') {
+      const entry = contextOperationEntries(menu)[0];
+      if (entry) {
+        permissionsDialog.open(entry);
+      }
+      return;
+    }
+
     if (typeof action === 'string' && action.startsWith('tag:')) {
       const value = action.slice('tag:'.length);
       const color = value === 'clear' ? null : value;
@@ -3357,6 +3386,7 @@ async function handleContextAction(action) {
       :custom-tools="availableCustomTools"
       :can-convert-images="canConvertImagesContext"
       :can-verify-checksum="canVerifyChecksumContext"
+      :can-edit-permissions="canEditPermissionsContext"
       :can-tag="canTagContext"
       :active-tag-color="activeTagColorContext"
       :pdf-tool-actions="pdfToolActionsContext"

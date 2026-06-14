@@ -294,6 +294,61 @@ pub async fn create_file(
 }
 
 #[tauri::command]
+pub async fn set_permissions(
+    path: String,
+    mode: u32,
+    recursive: bool,
+    sudo_password: Option<String>,
+    remotes: tauri::State<'_, RemoteVolumeState>,
+) -> Result<(), FsError> {
+    if archive::is_archive_uri(&path) {
+        return Err(archive_read_only_error(&path));
+    }
+
+    if let Some(remote_path) = parse_remote_path(&path) {
+        // Mount-backed remotes (fs / SMB / password-SFTP) resolve to a real local
+        // path; chmod it locally, which also supports recursion and sudo.
+        if let Some(local_path) = remote_local_object_path(&remotes, &remote_path)? {
+            let native = local_path.to_string_lossy().into_owned();
+            let sudo_native = native.clone();
+            let result = run_local_with_sudo(
+                sudo_password,
+                move |provider| provider.set_permissions(&native, mode, recursive),
+                move |password| sudo::set_permissions(&password, &sudo_native, mode, recursive),
+            )
+            .await;
+
+            if result.is_ok() {
+                // Drop cached metadata so the new permissions show on refresh.
+                let _ = remotes.invalidate_cache_for_path(&remote_path);
+            }
+
+            return result;
+        }
+
+        // Otherwise it's key-authenticated SFTP (no local mount): SETSTAT can
+        // only target a single item.
+        if recursive {
+            return Err(FsError::new(
+                "unsupported_target",
+                "Recursive permission changes aren't available over SFTP.",
+                Some(path),
+            ));
+        }
+
+        return set_remote_sftp_permissions(&remotes, remote_path, mode).await;
+    }
+
+    let sudo_path = path.clone();
+    run_local_with_sudo(
+        sudo_password,
+        move |provider| provider.set_permissions(&path, mode, recursive),
+        move |password| sudo::set_permissions(&password, &sudo_path, mode, recursive),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn rename_item(
     from: String,
     to: String,

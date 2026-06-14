@@ -11,6 +11,7 @@ import { useDialog } from './composables/useDialog';
 import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts';
 import { useShortcutsModal } from './composables/useShortcutsModal';
 import { useChecksumDialog } from './composables/useChecksumDialog';
+import { usePermissionsDialog } from './composables/usePermissionsDialog';
 import { useFolderCompare } from './composables/useFolderCompare';
 import { useQuickLook } from './composables/useQuickLook';
 import { useFileManagerStore } from './stores/fileManagerStore';
@@ -20,6 +21,7 @@ const DialogHost = defineAsyncComponent(() => import('./components/DialogHost.vu
 const SettingsWindow = defineAsyncComponent(() => import('./components/SettingsWindow.vue'));
 const ShortcutsModal = defineAsyncComponent(() => import('./components/ShortcutsModal.vue'));
 const ChecksumDialog = defineAsyncComponent(() => import('./components/ChecksumDialog.vue'));
+const PermissionsDialog = defineAsyncComponent(() => import('./components/PermissionsDialog.vue'));
 const FolderCompareDialog = defineAsyncComponent(() => import('./components/FolderCompareDialog.vue'));
 const QuickLookModal = defineAsyncComponent(() => import('./components/QuickLookModal.vue'));
 const TerminalPanel = defineAsyncComponent(() => import('./components/TerminalPanel.vue'));
@@ -28,6 +30,7 @@ const store = useFileManagerStore();
 const dialog = useDialog();
 const shortcutsModal = useShortcutsModal();
 const checksumDialog = useChecksumDialog();
+const permissionsDialog = usePermissionsDialog();
 const folderCompare = useFolderCompare();
 const quickLook = useQuickLook();
 const appWindow = ref(null);
@@ -47,6 +50,7 @@ const layoutStyle = computed(() => ({
 const dialogVisible = computed(() => Boolean(dialog.activeDialog.value));
 const shortcutsVisible = computed(() => shortcutsModal.visible.value);
 const checksumVisible = computed(() => checksumDialog.visible.value);
+const permissionsVisible = computed(() => permissionsDialog.visible.value);
 const folderCompareVisible = computed(() => folderCompare.visible.value);
 const quickLookVisible = computed(() => quickLook.visible.value);
 
@@ -193,6 +197,7 @@ onBeforeUnmount(() => {
     <DialogHost v-if="dialogVisible" />
     <ShortcutsModal v-if="shortcutsVisible" />
     <ChecksumDialog v-if="checksumVisible" />
+    <PermissionsDialog v-if="permissionsVisible" />
     <FolderCompareDialog v-if="folderCompareVisible" />
     <QuickLookModal v-if="quickLookVisible" />
     <TooltipHost />

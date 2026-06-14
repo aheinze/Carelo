@@ -90,6 +90,7 @@ pub fn run() {
             commands::fs::remotes::set_active_remote_volumes,
             commands::fs::transfer::create_folder,
             commands::fs::transfer::create_file,
+            commands::fs::transfer::set_permissions,
             commands::fs::transfer::rename_item,
             commands::fs::transfer::delete_items,
             commands::fs::transfer::restore_from_trash,
