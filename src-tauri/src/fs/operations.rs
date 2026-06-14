@@ -65,7 +65,8 @@ where
     C: FnMut(Option<&Path>) -> FsResult<()>,
 {
     let resolved_items = resolve_items(items)?;
-    let measure = measure_items(&resolved_items, &mut checkpoint)?;
+    let mut failures = Vec::new();
+    let (plan, measure) = measure_plan(&resolved_items, &mut checkpoint, &mut failures)?;
     let mut progress = ProgressState {
         total_bytes: measure.bytes,
         total_entries: measure.entries,
@@ -74,9 +75,10 @@ where
 
     emit_progress(&mut progress, None, true, &mut on_progress);
 
-    for item in resolved_items {
+    for item in plan {
         checkpoint(Some(&item.from))?;
-        copy_path(
+
+        if let Err(error) = copy_path(
             &item.from,
             &item.to,
             item.overwrite,
@@ -84,7 +86,15 @@ where
             &mut progress,
             &mut on_progress,
             &mut checkpoint,
-        )?;
+        ) {
+            // A cancellation must stop the whole operation; ordinary failures
+            // are collected so the remaining items still get copied.
+            if is_cancellation_error(&error) {
+                return Err(error);
+            }
+
+            failures.push(error);
+        }
     }
 
     progress.processed_bytes = progress.total_bytes;
@@ -92,7 +102,7 @@ where
     progress.current_bytes = 0;
     progress.current_total_bytes = 0;
     emit_progress(&mut progress, None, true, &mut on_progress);
-    Ok(())
+    finalize_failures(failures)
 }
 
 pub fn move_items_with_progress<F, C>(
@@ -105,7 +115,8 @@ where
     C: FnMut(Option<&Path>) -> FsResult<()>,
 {
     let resolved_items = resolve_items(items)?;
-    let measure = measure_items(&resolved_items, &mut checkpoint)?;
+    let mut failures = Vec::new();
+    let (plan, measure) = measure_plan(&resolved_items, &mut checkpoint, &mut failures)?;
     let mut progress = ProgressState {
         total_bytes: measure.bytes,
         total_entries: measure.entries,
@@ -114,9 +125,13 @@ where
 
     emit_progress(&mut progress, None, true, &mut on_progress);
 
-    for item in resolved_items {
+    for item in plan {
         checkpoint(Some(&item.from))?;
-        move_path(
+
+        // Each item moves atomically (rename) or via copy-then-delete that only
+        // removes the source after a complete copy, so a failed item leaves its
+        // source intact and the remaining items can still proceed.
+        if let Err(error) = move_path(
             &item.from,
             &item.to,
             item.overwrite,
@@ -124,7 +139,13 @@ where
             &mut progress,
             &mut on_progress,
             &mut checkpoint,
-        )?;
+        ) {
+            if is_cancellation_error(&error) {
+                return Err(error);
+            }
+
+            failures.push(error);
+        }
     }
 
     progress.processed_bytes = progress.total_bytes;
@@ -132,7 +153,34 @@ where
     progress.current_bytes = 0;
     progress.current_total_bytes = 0;
     emit_progress(&mut progress, None, true, &mut on_progress);
-    Ok(())
+    finalize_failures(failures)
+}
+
+fn is_cancellation_error(error: &FsError) -> bool {
+    error.code == "operation_cancelled"
+}
+
+// Turn the per-item failures collected during a batch into a single result:
+// success when empty, otherwise an aggregated error that still names the first
+// underlying cause. The items that did succeed remain on disk.
+fn finalize_failures(mut failures: Vec<FsError>) -> FsResult<()> {
+    match failures.len() {
+        0 => Ok(()),
+        // A lone failure is returned verbatim so its original code (e.g.
+        // permission_denied) still drives sudo escalation and exact messaging.
+        1 => Err(failures.remove(0)),
+        count => {
+            let first = failures.remove(0);
+            Err(FsError::new(
+                "operation_partial_failure",
+                format!(
+                    "{count} items could not be completed. First error: {}",
+                    first.message
+                ),
+                first.path,
+            ))
+        }
+    }
 }
 
 fn resolve_items(items: &[LocalTransferItem]) -> FsResult<Vec<ResolvedTransferItem>> {
@@ -157,26 +205,42 @@ struct ResolvedTransferItem {
     symlink_mode: SymlinkMode,
 }
 
-fn measure_items<C>(items: &[ResolvedTransferItem], checkpoint: &mut C) -> FsResult<Measure>
+// Measure each item up front, collecting per-item failures (e.g. a file that
+// was deleted or is unreadable) instead of aborting the whole batch. Returns
+// the items that can actually be transferred plus the aggregate size for
+// progress. Cancellation still propagates immediately.
+fn measure_plan<C>(
+    items: &[ResolvedTransferItem],
+    checkpoint: &mut C,
+    failures: &mut Vec<FsError>,
+) -> FsResult<(Vec<ResolvedTransferItem>, Measure)>
 where
     C: FnMut(Option<&Path>) -> FsResult<()>,
 {
     let mut total = Measure::default();
     let mut visited_directories = HashSet::new();
+    let mut plan = Vec::new();
 
     for item in items {
         checkpoint(Some(&item.from))?;
-        let measure = measure_path(
+
+        match measure_path(
             &item.from,
             item.symlink_mode,
             &mut visited_directories,
             checkpoint,
-        )?;
-        total.bytes = total.bytes.saturating_add(measure.bytes);
-        total.entries = total.entries.saturating_add(measure.entries);
+        ) {
+            Ok(measure) => {
+                total.bytes = total.bytes.saturating_add(measure.bytes);
+                total.entries = total.entries.saturating_add(measure.entries);
+                plan.push(item.clone());
+            }
+            Err(error) if is_cancellation_error(&error) => return Err(error),
+            Err(error) => failures.push(error),
+        }
     }
 
-    Ok(total)
+    Ok((plan, total))
 }
 
 fn measure_path<C>(
@@ -312,6 +376,13 @@ where
                 on_progress,
                 checkpoint,
             )?;
+        }
+
+        // Set directory permissions/timestamps last so copying children doesn't
+        // bump the mtime we just restored. Opening a directory handle is Unix-
+        // only; on other platforms the directory keeps fresh metadata.
+        if let Ok(directory) = File::open(to) {
+            preserve_metadata(&directory, &metadata);
         }
 
         return Ok(());
@@ -456,18 +527,174 @@ where
         remove_existing_file_like(to)?;
     }
 
-    let mut reader =
+    let reader =
         File::open(from).map_err(|error| FsError::io("Unable to open source file", from, error))?;
     let mut writer = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(to)
         .map_err(|error| FsError::io("Unable to create destination file", to, error))?;
-    let mut buffer = [0_u8; 256 * 1024];
 
     progress.current_bytes = 0;
     progress.current_total_bytes = metadata.len();
     emit_progress(progress, Some(from), true, on_progress);
+
+    copy_file_contents(
+        &reader,
+        &mut writer,
+        from,
+        to,
+        metadata.len(),
+        progress,
+        on_progress,
+        checkpoint,
+    )?;
+
+    // Preserve permissions and timestamps. Best-effort: some targets (FAT,
+    // certain network shares) can't store them, and that must not fail the copy.
+    preserve_metadata(&writer, metadata);
+
+    progress.current_bytes = progress.current_total_bytes;
+    progress.processed_entries = progress.processed_entries.saturating_add(1);
+    emit_progress(progress, Some(from), true, on_progress);
+    Ok(())
+}
+
+// Copy file contents with the fastest method the platform/filesystem offers,
+// falling back to a portable buffered loop. Progress and cancellation are
+// always honored.
+fn copy_file_contents<F, C>(
+    reader: &File,
+    writer: &mut File,
+    from: &Path,
+    to: &Path,
+    total: u64,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    checkpoint: &mut C,
+) -> FsResult<()>
+where
+    F: FnMut(OperationProgress),
+    C: FnMut(Option<&Path>) -> FsResult<()>,
+{
+    #[cfg(target_os = "linux")]
+    {
+        // Reflink: an instant copy-on-write clone on Btrfs/XFS/bcachefs/etc.
+        if reflink_clone(reader, writer) {
+            progress.processed_bytes = progress.processed_bytes.saturating_add(total);
+            progress.current_bytes = total;
+            emit_progress(progress, Some(from), true, on_progress);
+            return Ok(());
+        }
+
+        // copy_file_range: in-kernel copy that also preserves sparse regions.
+        // Returns false only when the syscall is unsupported for this pair, so
+        // the buffered fallback finishes from the (still in-sync) file offsets.
+        if copy_file_range_loop(reader, writer, from, progress, on_progress, checkpoint)? {
+            return Ok(());
+        }
+    }
+
+    // `total` only feeds the Linux fast paths; the buffered loop tracks its own.
+    #[cfg(not(target_os = "linux"))]
+    let _ = total;
+
+    copy_buffered(reader, writer, from, to, progress, on_progress, checkpoint)
+}
+
+#[cfg(target_os = "linux")]
+fn reflink_clone(reader: &File, writer: &File) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    // FICLONE = _IOW(0x94, 9, int); identical across Linux architectures.
+    const FICLONE: libc::c_ulong = 0x4004_9409;
+    // SAFETY: both descriptors are valid, open files for the duration of the call.
+    let result = unsafe { libc::ioctl(writer.as_raw_fd(), FICLONE, reader.as_raw_fd()) };
+    result == 0
+}
+
+#[cfg(target_os = "linux")]
+fn copy_file_range_loop<F, C>(
+    reader: &File,
+    writer: &File,
+    from: &Path,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    checkpoint: &mut C,
+) -> FsResult<bool>
+where
+    F: FnMut(OperationProgress),
+    C: FnMut(Option<&Path>) -> FsResult<()>,
+{
+    use std::os::unix::io::AsRawFd;
+
+    // Cap each call so cancellation and progress stay responsive on huge files.
+    // Looping to EOF (rather than a precomputed size) is robust if the source
+    // changes size between measuring and copying.
+    const CHUNK: usize = 16 * 1024 * 1024;
+    let src = reader.as_raw_fd();
+    let dst = writer.as_raw_fd();
+    let mut first = true;
+
+    loop {
+        checkpoint(Some(from))?;
+        // SAFETY: descriptors are valid; null offsets advance the file positions.
+        let copied = unsafe {
+            libc::copy_file_range(src, std::ptr::null_mut(), dst, std::ptr::null_mut(), CHUNK, 0)
+        };
+
+        if copied < 0 {
+            let error = std::io::Error::last_os_error();
+
+            // On the first call these errno values mean "not supported for this
+            // pair of files" — let the caller finish with the buffered loop.
+            if first
+                && matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOSYS)
+                        | Some(libc::EXDEV)
+                        | Some(libc::EOPNOTSUPP)
+                        | Some(libc::EINVAL)
+                        | Some(libc::EBADF)
+                )
+            {
+                return Ok(false);
+            }
+
+            return Err(FsError::io("Unable to copy file", from, error));
+        }
+
+        if copied == 0 {
+            break; // EOF
+        }
+
+        let copied = copied as u64;
+        progress.processed_bytes = progress.processed_bytes.saturating_add(copied);
+        progress.current_bytes = progress.current_bytes.saturating_add(copied);
+        emit_progress(progress, Some(from), false, on_progress);
+        first = false;
+    }
+
+    Ok(true)
+}
+
+fn copy_buffered<F, C>(
+    reader: &File,
+    writer: &mut File,
+    from: &Path,
+    to: &Path,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    checkpoint: &mut C,
+) -> FsResult<()>
+where
+    F: FnMut(OperationProgress),
+    C: FnMut(Option<&Path>) -> FsResult<()>,
+{
+    // `&File` implements Read, so the source position keeps advancing even when
+    // a partial copy_file_range run handed control over to us.
+    let mut reader = reader;
+    let mut buffer = [0_u8; 256 * 1024];
 
     loop {
         checkpoint(Some(from))?;
@@ -487,10 +714,23 @@ where
         emit_progress(progress, Some(from), false, on_progress);
     }
 
-    progress.current_bytes = progress.current_total_bytes;
-    progress.processed_entries = progress.processed_entries.saturating_add(1);
-    emit_progress(progress, Some(from), true, on_progress);
     Ok(())
+}
+
+// Best-effort copy of permissions and timestamps from the source metadata onto
+// an already-open destination handle (a file or a directory on Unix).
+fn preserve_metadata(file: &File, source: &fs::Metadata) {
+    let _ = file.set_permissions(source.permissions());
+
+    if let Ok(modified) = source.modified() {
+        let mut times = fs::FileTimes::new().set_modified(modified);
+
+        if let Ok(accessed) = source.accessed() {
+            times = times.set_accessed(accessed);
+        }
+
+        let _ = file.set_times(times);
+    }
 }
 
 fn emit_progress<F>(
@@ -776,6 +1016,144 @@ mod tests {
         let final_event = events.last().expect("final progress event");
         assert_eq!(final_event.processed_bytes, final_event.total_bytes);
         assert_eq!(final_event.processed_entries, final_event.total_entries);
+
+        cleanup(&root);
+    }
+
+    fn copy_one(from: &Path, to: &Path) -> FsResult<()> {
+        copy_items_with_progress(
+            &[LocalTransferItem {
+                from: from.to_string_lossy().into_owned(),
+                to: to.to_string_lossy().into_owned(),
+                overwrite: false,
+                symlink_mode: SymlinkMode::Preserve,
+            }],
+            |_| {},
+            |_| Ok(()),
+        )
+    }
+
+    #[test]
+    fn copy_handles_empty_file() {
+        let root = test_root("copy-empty");
+        let source = root.join("empty.bin");
+        let destination = root.join("empty-copy.bin");
+        fs::write(&source, b"").expect("write empty source");
+
+        copy_one(&source, &destination).expect("copy empty file");
+
+        let metadata = fs::metadata(&destination).expect("destination metadata");
+        assert!(metadata.is_file());
+        assert_eq!(metadata.len(), 0);
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_preserves_permissions_and_mtime() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_root("copy-metadata");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, "metadata test").expect("write source");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).expect("chmod source");
+
+        // Stamp a distinctive past mtime so a preserved copy can't be confused
+        // with a freshly-created "now" timestamp.
+        let past = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_400_000_000);
+        File::open(&source)
+            .expect("open source")
+            .set_times(fs::FileTimes::new().set_modified(past))
+            .expect("set source mtime");
+
+        let source_meta = fs::metadata(&source).expect("source metadata");
+        copy_one(&source, &destination).expect("copy file");
+        let dest_meta = fs::metadata(&destination).expect("destination metadata");
+
+        assert_eq!(dest_meta.permissions().mode() & 0o777, 0o640);
+        assert_eq!(
+            dest_meta.modified().expect("destination mtime"),
+            source_meta.modified().expect("source mtime"),
+        );
+
+        cleanup(&root);
+    }
+
+    fn missing_item(root: &Path, name: &str) -> LocalTransferItem {
+        LocalTransferItem {
+            from: root.join(name).to_string_lossy().into_owned(),
+            to: root.join(format!("{name}-copy")).to_string_lossy().into_owned(),
+            overwrite: false,
+            symlink_mode: SymlinkMode::Preserve,
+        }
+    }
+
+    #[test]
+    fn copy_continues_after_failed_item_and_aggregates() {
+        let root = test_root("copy-continue");
+        let good_source = root.join("good.txt");
+        let good_dest = root.join("good-copy.txt");
+        fs::write(&good_source, "good").expect("write good source");
+
+        // Two missing items surround a healthy one; the healthy one must still
+        // copy and the (multiple) failures aggregate into one reported error.
+        let error = copy_items_with_progress(
+            &[
+                missing_item(&root, "missing-a.txt"),
+                LocalTransferItem {
+                    from: good_source.to_string_lossy().into_owned(),
+                    to: good_dest.to_string_lossy().into_owned(),
+                    overwrite: false,
+                    symlink_mode: SymlinkMode::Preserve,
+                },
+                missing_item(&root, "missing-b.txt"),
+            ],
+            |_| {},
+            |_| Ok(()),
+        )
+        .expect_err("failed items should be reported");
+
+        assert_eq!(error.code, "operation_partial_failure");
+        assert_eq!(
+            fs::read_to_string(&good_dest).expect("healthy item should still copy"),
+            "good"
+        );
+        assert!(!root.join("missing-a.txt-copy").exists());
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn copy_with_single_failure_preserves_original_error() {
+        let root = test_root("copy-single-failure");
+        let good_source = root.join("good.txt");
+        let good_dest = root.join("good-copy.txt");
+        fs::write(&good_source, "good").expect("write good source");
+
+        // A lone failure is reported verbatim (not aggregated) so its code still
+        // drives sudo escalation; the healthy item is still copied.
+        let error = copy_items_with_progress(
+            &[
+                missing_item(&root, "missing.txt"),
+                LocalTransferItem {
+                    from: good_source.to_string_lossy().into_owned(),
+                    to: good_dest.to_string_lossy().into_owned(),
+                    overwrite: false,
+                    symlink_mode: SymlinkMode::Preserve,
+                },
+            ],
+            |_| {},
+            |_| Ok(()),
+        )
+        .expect_err("the failed item should be reported");
+
+        assert_ne!(error.code, "operation_partial_failure");
+        assert_eq!(
+            fs::read_to_string(&good_dest).expect("healthy item should still copy"),
+            "good"
+        );
 
         cleanup(&root);
     }

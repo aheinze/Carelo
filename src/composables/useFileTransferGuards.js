@@ -833,6 +833,13 @@ export function useFileTransferGuards() {
         }
       }
     } catch (error) {
+      // Operations now continue past individual item failures, so some items
+      // may have completed before the error. Refresh so the panes match disk.
+      await Promise.allSettled(
+        [...new Set(touchedDirectories.filter(Boolean))]
+          .map((path) => store.reloadDirectoryInPanes(path)),
+      );
+
       if (error?.code === 'operation_cancelled') {
         store.cancelQueueJobDone(jobId);
         return;
