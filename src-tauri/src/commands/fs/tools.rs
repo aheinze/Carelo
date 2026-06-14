@@ -253,6 +253,23 @@ pub async fn reveal_in_file_manager(path: String) -> Result<(), FsError> {
     })
 }
 
+#[tauri::command]
+pub async fn open_external_url(url: String) -> Result<(), FsError> {
+    let is_web = url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:");
+
+    if !is_web {
+        return Err(FsError::new(
+            "invalid_url",
+            "Only http(s) and mailto links can be opened.",
+            Some(url),
+        ));
+    }
+
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|error| {
+        FsError::new("open_url_failed", format!("Unable to open link: {error}"), None)
+    })
+}
+
 const REMOTE_EDIT_SYNC_SETTLE: Duration = Duration::from_secs(2);
 const REMOTE_EDIT_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const REMOTE_EDIT_SESSION_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);

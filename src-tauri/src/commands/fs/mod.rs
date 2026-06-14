@@ -206,8 +206,8 @@ pub use state::{
     SizeMeasureResult,
 };
 pub use tools::{
-    edit_file, list_open_with_apps, open_with_app, open_with_default_app, reveal_in_file_manager,
-    run_custom_tool, RemoteEditSyncState,
+    edit_file, list_open_with_apps, open_external_url, open_with_app, open_with_default_app,
+    reveal_in_file_manager, run_custom_tool, RemoteEditSyncState,
 };
 pub use transfer::{
     copy_items, create_folder, delete_items, get_file_metadata, get_home_directory, list_directory,

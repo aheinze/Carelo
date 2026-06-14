@@ -107,6 +107,7 @@ pub fn run() {
             commands::fs::tools::open_with_app,
             commands::fs::tools::run_custom_tool,
             commands::fs::tools::reveal_in_file_manager,
+            commands::fs::tools::open_external_url,
             list_favorite_groups,
             add_favorite_group,
             remove_favorite_group,

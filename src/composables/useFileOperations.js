@@ -516,6 +516,10 @@ export async function revealInFileManager(path) {
   return invokeCommand('reveal_in_file_manager', { path });
 }
 
+export async function openExternalUrl(url) {
+  return invokeCommand('open_external_url', { url });
+}
+
 export async function startTerminalSession(cwd) {
   return invokeCommand('terminal_start', { cwd });
 }

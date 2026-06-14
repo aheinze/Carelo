@@ -1,12 +1,16 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, markRaw, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
 import AppIcon from './AppIcon.vue';
 import {
   closeTerminalSession,
+  openExternalUrl,
   resizeTerminalSession,
   startTerminalSession,
   terminalSessionCwd,
@@ -27,6 +31,18 @@ const TERMINAL_SCROLLBACK = 5000;
 const sessions = ref([]);
 const activeSessionId = ref(null);
 const terminalHost = ref(null);
+const searchVisible = ref(false);
+const searchTerm = ref('');
+const searchInput = ref(null);
+const terminalMenu = ref(null);
+const SEARCH_DECORATIONS = {
+  decorations: {
+    matchOverviewRuler: '#d29922',
+    activeMatchColorOverviewRuler: '#f0a500',
+    matchBackground: 'rgba(210, 153, 34, 0.32)',
+    activeMatchBackground: 'rgba(240, 165, 0, 0.55)',
+  },
+};
 let unlistenOutput = null;
 let unlistenExit = null;
 let resizeObserver = null;
@@ -157,7 +173,12 @@ function applyTerminalThemes() {
 }
 
 function createTerminal() {
-  const terminal = new Terminal({
+  // markRaw: xterm manages its own internal state and breaks if Vue wraps it
+  // in a reactive proxy (selection/clear and other stateful methods misbehave).
+  const terminal = markRaw(new Terminal({
+    // SearchAddon match highlighting uses the decoration API, which xterm 6
+    // gates behind allowProposedApi (throws otherwise).
+    allowProposedApi: true,
     allowTransparency: true,
     convertEol: false,
     cursorBlink: true,
@@ -167,29 +188,28 @@ function createTerminal() {
     fontWeight: 500,
     lineHeight: 1.22,
     macOptionIsMeta: true,
-    rightClickSelectsWord: true,
+    rightClickSelectsWord: false,
     scrollback: TERMINAL_SCROLLBACK,
     tabStopWidth: 2,
     theme: readTerminalTheme(),
-  });
-  const fitAddon = new FitAddon();
+  }));
+  const fitAddon = markRaw(new FitAddon());
+  const searchAddon = markRaw(new SearchAddon());
 
   terminal.loadAddon(fitAddon);
-  terminal.attachCustomKeyEventHandler((event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === '`') {
-      return true;
-    }
+  terminal.loadAddon(searchAddon);
+  terminal.loadAddon(new WebLinksAddon((event, uri) => {
+    openExternalUrl(uri).catch(() => {});
+  }));
+  terminal.loadAddon(new Unicode11Addon());
+  terminal.unicode.activeVersion = '11';
 
-    event.stopPropagation();
-    return true;
-  });
-
-  return { terminal, fitAddon };
+  return { terminal, fitAddon, searchAddon };
 }
 
 function createSessionRecord(info) {
-  const { terminal, fitAddon } = createTerminal();
-  const element = document.createElement('div');
+  const { terminal, fitAddon, searchAddon } = createTerminal();
+  const element = markRaw(document.createElement('div'));
   const disposables = [];
   const session = {
     id: info.sessionId,
@@ -198,6 +218,7 @@ function createSessionRecord(info) {
     cwd: info.cwd,
     terminal,
     fitAddon,
+    searchAddon,
     element,
     disposables,
     exited: false,
@@ -205,6 +226,7 @@ function createSessionRecord(info) {
   };
 
   element.className = 'terminal-session-host';
+  terminal.attachCustomKeyEventHandler((event) => terminalKeyHandler(event, session));
 
   if (typeof info.sessionId === 'number') {
     disposables.push(
@@ -279,20 +301,148 @@ async function closeSession(sessionId) {
   attachActiveSession();
 }
 
-function clearActiveSession() {
-  activeSession.value?.terminal.clear();
-}
+function closeAllSessions() {
+  const all = [...sessions.value];
 
-function copySelection() {
-  const selection = activeSession.value?.terminal.getSelection();
-
-  if (selection) {
-    navigator.clipboard?.writeText(selection).catch(() => {});
+  if (all.length === 0) {
+    return;
   }
+
+  sessions.value = [];
+  activeSessionId.value = null;
+  all.forEach(disposeSession);
+  nextTick(attachActiveSession);
 }
 
 function focusTerminal() {
   activeSession.value?.terminal.focus();
+}
+
+function copyFromSession(session) {
+  const text = session?.terminal?.getSelection();
+
+  if (text) {
+    navigator.clipboard?.writeText(text).catch(() => {});
+  }
+}
+
+async function pasteIntoSession(session) {
+  if (!session || typeof session.id !== 'number') {
+    return;
+  }
+
+  try {
+    const text = await navigator.clipboard?.readText();
+
+    if (text) {
+      writeTerminalSession(session.id, text).catch(() => {});
+    }
+  } catch {
+    // Clipboard read can be denied; nothing to do.
+  }
+}
+
+// Intercept terminal keystrokes for copy/paste/find; everything else is sent
+// to the shell. Returning false tells xterm not to forward the key.
+function terminalKeyHandler(event, session) {
+  const mod = event.metaKey || event.ctrlKey;
+
+  // Let the global handler toggle the terminal panel.
+  if (mod && event.key === '`') {
+    return true;
+  }
+
+  if (event.type === 'keydown' && mod) {
+    const key = event.key.toLowerCase();
+
+    if (event.shiftKey && key === 'c') {
+      event.preventDefault();
+      copyFromSession(session);
+      return false;
+    }
+
+    if (event.shiftKey && key === 'v') {
+      event.preventDefault();
+      pasteIntoSession(session);
+      return false;
+    }
+
+    if (!event.shiftKey && key === 'f') {
+      event.preventDefault();
+      openSearch();
+      return false;
+    }
+  }
+
+  event.stopPropagation();
+  return true;
+}
+
+function openSearch() {
+  searchVisible.value = true;
+  nextTick(() => searchInput.value?.focus?.());
+}
+
+function closeSearch() {
+  searchVisible.value = false;
+  activeSession.value?.searchAddon?.clearDecorations?.();
+  focusTerminal();
+}
+
+function runSearch(forward = true, incremental = false) {
+  const term = searchTerm.value;
+  const addon = activeSession.value?.searchAddon;
+
+  if (!term || !addon) {
+    return;
+  }
+
+  // `incremental` keeps the current match while typing instead of jumping ahead.
+  const options = incremental ? { ...SEARCH_DECORATIONS, incremental: true } : SEARCH_DECORATIONS;
+
+  try {
+    if (forward) {
+      addon.findNext(term, options);
+    } else {
+      addon.findPrevious(term, options);
+    }
+  } catch {
+    // Never let a search hiccup break the input handler.
+  }
+}
+
+function openTerminalMenu(event) {
+  if (!activeSession.value) {
+    return;
+  }
+
+  terminalMenu.value = { x: event.clientX, y: event.clientY };
+}
+
+function runTerminalMenu(action) {
+  const session = activeSession.value;
+  terminalMenu.value = null;
+
+  if (!session) {
+    return;
+  }
+
+  switch (action) {
+    case 'copy':
+      copyFromSession(session);
+      break;
+    case 'paste':
+      pasteIntoSession(session);
+      break;
+    case 'selectAll':
+      session.terminal.selectAll();
+      break;
+    case 'clear':
+      session.terminal.clear();
+      break;
+    default:
+      break;
+  }
 }
 
 function appendOutput(sessionId, data) {
@@ -422,7 +572,10 @@ watch(
 
 watch(activeSessionId, () => {
   nextTick(attachActiveSession);
+  terminalMenu.value = null;
 });
+
+watch(searchTerm, () => runSearch(true, true));
 
 watch(
   () => store.appSettings.appearanceMode,
@@ -521,10 +674,7 @@ onUnmounted(() => {
         <button type="button" class="terminal-action" aria-label="New terminal" @click="createSession()">
           <AppIcon name="plus" :size="15" />
         </button>
-        <button type="button" class="terminal-action" aria-label="Copy terminal selection" @click="copySelection">
-          <AppIcon name="copy" :size="15" />
-        </button>
-        <button type="button" class="terminal-action" aria-label="Clear terminal" @click="clearActiveSession">
+        <button type="button" class="terminal-action" aria-label="Close all terminals" @click="closeAllSessions">
           <AppIcon name="trash" :size="15" />
         </button>
         <button type="button" class="terminal-action" aria-label="Hide terminal" @click="store.toggleTerminalPanel(false)">
@@ -539,7 +689,50 @@ onUnmounted(() => {
         <span>No terminal session</span>
         <button type="button" @click="createSession()">New Terminal</button>
       </div>
-      <div v-show="activeSession" ref="terminalHost" class="terminal-host" @click="focusTerminal"></div>
+      <div
+        v-show="activeSession"
+        ref="terminalHost"
+        class="terminal-host"
+        @click="focusTerminal"
+        @contextmenu.prevent="openTerminalMenu"
+      ></div>
+
+      <div v-if="searchVisible" class="terminal-search" @keydown.stop>
+        <AppIcon name="search" :size="13" :stroke-width="1.9" />
+        <input
+          ref="searchInput"
+          v-model="searchTerm"
+          type="text"
+          spellcheck="false"
+          placeholder="Find in terminal…"
+          aria-label="Find in terminal"
+          @keydown.enter.prevent="runSearch(!$event.shiftKey)"
+          @keydown.escape.prevent="closeSearch"
+        />
+        <button type="button" class="terminal-search-btn" aria-label="Previous match" @click="runSearch(false)">
+          <AppIcon name="chevron-left" :size="15" :stroke-width="2" />
+        </button>
+        <button type="button" class="terminal-search-btn" aria-label="Next match" @click="runSearch(true)">
+          <AppIcon name="chevron-right" :size="15" :stroke-width="2" />
+        </button>
+        <button type="button" class="terminal-search-btn" aria-label="Close search" @click="closeSearch">
+          <AppIcon name="x" :size="13" :stroke-width="2.2" />
+        </button>
+      </div>
+    </div>
+
+    <div
+      v-if="terminalMenu"
+      class="terminal-menu-backdrop"
+      @click="terminalMenu = null"
+      @contextmenu.prevent="terminalMenu = null"
+    >
+      <div class="terminal-menu" :style="{ left: `${terminalMenu.x}px`, top: `${terminalMenu.y}px` }" @click.stop>
+        <button type="button" @click="runTerminalMenu('copy')">Copy</button>
+        <button type="button" @click="runTerminalMenu('paste')">Paste</button>
+        <button type="button" @click="runTerminalMenu('selectAll')">Select All</button>
+        <button type="button" @click="runTerminalMenu('clear')">Clear</button>
+      </div>
     </div>
   </section>
 </template>
@@ -832,5 +1025,86 @@ onUnmounted(() => {
 
 .terminal-host :deep(.xterm .xterm-helpers) {
   opacity: 0;
+}
+
+/* ── Find-in-terminal bar ─────────────────────────────────── */
+.terminal-search {
+  position: absolute;
+  top: 8px;
+  right: 14px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: var(--popover-bg);
+  box-shadow: var(--shadow-overlay);
+  color: var(--text-faint);
+}
+
+.terminal-search input {
+  width: 180px;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.terminal-search input::placeholder {
+  color: var(--text-faint);
+}
+
+.terminal-search-btn {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--icon);
+  transition: background 90ms ease, color 90ms ease;
+}
+
+.terminal-search-btn:hover {
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+/* ── Right-click menu ─────────────────────────────────────── */
+.terminal-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+}
+
+.terminal-menu {
+  position: fixed;
+  min-width: 150px;
+  padding: 5px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-panel);
+  background: var(--popover-bg);
+  box-shadow: var(--shadow-overlay);
+}
+
+.terminal-menu button {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.terminal-menu button:hover {
+  background: var(--btn-hover);
 }
 </style>

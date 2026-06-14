@@ -409,23 +409,71 @@ mod unix {
     fn spawn_reader(app: tauri::AppHandle, session_id: u64, mut reader: File) {
         thread::spawn(move || {
             let mut buffer = [0_u8; 8192];
+            // Bytes left over when a read ends mid UTF-8 sequence; prepended to
+            // the next read so multi-byte characters never split across chunks.
+            let mut pending: Vec<u8> = Vec::new();
 
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(size) => {
-                        let data = String::from_utf8_lossy(&buffer[..size]).into_owned();
-                        let _ = app.emit(
-                            "terminal://output",
-                            TerminalOutputPayload { session_id, data },
-                        );
+                        pending.extend_from_slice(&buffer[..size]);
+                        flush_utf8(&app, session_id, &mut pending, false);
                     }
                     Err(_) => break,
                 }
             }
 
+            flush_utf8(&app, session_id, &mut pending, true);
             let _ = app.emit("terminal://exit", TerminalExitPayload { session_id });
         });
+    }
+
+    fn emit_output(app: &tauri::AppHandle, session_id: u64, data: String) {
+        if !data.is_empty() {
+            let _ = app.emit("terminal://output", TerminalOutputPayload { session_id, data });
+        }
+    }
+
+    // Emit the valid UTF-8 prefix of `pending`, holding an incomplete trailing
+    // sequence for the next read. Invalid bytes become the replacement char.
+    // When `flush` is set (stream end), any remainder is emitted lossily.
+    fn flush_utf8(app: &tauri::AppHandle, session_id: u64, pending: &mut Vec<u8>, flush: bool) {
+        loop {
+            match std::str::from_utf8(pending) {
+                Ok(text) => {
+                    emit_output(app, session_id, text.to_string());
+                    pending.clear();
+                    return;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    if valid > 0 {
+                        let text = String::from_utf8_lossy(&pending[..valid]).into_owned();
+                        emit_output(app, session_id, text);
+                        pending.drain(..valid);
+                    }
+
+                    match error.error_len() {
+                        Some(len) => {
+                            pending.drain(..len);
+                            emit_output(app, session_id, "\u{FFFD}".to_string());
+                        }
+                        None => {
+                            if flush {
+                                emit_output(
+                                    app,
+                                    session_id,
+                                    String::from_utf8_lossy(pending).into_owned(),
+                                );
+                                pending.clear();
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn terminal_error(code: &'static str, error: std::io::Error) -> FsError {
