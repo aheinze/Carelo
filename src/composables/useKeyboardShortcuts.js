@@ -16,6 +16,7 @@ import {
 import { useShortcutsModal } from './useShortcutsModal';
 import { useChecksumDialog } from './useChecksumDialog';
 import { useFolderCompare } from './useFolderCompare';
+import { useQuickLook } from './useQuickLook';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveRootPath, isArchiveEntry, isArchivePath } from '../utils/archivePaths';
 import {
@@ -281,9 +282,26 @@ export function useKeyboardShortcuts() {
   const shortcutsModal = useShortcutsModal();
   const checksumDialog = useChecksumDialog();
   const folderCompare = useFolderCompare();
+  const quickLook = useQuickLook();
 
   function activePane() {
     return store.activePaneId;
+  }
+
+  function openQuickLook() {
+    const paneId = activePane();
+    const entries = store.visibleEntriesFor(paneId) || [];
+
+    if (entries.length === 0) {
+      return;
+    }
+
+    const focused = store.selectedEntryFor(paneId);
+    const startIndex = focused
+      ? Math.max(0, entries.findIndex((entry) => entry.path === focused.path))
+      : 0;
+
+    quickLook.open(entries, startIndex);
   }
 
   function openFolderCompare() {
@@ -854,6 +872,9 @@ export function useKeyboardShortcuts() {
           return;
         case 'file.preview':
           previewFocused();
+          return;
+        case 'file.quickLook':
+          openQuickLook();
           return;
         case 'file.copyOtherPane':
           await copyToDirectory(targetPath, { targetPaneId });
@@ -1462,9 +1483,15 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      if (key === 'Insert' || key === ' ') {
+      if (key === ' ') {
         event.preventDefault();
-        store.toggleEntrySelection(paneId, null, key === 'Insert');
+        openQuickLook();
+        return;
+      }
+
+      if (key === 'Insert') {
+        event.preventDefault();
+        store.toggleEntrySelection(paneId, null, true);
         return;
       }
 

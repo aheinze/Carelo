@@ -176,7 +176,17 @@ const commandDefinitions = [
     icon: 'eye',
     shortcut: 'F3',
     when: () => hasFocusedEntry.value,
-    keywords: 'inspect quicklook info',
+    keywords: 'inspect info side panel',
+  },
+  {
+    id: 'file.quickLook',
+    section: 'File',
+    title: 'Quick Look',
+    detail: 'Open a large preview overlay for the focused item',
+    icon: 'eye',
+    shortcut: 'Space',
+    when: () => hasFocusedEntry.value,
+    keywords: 'quick look space preview overlay peek',
   },
   {
     id: 'file.copyOtherPane',

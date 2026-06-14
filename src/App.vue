@@ -12,6 +12,7 @@ import { useKeyboardShortcuts } from './composables/useKeyboardShortcuts';
 import { useShortcutsModal } from './composables/useShortcutsModal';
 import { useChecksumDialog } from './composables/useChecksumDialog';
 import { useFolderCompare } from './composables/useFolderCompare';
+import { useQuickLook } from './composables/useQuickLook';
 import { useFileManagerStore } from './stores/fileManagerStore';
 
 const CommandPalette = defineAsyncComponent(() => import('./components/CommandPalette.vue'));
@@ -20,6 +21,7 @@ const SettingsWindow = defineAsyncComponent(() => import('./components/SettingsW
 const ShortcutsModal = defineAsyncComponent(() => import('./components/ShortcutsModal.vue'));
 const ChecksumDialog = defineAsyncComponent(() => import('./components/ChecksumDialog.vue'));
 const FolderCompareDialog = defineAsyncComponent(() => import('./components/FolderCompareDialog.vue'));
+const QuickLookModal = defineAsyncComponent(() => import('./components/QuickLookModal.vue'));
 const TerminalPanel = defineAsyncComponent(() => import('./components/TerminalPanel.vue'));
 
 const store = useFileManagerStore();
@@ -27,6 +29,7 @@ const dialog = useDialog();
 const shortcutsModal = useShortcutsModal();
 const checksumDialog = useChecksumDialog();
 const folderCompare = useFolderCompare();
+const quickLook = useQuickLook();
 const appWindow = ref(null);
 const workspace = ref(null);
 const paneGrid = ref(null);
@@ -45,6 +48,7 @@ const dialogVisible = computed(() => Boolean(dialog.activeDialog.value));
 const shortcutsVisible = computed(() => shortcutsModal.visible.value);
 const checksumVisible = computed(() => checksumDialog.visible.value);
 const folderCompareVisible = computed(() => folderCompare.visible.value);
+const quickLookVisible = computed(() => quickLook.visible.value);
 
 watch(
   () => store.terminalPanelVisible,
@@ -190,6 +194,7 @@ onBeforeUnmount(() => {
     <ShortcutsModal v-if="shortcutsVisible" />
     <ChecksumDialog v-if="checksumVisible" />
     <FolderCompareDialog v-if="folderCompareVisible" />
+    <QuickLookModal v-if="quickLookVisible" />
     <TooltipHost />
     <WindowResizeHandles />
   </div>

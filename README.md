@@ -9,34 +9,49 @@ and custom tools.
 ## Features
 
 - Dual-pane file browsing with tabs per pane.
-- List, grid, and column view modes.
+- List, grid, and column (Miller) view modes.
 - Real local file metadata in the preview panel, including permissions, owner,
   group, timestamps, hidden/read-only state, and size.
-- Image, video, and audio preview support where the platform/webview can render
-  the file.
+- Preview panel for images, video, audio, PDFs, and text/code, where the
+  platform/webview can render the file.
+- Quick Look: press `Space` for a large preview overlay with image/video/audio/
+  PDF/text rendering, syntax highlighting for code, and arrow-key browsing.
+- Copy, cut, paste, rename, delete, create folder, open, reveal, and open in the
+  other pane.
+- Undo/redo (`Cmd/Ctrl + Z` / `Cmd/Ctrl + Shift + Z`) for move, copy, rename, and
+  Trash deletes.
+- Color tags (Finder-style) assignable from the context menu and shown as dots
+  in every view, as tinted pane tabs, and in the breadcrumbs.
+- Folder compare and sync between the two panes, with per-item diff, additive
+  copy in either direction, and optional mirror-delete (to Trash).
+- Checksum tools: compute a file's SHA-256 or compare two files for an exact
+  match.
+- Editable address bar (`Cmd/Ctrl + L`) plus clickable breadcrumbs.
 - Mouse and keyboard selection, including multi-select and range selection.
 - Drag-and-drop moves between panes, column targets, and folders.
 - Folder favorites in the sidebar, stored in SQLite and reorderable by drag and
   drop.
-- Copy, cut, paste, rename, delete, create folder, open, reveal, and open in the
-  other pane.
-- Zip archive and unarchive actions with progress, cancellation, and automatic
-  panel refresh.
+- Conflict resolution on copy/move (skip, keep both, replace, replace-if-newer,
+  checksum compare) with apply-to-all.
+- Zip/7z/tar archive and unarchive actions with progress, cancellation, and
+  automatic panel refresh.
+- Image conversion and PDF tools (compress, merge, extract, split, rotate).
 - Current work indicator with running tasks, progress, log view, and cancel
   actions.
-- Embedded xterm terminal panel on Unix platforms.
+- Embedded xterm terminal panel on Unix platforms; tabs are labeled by the
+  shell's working directory and follow `cd` on Linux.
 - Remote volume dialog backed by OpenDAL for supported providers such as SFTP,
   FTP, WebDAV, S3-compatible storage.
 - Sudo password retry flow for local file operations that require elevated
   permissions.
-- Light and dark themes based on the system color scheme.
+- Multiple color themes with light, dark, and system appearance modes.
 - Window size persistence.
 
 ## Requirements
 
 - Node.js 20 or newer
 - npm
-- Rust 1.77 or newer
+- Rust 1.85 or newer
 - Tauri 2 system dependencies for your OS
 
 For Linux, install the packages required by Tauri/WebKitGTK for your
@@ -158,7 +173,8 @@ Carelo stores durable app data in:
 ```
 
 The SQLite database file and required tables are created automatically when the
-app starts. Favorites are stored there.
+app starts. Favorites, color tags, remote volume configurations, and app
+settings are stored there.
 
 UI settings such as pane layout, theme-dependent dimensions, sidebar state, and
 window dimensions are stored in browser/Tauri local storage.
@@ -221,6 +237,8 @@ operations use native Rust libraries, including the `zip` crate.
 - `Cmd/Ctrl + Shift + P`: command palette
 - `Cmd/Ctrl + P`: fuzzy file search in the current folder
 - `Cmd/Ctrl + Shift + F`: content search in the current folder
+- `Cmd/Ctrl + L`: edit the address bar / go to a path
+- `Space`: Quick Look (preview overlay); `Insert`: toggle item selection
 - `Backspace` or `Cmd/Ctrl + Up`: go to parent folder
 - `Alt + Left` / `Alt + Right`: navigation history
 - `F2`: rename
@@ -230,6 +248,7 @@ operations use native Rust libraries, including the `zip` crate.
 - `F6`: move to other pane
 - `F7`: create folder
 - `F8` or `Delete`: delete
+- `Cmd/Ctrl + Z` / `Cmd/Ctrl + Shift + Z`: undo / redo
 - `Cmd/Ctrl + A`: select all
 - `Cmd/Ctrl + F1`: grid view
 - `Cmd/Ctrl + F2`: list view
