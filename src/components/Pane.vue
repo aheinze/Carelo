@@ -9,6 +9,7 @@ import {
   compressPdfs,
   convertImages,
   createFolder,
+  createFile,
   deleteItems,
   editFile,
   listOpenWithApps,
@@ -1849,6 +1850,35 @@ async function createFolderInDirectory(directory) {
   await refreshDirectories([directory], [props.paneId]);
 }
 
+async function createFileInDirectory(directory) {
+  if (!directory || isArchivePath(directory)) {
+    await dialog.alert({
+      title: 'New File Not Available',
+      message: 'Archive contents are read-only while browsing.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  const name = (await dialog.prompt({
+    title: 'Create File',
+    icon: 'file',
+    message: directory,
+    inputLabel: 'File name',
+    inputValue: '',
+    inputPlaceholder: 'untitled.txt',
+    confirmLabel: 'Create',
+    inputRequired: true,
+  }))?.trim();
+
+  if (!name) {
+    return;
+  }
+
+  await createFile(pathJoin(directory, name));
+  await refreshDirectories([directory], [props.paneId]);
+}
+
 async function runQueuedArchive({ paths, destination, options, overwrite, label, refreshPaths, successDetail }) {
   const retryAction = () => runQueuedArchive({
     paths,
@@ -2859,6 +2889,11 @@ async function handleContextAction(action) {
 
       if (action === 'newFolder') {
         await createFolderInDirectory(targetDirectory);
+        return;
+      }
+
+      if (action === 'newFile') {
+        await createFileInDirectory(targetDirectory);
         return;
       }
 

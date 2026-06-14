@@ -127,6 +127,29 @@ pub async fn create_folder(
 }
 
 #[tauri::command]
+pub async fn create_file(
+    path: String,
+    sudo_password: Option<String>,
+    remotes: tauri::State<'_, RemoteVolumeState>,
+) -> Result<(), FsError> {
+    if archive::is_archive_uri(&path) {
+        return Err(archive_read_only_error(&path));
+    }
+
+    if let Some(remote_path) = parse_remote_path(&path) {
+        return create_remote_file(&remotes, remote_path).await;
+    }
+
+    let sudo_path = path.clone();
+    run_local_with_sudo(
+        sudo_password,
+        move |provider| provider.create_file(&path),
+        move |password| sudo::create_file(&password, &sudo_path),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn rename_item(
     from: String,
     to: String,

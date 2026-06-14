@@ -121,6 +121,7 @@ const sudoActions = {
   list_directory: 'list this folder',
   get_file_metadata: 'read this item',
   create_folder: 'create this folder',
+  create_file: 'create this file',
   rename_item: 'rename this item',
   delete_items: 'delete the selected items',
   copy_items: 'copy the selected items',
@@ -418,6 +419,10 @@ export async function createFolder(path) {
   return invokeCommand('create_folder', { path }, { sudo: true });
 }
 
+export async function createFile(path) {
+  return invokeCommand('create_file', { path }, { sudo: true });
+}
+
 export async function renameItem(from, to) {
   return invokeCommand('rename_item', { from, to }, { sudo: true });
 }
@@ -569,6 +574,7 @@ export function useFileOperations() {
     compareDirectories,
     copyItems,
     createFolder,
+    createFile,
     convertImages,
     compressPdfs,
     runPdfTool,

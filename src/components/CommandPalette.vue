@@ -278,6 +278,15 @@ const commandDefinitions = [
     keywords: 'directory mkdir create target',
   },
   {
+    id: 'file.newFile',
+    section: 'File',
+    title: 'New file',
+    detail: 'Create an empty file in the active pane',
+    icon: 'file-plus',
+    when: () => !isArchivePath(activeRoot.value),
+    keywords: 'empty file touch create document',
+  },
+  {
     id: 'file.delete',
     section: 'File',
     title: 'Delete selected items',

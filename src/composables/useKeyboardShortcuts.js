@@ -1,5 +1,6 @@
 import { onMounted, onUnmounted } from 'vue';
 import {
+  createFile,
   createFolder,
   deleteItems,
   editFile,
@@ -519,6 +520,36 @@ export function useKeyboardShortcuts() {
     await refreshDirectories([targetDirectory], [targetPaneId]);
   }
 
+  async function createNewFile(targetPaneId = activePane()) {
+    const targetDirectory = currentPath(targetPaneId);
+
+    if (isArchivePath(targetDirectory)) {
+      await dialog.alert({
+        title: 'New File Not Available',
+        message: 'Archive contents are read-only while browsing.',
+        variant: 'warning',
+      });
+      return;
+    }
+
+    const name = (await dialog.prompt({
+      title: 'Create File',
+      icon: 'file',
+      inputLabel: 'File name',
+      inputValue: '',
+      inputPlaceholder: 'untitled.txt',
+      confirmLabel: 'Create',
+      inputRequired: true,
+    }))?.trim();
+
+    if (!name || !targetDirectory) {
+      return;
+    }
+
+    await createFile(joinPath(targetDirectory, name));
+    await refreshDirectories([targetDirectory], [targetPaneId]);
+  }
+
   async function deleteSelected() {
     const paneId = activePane();
     const entries = operationEntries();
@@ -912,6 +943,9 @@ export function useKeyboardShortcuts() {
           return;
         case 'file.newFolderOtherPane':
           await createDirectory(targetPaneId, store.selectedEntryFor(paneId)?.name || 'New Folder');
+          return;
+        case 'file.newFile':
+          await createNewFile();
           return;
         case 'file.delete':
           await deleteSelected();

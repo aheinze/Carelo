@@ -83,6 +83,24 @@ pub fn create_folder(password: &str, path: &str) -> FsResult<()> {
     .map(|_| ())
 }
 
+pub fn create_file(password: &str, path: &str) -> FsResult<()> {
+    let path = expand_path(path)?;
+    // Refuse to touch an existing path (mirrors local create_new), then create
+    // an empty file. The path is passed as an argument, never interpolated.
+    run_sudo_command(
+        password,
+        "sh",
+        [
+            OsString::from("-c"),
+            OsString::from("if [ -e \"$1\" ]; then exit 1; fi; : > \"$1\""),
+            OsString::from("sh"),
+            OsString::from(path.as_os_str()),
+        ],
+        Some(&path),
+    )
+    .map(|_| ())
+}
+
 pub fn rename_item(password: &str, from: &str, to: &str) -> FsResult<()> {
     move_item(password, from, to, true)
 }

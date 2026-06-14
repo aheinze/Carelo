@@ -716,6 +716,33 @@ pub async fn create_remote_folder(state: &RemoteVolumeState, path: RemotePath) -
     result
 }
 
+pub async fn create_remote_file(state: &RemoteVolumeState, path: RemotePath) -> FsResult<()> {
+    let config = state.config(&path.volume_id)?;
+    let op = config.operator()?;
+    let object_path = normalize_remote_object_path(&path.path);
+
+    // Refuse to clobber an existing object (mirrors the local create_new path).
+    if op.stat(&object_path).await.is_ok() {
+        return Err(FsError::new(
+            "remote_create_file_failed",
+            "A file with that name already exists.",
+            Some(format_remote_uri(&path.volume_id, &path.path)),
+        ));
+    }
+
+    let result = op
+        .write(&object_path, Vec::<u8>::new())
+        .await
+        .map(|_| ())
+        .map_err(|error| remote_error("remote_create_file_failed", &path, error));
+
+    if result.is_ok() {
+        state.invalidate_cache_for_path(&path)?;
+    }
+
+    result
+}
+
 pub async fn rename_remote_item(
     state: &RemoteVolumeState,
     from: RemotePath,

@@ -331,6 +331,13 @@ defineProps({
       <path d="M13 3.8V8h4" />
     </template>
 
+    <template v-else-if="name === 'file-plus'">
+      <path d="M7 3.8h6l4 4V19a1.8 1.8 0 0 1-1.8 1.8H7A1.8 1.8 0 0 1 5.2 19V5.6A1.8 1.8 0 0 1 7 3.8Z" />
+      <path d="M13 3.8V8h4" />
+      <path d="M11 12.4v4" />
+      <path d="M9 14.4h4" />
+    </template>
+
     <template v-else-if="name === 'file-text'">
       <path d="M7 3.8h6l4 4V19a1.8 1.8 0 0 1-1.8 1.8H7A1.8 1.8 0 0 1 5.2 19V5.6A1.8 1.8 0 0 1 7 3.8Z" />
       <path d="M13 3.8V8h4" />

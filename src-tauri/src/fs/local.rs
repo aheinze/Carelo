@@ -311,6 +311,17 @@ impl FileProvider for LocalFileProvider {
             .map_err(|error| FsError::io("Unable to create directory", &path, error))
     }
 
+    fn create_file(&self, path: &str) -> FsResult<()> {
+        let path = self.expand_path(path)?;
+        // create_new fails if the path already exists, so we never clobber a file.
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map(|_| ())
+            .map_err(|error| FsError::io("Unable to create file", &path, error))
+    }
+
     fn rename(&self, from: &str, to: &str) -> FsResult<()> {
         let from = self.expand_path(from)?;
         let to = self.expand_path(to)?;
@@ -614,6 +625,35 @@ mod tests {
 
     fn cleanup(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn create_file_makes_empty_file_and_refuses_to_clobber() {
+        let root = test_root("create-file");
+        let target = root.join("notes.txt");
+        let provider = LocalFileProvider::new();
+
+        provider
+            .create_file(&target.to_string_lossy())
+            .expect("create empty file");
+        assert!(target.is_file());
+        assert_eq!(
+            fs::read_to_string(&target).expect("read created file"),
+            ""
+        );
+
+        // A second create must not truncate the now-populated file.
+        fs::write(&target, "keep me").expect("write content");
+        let error = provider
+            .create_file(&target.to_string_lossy())
+            .expect_err("create should refuse an existing path");
+        assert_eq!(error.code, "io_error");
+        assert_eq!(
+            fs::read_to_string(&target).expect("read preserved file"),
+            "keep me"
+        );
+
+        cleanup(&root);
     }
 
     #[test]

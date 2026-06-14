@@ -164,6 +164,14 @@ const actionGroups = computed(() => {
           keywords: ['create directory f7'],
         },
         {
+          id: 'newFile',
+          action: 'newFile',
+          label: 'New File',
+          icon: 'file-plus',
+          disabled: !props.canModify,
+          keywords: ['create empty file document'],
+        },
+        {
           id: 'refreshDirectory',
           action: 'refreshDirectory',
           label: 'Refresh Folder',

@@ -4,7 +4,7 @@ import AppIcon from './AppIcon.vue';
 import SidebarSelector from './SidebarSelector.vue';
 import WorkIndicator from './WorkIndicator.vue';
 import WorkspaceSelector from './WorkspaceSelector.vue';
-import { createFolder, deleteItems } from '../composables/useFileOperations';
+import { createFile, createFolder, deleteItems } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveDisplayName, isArchivePath } from '../utils/archivePaths';
@@ -114,6 +114,37 @@ async function createFolderInActivePane() {
   }
 
   await createFolder(joinPath(targetDirectory, name));
+  await store.reloadDirectoryInPanes(targetDirectory, [store.activePaneId]);
+}
+
+async function createFileInActivePane() {
+  const targetDirectory = store.effectiveDirectoryFor(store.activePaneId) || '~';
+
+  if (isArchivePath(targetDirectory)) {
+    await dialog.alert({
+      title: 'New File Not Available',
+      message: 'Archive contents are read-only while browsing.',
+      variant: 'warning',
+    });
+    return;
+  }
+
+  const name = (await dialog.prompt({
+    title: 'New File',
+    icon: 'file',
+    message: targetDirectory,
+    inputLabel: 'Name',
+    inputValue: '',
+    inputPlaceholder: 'untitled.txt',
+    confirmLabel: 'Create',
+    inputRequired: true,
+  }))?.trim();
+
+  if (!name) {
+    return;
+  }
+
+  await createFile(joinPath(targetDirectory, name));
   await store.reloadDirectoryInPanes(targetDirectory, [store.activePaneId]);
 }
 
@@ -359,6 +390,16 @@ async function deleteSelection() {
           @click="createFolderInActivePane"
         >
           <AppIcon name="folder-plus" :size="19" :stroke-width="1.8" />
+        </button>
+        <button
+          v-tooltip="{ text: 'New file' }"
+          type="button"
+          class="icon-btn"
+          aria-label="New file"
+          :disabled="activeDirectoryIsArchive"
+          @click="createFileInActivePane"
+        >
+          <AppIcon name="file-plus" :size="19" :stroke-width="1.8" />
         </button>
         <button
           v-tooltip="{ text: 'Delete', shortcut: 'F8' }"
