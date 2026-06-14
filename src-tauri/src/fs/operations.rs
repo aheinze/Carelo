@@ -86,9 +86,12 @@ where
             &mut progress,
             &mut on_progress,
             &mut checkpoint,
+            &mut failures,
+            true,
         ) {
             // A cancellation must stop the whole operation; ordinary failures
-            // are collected so the remaining items still get copied.
+            // are collected so the remaining items still get copied. Failures
+            // deep inside a tree are collected by copy_path itself.
             if is_cancellation_error(&error) {
                 return Err(error);
             }
@@ -262,17 +265,30 @@ fn plan_copy_path(
         for child in fs::read_dir(from)
             .map_err(|error| FsError::io("Unable to read source directory", from, error))?
         {
-            let child = child.map_err(|error| {
-                FsError::io("Unable to read source directory entry", from, error)
-            })?;
-            plan_copy_path(
+            let child = match child {
+                Ok(child) => child,
+                Err(error) => {
+                    plan.failures.push(FsError::io(
+                        "Unable to read source directory entry",
+                        from,
+                        error,
+                    ));
+                    continue;
+                }
+            };
+
+            // Collect a child's planning failure and keep going so one bad file
+            // doesn't drop the whole tree; the worker pool reports copy failures.
+            if let Err(error) = plan_copy_path(
                 &child.path(),
                 &to.join(child.file_name()),
                 overwrite,
                 symlink_mode,
                 visited_directories,
                 plan,
-            )?;
+            ) {
+                plan.failures.push(error);
+            }
         }
 
         return Ok(());
@@ -593,13 +609,20 @@ where
         for child in fs::read_dir(path)
             .map_err(|error| FsError::io("Unable to read source directory", path, error))?
         {
-            let child = child.map_err(|error| {
-                FsError::io("Unable to read source directory entry", path, error)
-            })?;
-            let measure =
-                measure_path(&child.path(), symlink_mode, visited_directories, checkpoint)?;
-            total.bytes = total.bytes.saturating_add(measure.bytes);
-            total.entries = total.entries.saturating_add(measure.entries);
+            let Ok(child) = child else {
+                continue; // unreadable entry; the copy walk surfaces real failures
+            };
+
+            match measure_path(&child.path(), symlink_mode, visited_directories, checkpoint) {
+                Ok(measure) => {
+                    total.bytes = total.bytes.saturating_add(measure.bytes);
+                    total.entries = total.entries.saturating_add(measure.entries);
+                }
+                // Cancellation aborts the whole measure; other errors are left for
+                // the copy/move walk to report, keeping the size estimate best-effort.
+                Err(error) if is_cancellation_error(&error) => return Err(error),
+                Err(_) => {}
+            }
         }
 
         return Ok(total);
@@ -611,6 +634,10 @@ where
     })
 }
 
+// `continue_on_error` controls within-tree behavior: copies collect per-file
+// failures into `failures` and keep going; moves pass `false` so any failure
+// aborts before the source is deleted (no data loss). Cancellation always aborts.
+#[allow(clippy::too_many_arguments)]
 fn copy_path<F, C>(
     from: &Path,
     to: &Path,
@@ -619,6 +646,8 @@ fn copy_path<F, C>(
     progress: &mut ProgressState,
     on_progress: &mut F,
     checkpoint: &mut C,
+    failures: &mut Vec<FsError>,
+    continue_on_error: bool,
 ) -> FsResult<()>
 where
     F: FnMut(OperationProgress),
@@ -667,10 +696,26 @@ where
         for child in fs::read_dir(from)
             .map_err(|error| FsError::io("Unable to read source directory", from, error))?
         {
-            let child = child.map_err(|error| {
-                FsError::io("Unable to read source directory entry", from, error)
-            })?;
-            copy_path(
+            let child = match child {
+                Ok(child) => child,
+                Err(error) if continue_on_error => {
+                    failures.push(FsError::io(
+                        "Unable to read source directory entry",
+                        from,
+                        error,
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(FsError::io(
+                        "Unable to read source directory entry",
+                        from,
+                        error,
+                    ))
+                }
+            };
+
+            match copy_path(
                 &child.path(),
                 &to.join(child.file_name()),
                 overwrite,
@@ -678,7 +723,15 @@ where
                 progress,
                 on_progress,
                 checkpoint,
-            )?;
+                failures,
+                continue_on_error,
+            ) {
+                Ok(()) => {}
+                // Cancellation stops everything; otherwise skip just this child.
+                Err(error) if is_cancellation_error(&error) => return Err(error),
+                Err(error) if continue_on_error => failures.push(error),
+                Err(error) => return Err(error),
+            }
         }
 
         // Set directory permissions/timestamps last so copying children doesn't
@@ -739,6 +792,8 @@ where
             progress,
             on_progress,
             checkpoint,
+            &mut Vec::new(),
+            false,
         ) {
             cleanup_partial_copy(&temporary_to);
             return Err(copy_error);
@@ -792,6 +847,8 @@ where
                 progress,
                 on_progress,
                 checkpoint,
+                &mut Vec::new(),
+                false,
             ) {
                 cleanup_partial_copy(&temporary_to);
                 return Err(copy_error);
@@ -1474,6 +1531,92 @@ mod tests {
         assert_eq!(
             result.expect_err("cancelled copy should error").code,
             "operation_cancelled"
+        );
+
+        cleanup(&root);
+    }
+
+    // A broken symlink copied in Follow mode is a portable way to make one file
+    // *inside* a tree fail while its siblings remain perfectly copyable.
+    #[cfg(unix)]
+    fn tree_with_one_bad_file(src: &Path) {
+        fs::create_dir_all(src.join("sub")).expect("nested src");
+        fs::write(src.join("a.txt"), "a").expect("a");
+        fs::write(src.join("b.txt"), "b").expect("b");
+        fs::write(src.join("sub/c.txt"), "c").expect("c");
+        std::os::unix::fs::symlink("/no/such/target-xyz", src.join("broken")).expect("symlink");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn within_tree_continue_on_error_sequential() {
+        let root = test_root("within-tree-seq");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        tree_with_one_bad_file(&src);
+
+        let result = copy_items_with_progress(
+            &[LocalTransferItem {
+                from: src.to_string_lossy().into_owned(),
+                to: dst.to_string_lossy().into_owned(),
+                overwrite: false,
+                symlink_mode: SymlinkMode::Follow,
+            }],
+            |_| {},
+            |_| Ok(()),
+        );
+
+        // The bad file is reported, but its siblings (including a nested one)
+        // are still copied.
+        assert!(result.is_err(), "the broken link should be reported");
+        assert_eq!(
+            fs::read_to_string(dst.join("a.txt")).expect("a copied"),
+            "a"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.join("b.txt")).expect("b copied"),
+            "b"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.join("sub/c.txt")).expect("nested copied"),
+            "c"
+        );
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn within_tree_continue_on_error_parallel() {
+        let root = test_root("within-tree-par");
+        let src = root.join("src");
+        let dst = root.join("dst");
+        tree_with_one_bad_file(&src);
+
+        let result = copy_items_parallel(
+            &[LocalTransferItem {
+                from: src.to_string_lossy().into_owned(),
+                to: dst.to_string_lossy().into_owned(),
+                overwrite: false,
+                symlink_mode: SymlinkMode::Follow,
+            }],
+            4,
+            |_| {},
+            |_| Ok(()),
+        );
+
+        assert!(result.is_err(), "the broken link should be reported");
+        assert_eq!(
+            fs::read_to_string(dst.join("a.txt")).expect("a copied"),
+            "a"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.join("b.txt")).expect("b copied"),
+            "b"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.join("sub/c.txt")).expect("nested copied"),
+            "c"
         );
 
         cleanup(&root);
