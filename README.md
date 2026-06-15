@@ -15,9 +15,17 @@ and custom tools.
 - Preview panel for images, video, audio, PDFs, and text/code, where the
   platform/webview can render the file.
 - Quick Look: press `Space` for a large preview overlay with image/video/audio/
-  PDF/text rendering, syntax highlighting for code, and arrow-key browsing.
-- Copy, cut, paste, rename, delete, create folder, open, reveal, and open in the
-  other pane.
+  PDF/text rendering, syntax highlighting for code, and arrow-key browsing;
+  works for both local and remote files.
+- Copy, cut, paste, rename, delete, create file, create folder, open, reveal, and
+  open in the other pane.
+- Type-ahead find: start typing in a pane to jump to the first item whose name
+  matches in the current folder; repeat the key to cycle matches.
+- Permissions editor: a dedicated dialog to change Unix permissions — owner,
+  group, and other read/write/execute plus the setuid, setgid, and sticky bits —
+  with octal entry, an `ls -l` style preview, and optional recursive apply for
+  folders. Works on local files (with sudo elevation when required) and on remote
+  volumes (mount-backed and SFTP).
 - Undo/redo (`Cmd/Ctrl + Z` / `Cmd/Ctrl + Shift + Z`) for move, copy, rename, and
   Trash deletes.
 - Color tags (Finder-style) assignable from the context menu and shown as dots
@@ -29,8 +37,13 @@ and custom tools.
 - Editable address bar (`Cmd/Ctrl + L`) plus clickable breadcrumbs.
 - Mouse and keyboard selection, including multi-select and range selection.
 - Drag-and-drop moves between panes, column targets, and folders.
-- Folder favorites in the sidebar, stored in SQLite and reorderable by drag and
-  drop.
+- Sidebar with folder favorites (stored in SQLite, reorderable by drag and drop),
+  custom favorite groups, and a Recent list of the last visited locations.
+- Parallel, storage-aware file operations: copy and move run several files at
+  once, with concurrency chosen by storage type — parallel for SSDs and remotes,
+  sequential for spinning disks. Fast local copies use copy-on-write reflinks and
+  `copy_file_range` where available, preserve metadata, and continue past
+  per-file errors. Toggle parallel transfers in Settings.
 - Conflict resolution on copy/move (skip, keep both, replace, replace-if-newer,
   checksum compare) with apply-to-all.
 - Zip/7z/tar archive and unarchive actions with progress, cancellation, and
@@ -253,6 +266,7 @@ operations use native Rust libraries, including the `zip` crate.
 - `Cmd/Ctrl + F1`: grid view
 - `Cmd/Ctrl + F2`: list view
 - `Cmd/Ctrl + .`: toggle hidden files
+- Start typing in a pane to jump to a file by name (type-ahead find)
 
 Use `F1` in the app to open the shortcut reference.
 
