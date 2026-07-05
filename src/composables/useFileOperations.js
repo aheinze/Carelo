@@ -348,6 +348,14 @@ export async function readSystemFileClipboard() {
   return invokeCommand('read_system_file_clipboard');
 }
 
+export async function writeSystemTextClipboard(text) {
+  return invokeCommand('write_system_text_clipboard', { text });
+}
+
+export async function readSystemTextClipboard() {
+  return invokeCommand('read_system_text_clipboard');
+}
+
 export async function addRemoteVolume(config) {
   return invokeCommand('add_remote_volume', { config });
 }

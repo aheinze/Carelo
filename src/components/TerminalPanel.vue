@@ -11,10 +11,12 @@ import AppIcon from './AppIcon.vue';
 import {
   closeTerminalSession,
   openExternalUrl,
+  readSystemTextClipboard,
   resizeTerminalSession,
   startTerminalSession,
   terminalSessionCwd,
   writeTerminalSession,
+  writeSystemTextClipboard,
 } from '../composables/useFileOperations';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveParentPath, isArchivePath } from '../utils/archivePaths';
@@ -318,28 +320,93 @@ function focusTerminal() {
   activeSession.value?.terminal.focus();
 }
 
+async function writeTextClipboard(text) {
+  if (!text) {
+    return false;
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Desktop webviews can deny navigator.clipboard; try the native bridge.
+    }
+  }
+
+  try {
+    return Boolean(await writeSystemTextClipboard(text));
+  } catch {
+    return false;
+  }
+}
+
+async function readTextClipboard() {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+    try {
+      const text = await navigator.clipboard.readText();
+
+      if (typeof text === 'string' && text.length > 0) {
+        return text;
+      }
+    } catch {
+      // Clipboard reads are permission-sensitive; fall back to Tauri.
+    }
+  }
+
+  try {
+    const text = await readSystemTextClipboard();
+    return typeof text === 'string' ? text : '';
+  } catch {
+    return '';
+  }
+}
+
 function copyFromSession(session) {
   const text = session?.terminal?.getSelection();
 
   if (text) {
-    navigator.clipboard?.writeText(text).catch(() => {});
+    writeTextClipboard(text);
+    return true;
   }
+
+  return false;
+}
+
+function pasteTextIntoSession(session, text) {
+  if (!session || typeof session.id !== 'number' || !text) {
+    return false;
+  }
+
+  if (typeof session.terminal?.paste === 'function') {
+    session.terminal.paste(text);
+  } else {
+    writeTerminalSession(session.id, text).catch(() => {});
+  }
+  return true;
 }
 
 async function pasteIntoSession(session) {
   if (!session || typeof session.id !== 'number') {
-    return;
+    return false;
   }
 
-  try {
-    const text = await navigator.clipboard?.readText();
+  const text = await readTextClipboard();
+  return pasteTextIntoSession(session, text);
+}
 
-    if (text) {
-      writeTerminalSession(session.id, text).catch(() => {});
-    }
-  } catch {
-    // Clipboard read can be denied; nothing to do.
-  }
+function isTerminalCopyShortcut(event, key) {
+  return (
+    (event.metaKey && !event.ctrlKey && !event.altKey && key === 'c') ||
+    (event.ctrlKey && event.shiftKey && !event.altKey && key === 'c')
+  );
+}
+
+function isTerminalPasteShortcut(event, key) {
+  return (
+    (event.metaKey && !event.ctrlKey && !event.altKey && key === 'v') ||
+    (event.ctrlKey && event.shiftKey && !event.altKey && key === 'v')
+  );
 }
 
 // Intercept terminal keystrokes for copy/paste/find; everything else is sent
@@ -355,14 +422,16 @@ function terminalKeyHandler(event, session) {
   if (event.type === 'keydown' && mod) {
     const key = event.key.toLowerCase();
 
-    if (event.shiftKey && key === 'c') {
+    if (isTerminalCopyShortcut(event, key)) {
       event.preventDefault();
+      event.stopPropagation();
       copyFromSession(session);
       return false;
     }
 
-    if (event.shiftKey && key === 'v') {
+    if (isTerminalPasteShortcut(event, key)) {
       event.preventDefault();
+      event.stopPropagation();
       pasteIntoSession(session);
       return false;
     }

@@ -1239,14 +1239,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     const deviceItems = volumeItems.filter((item) => !item.isRemote);
     const remoteItems = volumeItems.filter((item) => item.isRemote);
 
-    sections.splice(
-      1,
-      0,
-      {
+    if (deviceItems.length > 0) {
+      sections.splice(1, 0, {
         title: 'Devices',
         items: deviceItems,
-      },
-    );
+      });
+    }
 
     const favoriteSections = fallbackGroups.map((group) => ({
       id: group.id,
@@ -1258,7 +1256,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     }));
 
     const recentItems = recentLocations.value.slice(0, 5).map((entry) => ({
-      name: entry.name || tabTitleForPath(entry.path),
+      name: recentLocationName(entry),
       path: entry.path,
       detail: recentLocationDetail(entry.path),
       icon: 'clock',
@@ -2263,6 +2261,17 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
   // The parent directory of a recent path, with the home dir shown as `~`, so
   // sibling folders with the same name stay distinguishable in the sidebar.
+  function recentLocationName(entry) {
+    const pathName = tabTitleForPath(entry?.path);
+    const storedName = String(entry?.name || '').trim();
+
+    if (!storedName || storedName.includes('/') || storedName.includes('\\')) {
+      return pathName;
+    }
+
+    return storedName;
+  }
+
   function recentLocationDetail(path) {
     const value = String(path || '').replace(/\/+$/, '');
 

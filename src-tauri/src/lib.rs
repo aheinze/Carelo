@@ -7,7 +7,10 @@ pub mod store;
 pub mod window_state;
 
 use commands::app::quit_app;
-use commands::clipboard::{read_system_file_clipboard, write_system_file_clipboard};
+use commands::clipboard::{
+    read_system_file_clipboard, read_system_text_clipboard, write_system_file_clipboard,
+    write_system_text_clipboard,
+};
 use commands::fs::{
     DirectoryWatchState, FileOperationState, FileSearchIndexState, MediaStreamState,
     RemoteEditSyncState,
@@ -134,6 +137,8 @@ pub fn run() {
             create_oauth_tokens,
             write_system_file_clipboard,
             read_system_file_clipboard,
+            write_system_text_clipboard,
+            read_system_text_clipboard,
             terminal_start,
             terminal_write,
             terminal_resize,

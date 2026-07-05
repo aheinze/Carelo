@@ -311,9 +311,9 @@ async function deleteSelection() {
         </button>
       </div>
 
-      <div class="toolbar-divider" aria-hidden="true"></div>
+      <div class="toolbar-divider collapse-2" aria-hidden="true"></div>
 
-      <div class="icon-group status-action-group" role="toolbar" aria-label="Display actions">
+      <div class="icon-group status-action-group collapse-2" role="toolbar" aria-label="Display actions">
         <button
           v-tooltip="{ text: store.showHiddenFiles ? 'Hide hidden files' : 'Show hidden files', shortcut: 'Ctrl .' }"
           type="button"
@@ -326,9 +326,9 @@ async function deleteSelection() {
         </button>
       </div>
 
-      <div class="toolbar-divider toolbar-divider--soft" aria-hidden="true"></div>
+      <div class="toolbar-divider toolbar-divider--soft collapse-1" aria-hidden="true"></div>
 
-      <div class="icon-group pane-action-group" role="toolbar" aria-label="Pane actions">
+      <div class="icon-group pane-action-group collapse-1" role="toolbar" aria-label="Pane actions">
         <button
           v-tooltip="{ text: 'Open in other pane', shortcut: 'Ctrl Right' }"
           type="button"
@@ -355,7 +355,7 @@ async function deleteSelection() {
         <button
           v-tooltip="{ text: store.canUndo ? `Undo ${store.undoLabel}` : 'Nothing to undo', shortcut: 'Ctrl Z' }"
           type="button"
-          class="icon-btn"
+          class="icon-btn collapse-2"
           aria-label="Undo last operation"
           :disabled="!store.canUndo"
           @click="store.undoLastOperation()"
@@ -365,7 +365,7 @@ async function deleteSelection() {
         <button
           v-tooltip="{ text: store.canRedo ? `Redo ${store.redoLabel}` : 'Nothing to redo', shortcut: 'Ctrl Shift Z' }"
           type="button"
-          class="icon-btn"
+          class="icon-btn collapse-2"
           aria-label="Redo last operation"
           :disabled="!store.canRedo"
           @click="store.redoLastOperation()"
@@ -375,7 +375,7 @@ async function deleteSelection() {
         <button
           v-tooltip="{ text: 'Copy path', shortcut: 'Ctrl Shift Enter' }"
           type="button"
-          class="icon-btn"
+          class="icon-btn collapse-1"
           aria-label="Copy selected path"
           @click="copySelectedPath"
         >
@@ -384,7 +384,7 @@ async function deleteSelection() {
         <button
           v-tooltip="{ text: 'New folder', shortcut: 'F7' }"
           type="button"
-          class="icon-btn"
+          class="icon-btn collapse-3"
           aria-label="New folder"
           :disabled="activeDirectoryIsArchive"
           @click="createFolderInActivePane"
@@ -394,7 +394,7 @@ async function deleteSelection() {
         <button
           v-tooltip="{ text: 'New file' }"
           type="button"
-          class="icon-btn"
+          class="icon-btn collapse-1"
           aria-label="New file"
           :disabled="activeDirectoryIsArchive"
           @click="createFileInActivePane"
@@ -424,7 +424,7 @@ async function deleteSelection() {
         <button
           v-tooltip="{ text: 'Toggle terminal', shortcut: 'Ctrl `' }"
           type="button"
-          class="icon-btn"
+          class="icon-btn collapse-2"
           :class="{ active: store.terminalPanelVisible }"
           aria-label="Toggle terminal panel"
           @click="store.toggleTerminalPanel()"
@@ -760,5 +760,30 @@ h1 {
 
 .search-field input::placeholder {
   color: var(--text-muted);
+}
+
+/* ── Responsive: drop the least-used actions as the window narrows ──
+   Everything hidden here stays reachable via keyboard shortcuts, the
+   right-click menu, and the command palette. Tiers hide cumulatively:
+   tier 1 first, then tier 2, then tier 3 near the minimum window width.
+   - collapse-1: Open-in-other-pane + Refresh, Copy path, New file
+   - collapse-2: Undo, Redo, Show hidden files, Terminal toggle
+   - collapse-3: New folder (Delete stays put) */
+@media (max-width: 1140px) {
+  .toolbar-right .collapse-1 {
+    display: none;
+  }
+}
+
+@media (max-width: 1030px) {
+  .toolbar-right .collapse-2 {
+    display: none;
+  }
+}
+
+@media (max-width: 975px) {
+  .toolbar-right .collapse-3 {
+    display: none;
+  }
 }
 </style>

@@ -29,18 +29,31 @@ pub async fn write_system_file_clipboard(
         return Ok(false);
     }
 
-    run_file_clipboard_on_main_thread(app, move || platform::write_file_clipboard(&mode, &paths))
-        .await
+    run_clipboard_on_main_thread(app, move || platform::write_file_clipboard(&mode, &paths)).await
 }
 
 #[tauri::command]
 pub async fn read_system_file_clipboard(
     app: AppHandle,
 ) -> Result<Option<SystemFileClipboard>, FsError> {
-    run_file_clipboard_on_main_thread(app, platform::read_file_clipboard).await
+    run_clipboard_on_main_thread(app, platform::read_file_clipboard).await
 }
 
-async fn run_file_clipboard_on_main_thread<T, F>(app: AppHandle, task: F) -> Result<T, FsError>
+#[tauri::command]
+pub async fn write_system_text_clipboard(app: AppHandle, text: String) -> Result<bool, FsError> {
+    if text.is_empty() {
+        return Ok(false);
+    }
+
+    run_clipboard_on_main_thread(app, move || platform::write_text_clipboard(&text)).await
+}
+
+#[tauri::command]
+pub async fn read_system_text_clipboard(app: AppHandle) -> Result<Option<String>, FsError> {
+    run_clipboard_on_main_thread(app, platform::read_text_clipboard).await
+}
+
+async fn run_clipboard_on_main_thread<T, F>(app: AppHandle, task: F) -> Result<T, FsError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, FsError> + Send + 'static,
@@ -365,9 +378,95 @@ mod platform {
             "copy".to_string()
         }
     }
+
+    pub fn write_text_clipboard(text: &str) -> Result<bool, FsError> {
+        ensure_gtk()?;
+
+        let clipboard = Clipboard::get(&gdk::SELECTION_CLIPBOARD);
+        clipboard.set_text(text);
+        clipboard.store();
+        Ok(true)
+    }
+
+    pub fn read_text_clipboard() -> Result<Option<String>, FsError> {
+        ensure_gtk()?;
+
+        let clipboard = Clipboard::get(&gdk::SELECTION_CLIPBOARD);
+        Ok(clipboard.wait_for_text().map(|text| text.to_string()))
+    }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    pub fn write_file_clipboard(_mode: &str, _paths: &[String]) -> Result<bool, FsError> {
+        Ok(false)
+    }
+
+    pub fn read_file_clipboard() -> Result<Option<SystemFileClipboard>, FsError> {
+        Ok(None)
+    }
+
+    pub fn write_text_clipboard(text: &str) -> Result<bool, FsError> {
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|error| system_text_clipboard_error("write", error))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|error| system_text_clipboard_error("write", error))?;
+        }
+
+        let status = child
+            .wait()
+            .map_err(|error| system_text_clipboard_error("write", error))?;
+
+        if status.success() {
+            Ok(true)
+        } else {
+            Err(FsError::new(
+                "clipboard_unavailable",
+                format!("Unable to write text clipboard: pbcopy exited with {status}."),
+                None,
+            ))
+        }
+    }
+
+    pub fn read_text_clipboard() -> Result<Option<String>, FsError> {
+        let output = Command::new("pbpaste")
+            .output()
+            .map_err(|error| system_text_clipboard_error("read", error))?;
+
+        if !output.status.success() {
+            return Err(FsError::new(
+                "clipboard_unavailable",
+                format!(
+                    "Unable to read text clipboard: pbpaste exited with {}.",
+                    output.status
+                ),
+                None,
+            ));
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        Ok((!text.is_empty()).then_some(text))
+    }
+
+    fn system_text_clipboard_error(action: &str, error: std::io::Error) -> FsError {
+        FsError::new(
+            "clipboard_unavailable",
+            format!("Unable to {action} text clipboard: {error}"),
+            None,
+        )
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
     use super::*;
 
@@ -376,6 +475,14 @@ mod platform {
     }
 
     pub fn read_file_clipboard() -> Result<Option<SystemFileClipboard>, FsError> {
+        Ok(None)
+    }
+
+    pub fn write_text_clipboard(_text: &str) -> Result<bool, FsError> {
+        Ok(false)
+    }
+
+    pub fn read_text_clipboard() -> Result<Option<String>, FsError> {
         Ok(None)
     }
 }

@@ -1692,7 +1692,7 @@ h2 {
 
 .sidebar-item {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
+  grid-template-columns: 24px minmax(76px, 1fr) fit-content(42%);
   width: 100%;
   align-items: center;
   gap: 7px;
@@ -1740,6 +1740,7 @@ h2 {
 }
 
 .sidebar-label {
+  min-width: 0;
   overflow: hidden;
   font-size: 13px;
   font-weight: 590;
@@ -1749,6 +1750,8 @@ h2 {
 }
 
 .sidebar-item small {
+  min-width: 0;
+  max-width: 150px;
   overflow: hidden;
   color: var(--text-faint);
   font-size: 11.5px;
