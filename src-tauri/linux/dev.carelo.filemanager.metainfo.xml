@@ -21,6 +21,7 @@
   </developer>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.12.0" date="2026-07-11" />
     <release version="0.11.1" date="2026-07-05" />
     <release version="0.11.0" date="2026-06-14" />
     <release version="0.10.1" date="2026-06-14" />
