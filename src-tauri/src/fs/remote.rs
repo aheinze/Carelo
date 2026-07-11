@@ -6,7 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use opendal::{Entry, EntryMode, ErrorKind, Metadata, Operator};
+use futures::TryStreamExt;
+use opendal::{Entry, EntryMode, ErrorKind, Metadata, Operator, Writer as RemoteWriter};
 use openssh::{KnownHosts, SessionBuilder};
 use openssh_sftp_client::metadata::{MetaData as SftpMetadata, Permissions as SftpPermissions};
 use openssh_sftp_client::{Sftp, SftpOptions};
@@ -17,7 +18,7 @@ use crate::fs::models::{
     FileEntry, FileEntryKind, FileMetadata, FilePermissions, FsError, FsResult,
     RemoteVolumeCapabilities, RemoteVolumeHealth, VolumeEntry,
 };
-use crate::fs::operations::SymlinkMode;
+use crate::fs::operations::{LocalReplacementStage, SymlinkMode};
 use crate::fs::sftp_mount::{
     is_password_sftp_config, sftp_password_fs_operator_options, unmount_sftp_password,
 };
@@ -25,6 +26,7 @@ use crate::fs::smb::{is_smb_scheme, smb_fs_operator_options, unmount_smb};
 
 const REMOTE_PATH_PREFIX: &str = "remote://";
 const TRANSFER_BUFFER_BYTES: usize = 256 * 1024;
+const REMOTE_SEARCH_READ_CHUNK_BYTES: usize = 256 * 1024;
 const REMOTE_METADATA_CACHE_TTL: Duration = Duration::from_secs(2);
 const REMOTE_METADATA_CACHE_MAX_ENTRIES: usize = 512;
 
@@ -751,6 +753,7 @@ pub async fn rename_remote_item(
     ensure_same_remote(&from, &to)?;
     let config = state.config(&from.volume_id)?;
     let op = config.operator()?;
+    ensure_remote_directory_target_not_descendant(&op, &from, &to).await?;
     let result = op
         .rename(
             &normalize_remote_object_path(&from.path),
@@ -809,18 +812,46 @@ pub async fn copy_remote_item(
         .map_err(|error| remote_error("remote_stat_failed", &from, error))?;
 
     if from.volume_id == to.volume_id {
-        ensure_remote_destination_available(&source_op, &from, &to, overwrite).await?;
+        if source.is_dir() {
+            ensure_remote_target_not_descendant(&from, &to)?;
+        }
+        let destination_existed =
+            ensure_remote_destination_available(&source_op, &from, &to, overwrite).await?;
 
         let result = if source.is_dir() {
             copy_remote_directory(&source_op, &from, &to).await
         } else {
             let target_path = normalize_remote_object_path(&to.path);
+            let capabilities = source_op.info().full_capability();
+            let copy = if !destination_existed && capabilities.copy_with_if_not_exists {
+                source_op
+                    .copy_with(&source_path, &target_path)
+                    .if_not_exists(true)
+                    .await
+            } else {
+                source_op.copy(&source_path, &target_path).await
+            };
 
-            match source_op.copy(&source_path, &target_path).await {
+            match copy {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == ErrorKind::Unsupported => {
-                    copy_remote_file_path_between(&source_op, &source_op, &from, &source_path, &to)
-                        .await
+                    copy_remote_file_path_between(
+                        &source_op,
+                        &source_op,
+                        &from,
+                        &source_path,
+                        &to,
+                        destination_existed && overwrite,
+                    )
+                    .await
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::AlreadyExists | ErrorKind::ConditionNotMatch
+                    ) =>
+                {
+                    Err(remote_destination_exists_error(&to))
                 }
                 Err(error) => Err(remote_error("remote_copy_failed", &from, error)),
             }
@@ -835,14 +866,22 @@ pub async fn copy_remote_item(
 
     let target_config = state.config(&to.volume_id)?;
     let target_op = target_config.operator()?;
-    let existed_before = remote_path_exists(&target_op, &to).await?;
-    ensure_remote_destination_available_for_type(&target_op, source.is_dir(), &to, overwrite)
-        .await?;
+    let existed_before =
+        ensure_remote_destination_available_for_type(&target_op, source.is_dir(), &to, overwrite)
+            .await?;
 
     let result = if source.is_dir() {
         copy_remote_directory_between(&source_op, &target_op, &from, &to).await
     } else {
-        copy_remote_file_path_between(&source_op, &target_op, &from, &source_path, &to).await
+        copy_remote_file_path_between(
+            &source_op,
+            &target_op,
+            &from,
+            &source_path,
+            &to,
+            existed_before && overwrite,
+        )
+        .await
     };
 
     if result.is_ok() {
@@ -917,6 +956,7 @@ pub async fn move_remote_item(
 
     let config = state.config(&from.volume_id)?;
     let op = config.operator()?;
+    ensure_remote_directory_target_not_descendant(&op, &from, &to).await?;
     ensure_remote_destination_available(&op, &from, &to, overwrite).await?;
     let result = op
         .rename(
@@ -1028,6 +1068,93 @@ pub async fn read_remote_file_prefix(
     Ok(RemoteFileRead {
         bytes,
         truncated: total_bytes > read_bytes,
+        total_bytes,
+    })
+}
+
+pub(crate) async fn read_remote_file_prefix_for_search(
+    state: &RemoteVolumeState,
+    path: RemotePath,
+    max_bytes: u64,
+    checkpoint: impl FnMut() -> FsResult<()>,
+) -> FsResult<RemoteFileRead> {
+    read_remote_search_file_streamed(state, path, max_bytes, checkpoint).await
+}
+
+async fn read_remote_search_file_streamed(
+    state: &RemoteVolumeState,
+    path: RemotePath,
+    max_bytes: u64,
+    mut checkpoint: impl FnMut() -> FsResult<()>,
+) -> FsResult<RemoteFileRead> {
+    checkpoint()?;
+    let config = state.config(&path.volume_id)?;
+    let op = config.operator()?;
+    let object_path = normalize_remote_object_path(&path.path);
+    let metadata = op
+        .stat(&object_path)
+        .await
+        .map_err(|error| remote_error("remote_stat_failed", &path, error))?;
+    checkpoint()?;
+
+    if !metadata.is_file() {
+        return Err(FsError::new(
+            "preview_not_file",
+            "Preview is available for files only.",
+            Some(format_remote_uri(&path.volume_id, &path.path)),
+        ));
+    }
+
+    let total_bytes = metadata.content_length();
+    if total_bytes > max_bytes {
+        return Ok(RemoteFileRead {
+            bytes: Vec::new(),
+            truncated: true,
+            total_bytes,
+        });
+    }
+
+    let read_bytes = total_bytes;
+    let mut bytes = Vec::new();
+
+    if read_bytes > 0 {
+        let reader = op
+            .reader_with(&object_path)
+            .chunk(REMOTE_SEARCH_READ_CHUNK_BYTES)
+            .await
+            .map_err(|error| remote_error("remote_read_failed", &path, error))?;
+        let mut stream = reader
+            .into_stream(0..read_bytes)
+            .await
+            .map_err(|error| remote_error("remote_read_failed", &path, error))?;
+
+        loop {
+            checkpoint()?;
+            let Some(chunk) = stream
+                .try_next()
+                .await
+                .map_err(|error| remote_error("remote_read_failed", &path, error))?
+            else {
+                break;
+            };
+
+            for part in chunk.to_io_slice() {
+                bytes.extend_from_slice(part.as_ref());
+            }
+            checkpoint()?;
+        }
+
+        validate_remote_read_length(
+            &path.volume_id,
+            &object_path,
+            read_bytes,
+            bytes.len() as u64,
+        )?;
+    }
+
+    Ok(RemoteFileRead {
+        bytes,
+        truncated: false,
         total_bytes,
     })
 }
@@ -1150,7 +1277,7 @@ async fn ensure_remote_destination_available(
     from: &RemotePath,
     to: &RemotePath,
     overwrite: bool,
-) -> FsResult<()> {
+) -> FsResult<bool> {
     let object_path = normalize_remote_object_path(&to.path);
     let destination = match op.stat(&object_path).await {
         Ok(metadata) => Some(metadata),
@@ -1160,18 +1287,14 @@ async fn ensure_remote_destination_available(
 
     if !overwrite {
         return if destination.is_some() {
-            Err(FsError::new(
-                "destination_exists",
-                "An item already exists at the destination.",
-                Some(format_remote_uri(&to.volume_id, &object_path)),
-            ))
+            Err(remote_destination_exists_error(to))
         } else {
-            Ok(())
+            Ok(false)
         };
     }
 
     let Some(destination) = destination else {
-        return Ok(());
+        return Ok(false);
     };
 
     let source_path = normalize_remote_object_path(&from.path);
@@ -1188,7 +1311,7 @@ async fn ensure_remote_destination_available(
         ));
     }
 
-    Ok(())
+    Ok(true)
 }
 
 async fn ensure_remote_destination_available_for_type(
@@ -1196,7 +1319,7 @@ async fn ensure_remote_destination_available_for_type(
     source_is_dir: bool,
     to: &RemotePath,
     overwrite: bool,
-) -> FsResult<()> {
+) -> FsResult<bool> {
     let object_path = normalize_remote_object_path(&to.path);
     let destination = match op.stat(&object_path).await {
         Ok(metadata) => Some(metadata),
@@ -1206,16 +1329,13 @@ async fn ensure_remote_destination_available_for_type(
 
     if !overwrite {
         return if destination.is_some() {
-            Err(FsError::new(
-                "destination_exists",
-                "An item already exists at the destination.",
-                Some(format_remote_uri(&to.volume_id, &object_path)),
-            ))
+            Err(remote_destination_exists_error(to))
         } else {
-            Ok(())
+            Ok(false)
         };
     }
 
+    let destination_exists = destination.is_some();
     if let Some(destination) = destination {
         if source_is_dir || destination.is_dir() {
             return Err(FsError::new(
@@ -1226,7 +1346,7 @@ async fn ensure_remote_destination_available_for_type(
         }
     }
 
-    Ok(())
+    Ok(destination_exists)
 }
 
 async fn copy_remote_directory(op: &Operator, from: &RemotePath, to: &RemotePath) -> FsResult<()> {
@@ -1281,14 +1401,232 @@ async fn copy_remote_directory_between(
                     from,
                     entry.path(),
                     &target_remote,
+                    false,
                 )
                 .await?;
             }
-            EntryMode::Unknown => {}
+            EntryMode::Unknown => {
+                return Err(unknown_remote_entry_type_error(
+                    &from.volume_id,
+                    entry.path(),
+                ));
+            }
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteWriteHookPoint {
+    Write,
+    Close,
+    Commit,
+}
+
+async fn open_remote_file_writer(
+    op: &Operator,
+    to: &RemotePath,
+    replace_existing: bool,
+) -> FsResult<(RemoteWriter, Option<String>)> {
+    let capabilities = op.info().full_capability();
+    let destination_path = normalize_remote_object_path(&to.path);
+
+    if !replace_existing {
+        let result = if capabilities.write_with_if_not_exists {
+            op.writer_with(&destination_path).if_not_exists(true).await
+        } else {
+            op.writer(&destination_path).await
+        };
+
+        return result
+            .map(|writer| (writer, None))
+            .map_err(|error| remote_write_open_error(to, error));
+    }
+
+    if !capabilities.rename {
+        let detail = if capabilities.copy {
+            "The provider advertises server-side copy, but OpenDAL does not guarantee that replacing an existing object by copy is atomic."
+        } else {
+            "The provider advertises neither remote rename nor another atomic replacement operation."
+        };
+        return Err(FsError::new(
+            "remote_safe_overwrite_unsupported",
+            format!(
+                "This remote cannot safely replace an existing file. {detail} The original file was left untouched."
+            ),
+            Some(format_remote_uri(&to.volume_id, &to.path)),
+        ));
+    }
+
+    for _ in 0..8 {
+        let stage_path = remote_stage_path(&destination_path);
+
+        if !capabilities.write_with_if_not_exists {
+            match op.stat(&stage_path).await {
+                Ok(_) => continue,
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(remote_error("remote_stat_failed", to, error)),
+            }
+        }
+
+        let result = if capabilities.write_with_if_not_exists {
+            op.writer_with(&stage_path).if_not_exists(true).await
+        } else {
+            op.writer(&stage_path).await
+        };
+
+        match result {
+            Ok(writer) => return Ok((writer, Some(stage_path))),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::AlreadyExists | ErrorKind::ConditionNotMatch
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                cleanup_remote_stage(op, &stage_path).await;
+                return Err(remote_error("remote_write_failed", to, error));
+            }
+        }
+    }
+
+    Err(FsError::new(
+        "remote_stage_collision",
+        "Unable to reserve a unique remote staging file for the overwrite.",
+        Some(format_remote_uri(&to.volume_id, &to.path)),
+    ))
+}
+
+async fn finish_remote_file_write<H>(
+    op: &Operator,
+    mut writer: RemoteWriter,
+    stage_path: Option<&str>,
+    to: &RemotePath,
+    expected_bytes: u64,
+    hook: &mut H,
+) -> FsResult<()>
+where
+    H: FnMut(RemoteWriteHookPoint) -> FsResult<()>,
+{
+    if let Err(error) = hook(RemoteWriteHookPoint::Close) {
+        abort_remote_file_write(op, &mut writer, stage_path).await;
+        return Err(error);
+    }
+
+    let closed = match writer.close().await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let _ = writer.abort().await;
+            if let Some(stage_path) = stage_path {
+                cleanup_remote_stage(op, stage_path).await;
+            }
+            return Err(remote_error("remote_write_failed", to, error));
+        }
+    };
+
+    if closed.content_length() != expected_bytes {
+        if let Some(stage_path) = stage_path {
+            cleanup_remote_stage(op, stage_path).await;
+        }
+        return Err(remote_write_length_error(
+            to,
+            expected_bytes,
+            closed.content_length(),
+        ));
+    }
+
+    let written_path = stage_path.unwrap_or(to.path.as_str());
+    let written_path = normalize_remote_object_path(written_path);
+    let stored = match op.stat(&written_path).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            if let Some(stage_path) = stage_path {
+                cleanup_remote_stage(op, stage_path).await;
+            }
+            return Err(remote_error("remote_stat_failed", to, error));
+        }
+    };
+
+    if !stored.is_file() || stored.content_length() != expected_bytes {
+        if let Some(stage_path) = stage_path {
+            cleanup_remote_stage(op, stage_path).await;
+        }
+        return Err(remote_write_length_error(
+            to,
+            expected_bytes,
+            stored.content_length(),
+        ));
+    }
+
+    if let Some(stage_path) = stage_path {
+        if let Err(error) = hook(RemoteWriteHookPoint::Commit) {
+            cleanup_remote_stage(op, stage_path).await;
+            return Err(error);
+        }
+
+        if let Err(error) = op
+            .rename(stage_path, &normalize_remote_object_path(&to.path))
+            .await
+        {
+            cleanup_remote_stage(op, stage_path).await;
+            return Err(remote_error("remote_overwrite_commit_failed", to, error));
+        }
+    }
+
+    Ok(())
+}
+
+async fn abort_remote_file_write(
+    op: &Operator,
+    writer: &mut RemoteWriter,
+    stage_path: Option<&str>,
+) {
+    let _ = writer.abort().await;
+    if let Some(stage_path) = stage_path {
+        cleanup_remote_stage(op, stage_path).await;
+    }
+}
+
+async fn cleanup_remote_stage(op: &Operator, stage_path: &str) {
+    let _ = op.delete(stage_path).await;
+}
+
+fn remote_stage_path(destination_path: &str) -> String {
+    let token = rand::random::<[u8; 16]>();
+    let token = token
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let stage_name = format!(".carelo-stage-{token}");
+
+    match destination_path.rsplit_once('/') {
+        Some((parent, _)) if !parent.is_empty() => format!("{parent}/{stage_name}"),
+        _ => stage_name,
+    }
+}
+
+fn remote_write_open_error(to: &RemotePath, error: opendal::Error) -> FsError {
+    if matches!(
+        error.kind(),
+        ErrorKind::AlreadyExists | ErrorKind::ConditionNotMatch
+    ) {
+        remote_destination_exists_error(to)
+    } else {
+        remote_error("remote_write_failed", to, error)
+    }
+}
+
+fn remote_write_length_error(to: &RemotePath, expected_bytes: u64, actual_bytes: u64) -> FsError {
+    FsError::new(
+        "remote_write_incomplete",
+        format!(
+            "Remote write length mismatch: expected {expected_bytes} bytes, stored {actual_bytes}."
+        ),
+        Some(format_remote_uri(&to.volume_id, &to.path)),
+    )
 }
 
 async fn copy_remote_file_path_between(
@@ -1297,7 +1635,32 @@ async fn copy_remote_file_path_between(
     from: &RemotePath,
     source_path: &str,
     to: &RemotePath,
+    replace_existing: bool,
 ) -> FsResult<()> {
+    copy_remote_file_path_between_with_hook(
+        source_op,
+        target_op,
+        from,
+        source_path,
+        to,
+        replace_existing,
+        |_| Ok(()),
+    )
+    .await
+}
+
+async fn copy_remote_file_path_between_with_hook<H>(
+    source_op: &Operator,
+    target_op: &Operator,
+    from: &RemotePath,
+    source_path: &str,
+    to: &RemotePath,
+    replace_existing: bool,
+    mut hook: H,
+) -> FsResult<()>
+where
+    H: FnMut(RemoteWriteHookPoint) -> FsResult<()>,
+{
     let metadata = source_op
         .stat(source_path)
         .await
@@ -1306,10 +1669,7 @@ async fn copy_remote_file_path_between(
         .reader(source_path)
         .await
         .map_err(|error| remote_error("remote_read_failed", from, error))?;
-    let mut writer = target_op
-        .writer(&normalize_remote_object_path(&to.path))
-        .await
-        .map_err(|error| remote_error("remote_write_failed", to, error))?;
+    let (mut writer, stage_path) = open_remote_file_writer(target_op, to, replace_existing).await?;
     let total_bytes = metadata.content_length();
     let mut offset = 0_u64;
 
@@ -1320,24 +1680,44 @@ async fn copy_remote_file_path_between(
         let bytes = match reader.read(offset..end).await {
             Ok(bytes) => bytes,
             Err(error) => {
-                let _ = writer.abort().await;
+                abort_remote_file_write(target_op, &mut writer, stage_path.as_deref()).await;
                 return Err(remote_error("remote_read_failed", from, error));
             }
         };
+        let expected_bytes = end.saturating_sub(offset);
+
+        if let Err(error) = validate_remote_read_length(
+            &from.volume_id,
+            source_path,
+            expected_bytes,
+            bytes.len() as u64,
+        ) {
+            abort_remote_file_write(target_op, &mut writer, stage_path.as_deref()).await;
+            return Err(error);
+        }
+
+        if let Err(error) = hook(RemoteWriteHookPoint::Write) {
+            abort_remote_file_write(target_op, &mut writer, stage_path.as_deref()).await;
+            return Err(error);
+        }
 
         if let Err(error) = writer.write(bytes).await {
-            let _ = writer.abort().await;
+            abort_remote_file_write(target_op, &mut writer, stage_path.as_deref()).await;
             return Err(remote_error("remote_write_failed", to, error));
         }
 
         offset = end;
     }
 
-    writer
-        .close()
-        .await
-        .map(|_| ())
-        .map_err(|error| remote_error("remote_write_failed", to, error))
+    finish_remote_file_write(
+        target_op,
+        writer,
+        stage_path.as_deref(),
+        to,
+        total_bytes,
+        &mut hook,
+    )
+    .await
 }
 
 async fn copy_local_path_to_remote(
@@ -1348,12 +1728,13 @@ async fn copy_local_path_to_remote(
     symlink_mode: SymlinkMode,
 ) -> FsResult<()> {
     let source = local_source_metadata(from, symlink_mode)?;
-    ensure_remote_destination_available_for_type(op, source.is_dir(), to, overwrite).await?;
+    let destination_existed =
+        ensure_remote_destination_available_for_type(op, source.is_dir(), to, overwrite).await?;
 
     if source.is_dir() {
         copy_local_directory_to_remote(op, from, to, overwrite, symlink_mode).await
     } else {
-        copy_local_file_to_remote(op, from, to).await
+        copy_local_file_to_remote(op, from, to, destination_existed && overwrite).await
     }
 }
 
@@ -1410,7 +1791,7 @@ async fn copy_local_directory_to_remote(
                     })?;
                 pending.push((child_path, child_remote.path));
             } else {
-                copy_local_file_to_remote(op, &child_path, &child_remote).await?;
+                copy_local_file_to_remote(op, &child_path, &child_remote, false).await?;
             }
         }
     }
@@ -1418,20 +1799,39 @@ async fn copy_local_directory_to_remote(
     Ok(())
 }
 
-async fn copy_local_file_to_remote(op: &Operator, from: &Path, to: &RemotePath) -> FsResult<()> {
+async fn copy_local_file_to_remote(
+    op: &Operator,
+    from: &Path,
+    to: &RemotePath,
+    replace_existing: bool,
+) -> FsResult<()> {
+    copy_local_file_to_remote_with_hook(op, from, to, replace_existing, |_| Ok(())).await
+}
+
+async fn copy_local_file_to_remote_with_hook<H>(
+    op: &Operator,
+    from: &Path,
+    to: &RemotePath,
+    replace_existing: bool,
+    mut hook: H,
+) -> FsResult<()>
+where
+    H: FnMut(RemoteWriteHookPoint) -> FsResult<()>,
+{
+    let expected_bytes = fs::metadata(from)
+        .map_err(|error| FsError::io("Unable to read source metadata", from, error))?
+        .len();
     let mut reader =
         File::open(from).map_err(|error| FsError::io("Unable to open source file", from, error))?;
-    let mut writer = op
-        .writer(&normalize_remote_object_path(&to.path))
-        .await
-        .map_err(|error| remote_error("remote_write_failed", to, error))?;
+    let (mut writer, stage_path) = open_remote_file_writer(op, to, replace_existing).await?;
     let mut buffer = vec![0_u8; TRANSFER_BUFFER_BYTES];
+    let mut written_bytes = 0_u64;
 
     loop {
         let bytes_read = match reader.read(&mut buffer) {
             Ok(bytes_read) => bytes_read,
             Err(error) => {
-                let _ = writer.abort().await;
+                abort_remote_file_write(op, &mut writer, stage_path.as_deref()).await;
                 return Err(FsError::io("Unable to read source file", from, error));
             }
         };
@@ -1440,17 +1840,33 @@ async fn copy_local_file_to_remote(op: &Operator, from: &Path, to: &RemotePath) 
             break;
         }
 
+        if let Err(error) = hook(RemoteWriteHookPoint::Write) {
+            abort_remote_file_write(op, &mut writer, stage_path.as_deref()).await;
+            return Err(error);
+        }
+
         if let Err(error) = writer.write(buffer[..bytes_read].to_vec()).await {
-            let _ = writer.abort().await;
+            abort_remote_file_write(op, &mut writer, stage_path.as_deref()).await;
             return Err(remote_error("remote_write_failed", to, error));
         }
+
+        written_bytes = written_bytes.saturating_add(bytes_read as u64);
     }
 
-    writer
-        .close()
-        .await
-        .map(|_| ())
-        .map_err(|error| remote_error("remote_write_failed", to, error))
+    if written_bytes != expected_bytes {
+        abort_remote_file_write(op, &mut writer, stage_path.as_deref()).await;
+        return Err(remote_write_length_error(to, expected_bytes, written_bytes));
+    }
+
+    finish_remote_file_write(
+        op,
+        writer,
+        stage_path.as_deref(),
+        to,
+        expected_bytes,
+        &mut hook,
+    )
+    .await
 }
 
 async fn copy_remote_directory_to_local(
@@ -1497,7 +1913,12 @@ async fn copy_remote_directory_to_local(
                 }
                 copy_remote_file_path_to_local(op, from, entry.path(), &target_path, false).await?;
             }
-            EntryMode::Unknown => {}
+            EntryMode::Unknown => {
+                return Err(unknown_remote_entry_type_error(
+                    &from.volume_id,
+                    entry.path(),
+                ));
+            }
         }
     }
 
@@ -1527,10 +1948,21 @@ async fn copy_remote_file_path_to_local(
     to: &Path,
     overwrite: bool,
 ) -> FsResult<()> {
-    if overwrite && local_path_exists(to)? {
-        remove_existing_local_file_like(to)?;
-    }
+    copy_remote_file_path_to_local_with_read_hook(op, from, source_path, to, overwrite, || Ok(()))
+        .await
+}
 
+async fn copy_remote_file_path_to_local_with_read_hook<H>(
+    op: &Operator,
+    from: &RemotePath,
+    source_path: &str,
+    to: &Path,
+    overwrite: bool,
+    mut before_read: H,
+) -> FsResult<()>
+where
+    H: FnMut() -> FsResult<()>,
+{
     let metadata = op
         .stat(source_path)
         .await
@@ -1539,15 +1971,12 @@ async fn copy_remote_file_path_to_local(
         .reader(source_path)
         .await
         .map_err(|error| remote_error("remote_read_failed", from, error))?;
-    let mut writer = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(to)
-        .map_err(|error| FsError::io("Unable to create destination file", to, error))?;
+    let mut writer = LocalDownloadWriter::new(to, overwrite)?;
     let total_bytes = metadata.content_length();
     let mut offset = 0_u64;
 
     while offset < total_bytes {
+        before_read()?;
         let end = offset
             .saturating_add(TRANSFER_BUFFER_BYTES as u64)
             .min(total_bytes);
@@ -1555,19 +1984,154 @@ async fn copy_remote_file_path_to_local(
             .read(offset..end)
             .await
             .map_err(|error| remote_error("remote_read_failed", from, error))?;
+        validate_remote_read_length(
+            &from.volume_id,
+            source_path,
+            end.saturating_sub(offset),
+            bytes.len() as u64,
+        )?;
 
         for chunk in bytes.to_io_slice() {
-            writer
-                .write_all(chunk.as_ref())
-                .map_err(|error| FsError::io("Unable to write destination file", to, error))?;
+            writer.write_all(chunk.as_ref())?;
         }
 
         offset = end;
     }
 
-    writer
-        .flush()
-        .map_err(|error| FsError::io("Unable to write destination file", to, error))
+    writer.finish()
+}
+
+fn validate_remote_read_length(
+    volume_id: &str,
+    source_path: &str,
+    expected_bytes: u64,
+    received_bytes: u64,
+) -> FsResult<()> {
+    if received_bytes == expected_bytes {
+        return Ok(());
+    }
+
+    Err(FsError::new(
+        "remote_read_failed",
+        format!(
+            "Remote file ended unexpectedly: expected {expected_bytes} bytes, received {received_bytes}."
+        ),
+        Some(format_remote_uri(volume_id, source_path)),
+    ))
+}
+
+fn unknown_remote_entry_type_error(volume_id: &str, source_path: &str) -> FsError {
+    FsError::new(
+        "remote_entry_type_unknown",
+        "The remote item type could not be determined, so the directory copy was stopped before it could be reported as complete.",
+        Some(format_remote_uri(volume_id, source_path)),
+    )
+}
+
+struct LocalDownloadWriter {
+    writer: Option<File>,
+    stage: Option<LocalReplacementStage>,
+    destination: PathBuf,
+}
+
+impl LocalDownloadWriter {
+    fn new(destination: &Path, overwrite: bool) -> FsResult<Self> {
+        let stage = if overwrite {
+            Some(LocalReplacementStage::new(destination)?)
+        } else {
+            None
+        };
+        let write_path = stage
+            .as_ref()
+            .map(LocalReplacementStage::path)
+            .unwrap_or(destination);
+        let writer = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(write_path)
+            .map_err(|error| {
+                FsError::io("Unable to create destination file", destination, error)
+            })?;
+
+        Ok(Self {
+            writer: Some(writer),
+            stage,
+            destination: destination.to_path_buf(),
+        })
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> FsResult<()> {
+        self.write_all_with(bytes, |writer, bytes| writer.write_all(bytes))
+    }
+
+    fn write_all_with<W>(&mut self, bytes: &[u8], write: W) -> FsResult<()>
+    where
+        W: FnOnce(&mut File, &[u8]) -> std::io::Result<()>,
+    {
+        let writer = self.writer.as_mut().ok_or_else(|| {
+            FsError::new(
+                "destination_closed",
+                "The local download destination is already closed.",
+                Some(self.destination.to_string_lossy().into_owned()),
+            )
+        })?;
+
+        write(writer, bytes).map_err(|error| {
+            FsError::io("Unable to write destination file", &self.destination, error)
+        })
+    }
+
+    fn finish(self) -> FsResult<()> {
+        self.finish_with(
+            |writer, staged, destination| {
+                writer.flush().map_err(|error| {
+                    FsError::io("Unable to flush destination file", destination, error)
+                })?;
+
+                if staged {
+                    writer.sync_all().map_err(|error| {
+                        FsError::io("Unable to sync destination file", destination, error)
+                    })?;
+                }
+
+                Ok(())
+            },
+            |stage, destination| stage.commit(destination),
+        )
+    }
+
+    fn finish_with<F, C>(mut self, flush: F, commit: C) -> FsResult<()>
+    where
+        F: FnOnce(&mut File, bool, &Path) -> FsResult<()>,
+        C: FnOnce(LocalReplacementStage, &Path) -> FsResult<()>,
+    {
+        let staged = self.stage.is_some();
+        let mut writer = self.writer.take().ok_or_else(|| {
+            FsError::new(
+                "destination_closed",
+                "The local download destination is already closed.",
+                Some(self.destination.to_string_lossy().into_owned()),
+            )
+        })?;
+
+        flush(&mut writer, staged, &self.destination)?;
+        drop(writer);
+
+        if let Some(stage) = self.stage.take() {
+            commit(stage, &self.destination)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for LocalDownloadWriter {
+    fn drop(&mut self) {
+        // Close the destination before the stage guard removes it. This order
+        // is required on Windows when an async remote read/write returns early.
+        drop(self.writer.take());
+        drop(self.stage.take());
+    }
 }
 
 fn local_source_metadata(from: &Path, symlink_mode: SymlinkMode) -> FsResult<fs::Metadata> {
@@ -1662,18 +2226,6 @@ fn local_path_exists(path: &Path) -> FsResult<bool> {
     }
 }
 
-fn remove_existing_local_file_like(path: &Path) -> FsResult<()> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| FsError::io("Unable to read destination metadata", path, error))?;
-
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        return Err(local_destination_type_error(path));
-    }
-
-    fs::remove_file(path)
-        .map_err(|error| FsError::io("Unable to replace existing destination", path, error))
-}
-
 fn delete_local_path(path: &Path) -> FsResult<()> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| FsError::io("Unable to read item before delete", path, error))?;
@@ -1740,6 +2292,14 @@ fn local_destination_exists_error(path: &Path) -> FsError {
     )
 }
 
+fn remote_destination_exists_error(path: &RemotePath) -> FsError {
+    FsError::new(
+        "destination_exists",
+        "An item already exists at the destination.",
+        Some(format_remote_uri(&path.volume_id, &path.path)),
+    )
+}
+
 fn local_destination_type_error(path: &Path) -> FsError {
     FsError::new(
         "destination_type_conflict",
@@ -1763,6 +2323,59 @@ fn normalize_remote_directory_path(path: &str) -> String {
     } else {
         format!("{path}/")
     }
+}
+
+async fn ensure_remote_directory_target_not_descendant(
+    op: &Operator,
+    from: &RemotePath,
+    to: &RemotePath,
+) -> FsResult<()> {
+    let source = op
+        .stat(&normalize_remote_object_path(&from.path))
+        .await
+        .map_err(|error| remote_error("remote_stat_failed", from, error))?;
+
+    if source.is_dir() {
+        ensure_remote_target_not_descendant(from, to)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_remote_target_not_descendant(from: &RemotePath, to: &RemotePath) -> FsResult<()> {
+    if from.volume_id != to.volume_id {
+        return Ok(());
+    }
+
+    let source = normalized_remote_components(&from.path);
+    let target = normalized_remote_components(&to.path);
+    let is_descendant = target.len() > source.len() && target.starts_with(&source);
+
+    if !is_descendant {
+        return Ok(());
+    }
+
+    Err(FsError::new(
+        "destination_inside_source",
+        "A remote directory cannot be copied or moved into one of its own descendants.",
+        Some(format_remote_uri(&to.volume_id, &to.path)),
+    ))
+}
+
+fn normalized_remote_components(path: &str) -> Vec<String> {
+    let mut components = Vec::new();
+
+    for component in normalize_remote_object_path(path).split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            component => components.push(component.to_string()),
+        }
+    }
+
+    components
 }
 
 fn local_metadata_for_remote_object(root: &Path, object_path: &str) -> Option<fs::Metadata> {
@@ -2219,6 +2832,300 @@ mod tests {
 
     fn remote(path: &str) -> RemotePath {
         parse_remote_path(path).expect("remote path should parse")
+    }
+
+    fn carelo_temporary_items(path: &Path) -> Vec<PathBuf> {
+        fs::read_dir(path)
+            .expect("local test directory should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".carelo-"))
+            .map(|entry| entry.path())
+            .collect()
+    }
+
+    fn assert_original_destination_and_no_stage(root: &Path, destination: &Path) {
+        assert_eq!(
+            fs::read(destination).expect("original destination should remain readable"),
+            b"original"
+        );
+        assert!(
+            carelo_temporary_items(root).is_empty(),
+            "remote download left a Carelo temporary item"
+        );
+    }
+
+    #[test]
+    fn remote_overwrite_hook_failures_preserve_destination_and_clean_stage() {
+        for hook_point in [
+            RemoteWriteHookPoint::Write,
+            RemoteWriteHookPoint::Close,
+            RemoteWriteHookPoint::Commit,
+        ] {
+            let remote_root = TestDir::new();
+            let local_root = TestDir::new();
+            let source = local_root.path().join("source.txt");
+            let destination = remote_root.path().join("destination.txt");
+            fs::write(&source, b"replacement").expect("write local source");
+            fs::write(&destination, b"original").expect("write remote destination");
+            let op = fs_config("test", "Test Remote", remote_root.path())
+                .operator()
+                .expect("create filesystem-backed remote operator");
+            let remote_destination = remote("remote://test/destination.txt");
+
+            let error = tauri::async_runtime::block_on(copy_local_file_to_remote_with_hook(
+                &op,
+                &source,
+                &remote_destination,
+                true,
+                |observed| {
+                    if observed == hook_point {
+                        Err(FsError::new(
+                            "injected_remote_write_failure",
+                            "Injected remote write failure.",
+                            None,
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            ))
+            .expect_err("injected failure should abort staged overwrite");
+
+            assert_eq!(error.code, "injected_remote_write_failure");
+            assert_original_destination_and_no_stage(remote_root.path(), &destination);
+        }
+    }
+
+    #[test]
+    fn conditional_remote_writer_preserves_a_late_destination() {
+        let remote_root = TestDir::new();
+        let destination = remote_root.path().join("destination.txt");
+        fs::write(&destination, b"contender").expect("write racing destination");
+        let op = fs_config("test", "Test Remote", remote_root.path())
+            .operator()
+            .expect("create filesystem-backed remote operator");
+        let remote_destination = remote("remote://test/destination.txt");
+
+        let error = match tauri::async_runtime::block_on(open_remote_file_writer(
+            &op,
+            &remote_destination,
+            false,
+        )) {
+            Ok(_) => panic!("conditional writer must not overwrite a late destination"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "destination_exists");
+        assert_eq!(
+            fs::read(&destination).expect("read racing destination"),
+            b"contender"
+        );
+        assert!(carelo_temporary_items(remote_root.path()).is_empty());
+    }
+
+    #[test]
+    fn remote_directory_copy_move_and_rename_reject_descendant_targets() {
+        let state = RemoteVolumeState::default();
+        let remote_root = TestDir::new();
+        let source = remote_root.path().join("Source");
+        fs::create_dir(&source).expect("create remote source directory");
+        fs::write(source.join("file.txt"), b"data").expect("write remote source file");
+        add_fs_remote(&state, remote_root.path());
+
+        for result in [
+            tauri::async_runtime::block_on(copy_remote_item(
+                &state,
+                remote("remote://test/Source"),
+                remote("remote://test/Source/Copy"),
+                false,
+            )),
+            tauri::async_runtime::block_on(move_remote_item(
+                &state,
+                remote("remote://test/Source"),
+                remote("remote://test/Source/Moved"),
+                false,
+            )),
+            tauri::async_runtime::block_on(rename_remote_item(
+                &state,
+                remote("remote://test/Source"),
+                remote("remote://test/Source/Renamed"),
+            )),
+        ] {
+            assert_eq!(
+                result.expect_err("descendant target should fail").code,
+                "destination_inside_source"
+            );
+        }
+
+        assert_eq!(
+            fs::read(source.join("file.txt")).expect("source remains intact"),
+            b"data"
+        );
+        assert!(!source.join("Copy").exists());
+        assert!(!source.join("Moved").exists());
+        assert!(!source.join("Renamed").exists());
+    }
+
+    #[test]
+    fn validates_exact_remote_ranges_and_rejects_short_reads() {
+        validate_remote_read_length("test", "source.txt", 8, 8)
+            .expect("an exact range should be accepted");
+
+        let error = validate_remote_read_length("test", "source.txt", 8, 3)
+            .expect_err("a short successful read must not complete a copy");
+
+        assert_eq!(error.code, "remote_read_failed");
+        assert_eq!(error.path.as_deref(), Some("remote://test/source.txt"));
+        assert!(error.message.contains("expected 8 bytes, received 3"));
+    }
+
+    #[test]
+    fn unknown_remote_entries_are_reported_as_copy_failures() {
+        let error = unknown_remote_entry_type_error("test", "Folder/mystery");
+
+        assert_eq!(error.code, "remote_entry_type_unknown");
+        assert_eq!(error.path.as_deref(), Some("remote://test/Folder/mystery"));
+    }
+
+    #[test]
+    fn remote_to_local_overwrite_commits_complete_file_and_cleans_stage() {
+        let state = RemoteVolumeState::default();
+        let remote_root = TestDir::new();
+        let local_root = TestDir::new();
+        fs::write(remote_root.path().join("source.txt"), b"replacement")
+            .expect("remote source should be created");
+        let destination = local_root.path().join("destination.txt");
+        fs::write(&destination, b"original").expect("destination should be created");
+        add_fs_remote(&state, remote_root.path());
+
+        tauri::async_runtime::block_on(copy_remote_to_local_item(
+            &state,
+            remote("remote://test/source.txt"),
+            &destination,
+            true,
+        ))
+        .expect("remote overwrite should commit");
+
+        assert_eq!(
+            fs::read(&destination).expect("replacement should be readable"),
+            b"replacement"
+        );
+        assert!(carelo_temporary_items(local_root.path()).is_empty());
+    }
+
+    #[test]
+    fn remote_read_failure_after_staging_preserves_destination_and_cleans_stage() {
+        let remote_root = TestDir::new();
+        let local_root = TestDir::new();
+        fs::write(remote_root.path().join("source.txt"), b"replacement")
+            .expect("remote source should be created");
+        let destination = local_root.path().join("destination.txt");
+        fs::write(&destination, b"original").expect("destination should be created");
+        let config = fs_config("test", "Test Remote", remote_root.path());
+        let op = config.operator().expect("remote operator should build");
+        let from = remote("remote://test/source.txt");
+
+        let error = tauri::async_runtime::block_on(copy_remote_file_path_to_local_with_read_hook(
+            &op,
+            &from,
+            "source.txt",
+            &destination,
+            true,
+            || {
+                Err(FsError::new(
+                    "remote_read_failed",
+                    "Injected remote read failure.",
+                    Some("remote://test/source.txt".to_string()),
+                ))
+            },
+        ))
+        .expect_err("injected remote read failure should abort overwrite");
+
+        assert_eq!(error.code, "remote_read_failed");
+        assert_original_destination_and_no_stage(local_root.path(), &destination);
+    }
+
+    #[test]
+    fn remote_download_write_failure_preserves_destination_and_cleans_stage() {
+        let local_root = TestDir::new();
+        let destination = local_root.path().join("destination.txt");
+        fs::write(&destination, b"original").expect("destination should be created");
+        let mut writer =
+            LocalDownloadWriter::new(&destination, true).expect("download stage should open");
+
+        let error = writer
+            .write_all_with(b"replacement", |file, bytes| {
+                file.write_all(&bytes[..3])?;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "injected local write failure",
+                ))
+            })
+            .expect_err("injected write failure should abort overwrite");
+        drop(writer);
+
+        assert_eq!(error.code, "io_error");
+        assert_original_destination_and_no_stage(local_root.path(), &destination);
+    }
+
+    #[test]
+    fn remote_download_flush_failure_preserves_destination_and_cleans_stage() {
+        let local_root = TestDir::new();
+        let destination = local_root.path().join("destination.txt");
+        fs::write(&destination, b"original").expect("destination should be created");
+        let mut writer =
+            LocalDownloadWriter::new(&destination, true).expect("download stage should open");
+        writer
+            .write_all(b"replacement")
+            .expect("replacement should be staged");
+
+        let error = writer
+            .finish_with(
+                |_file, _staged, _destination| {
+                    Err(FsError::new(
+                        "injected_flush_failure",
+                        "Injected local flush failure.",
+                        None,
+                    ))
+                },
+                |_stage, _destination| panic!("commit must not run after flush failure"),
+            )
+            .expect_err("injected flush failure should abort overwrite");
+
+        assert_eq!(error.code, "injected_flush_failure");
+        assert_original_destination_and_no_stage(local_root.path(), &destination);
+    }
+
+    #[test]
+    fn remote_download_commit_failure_preserves_destination_and_cleans_stage() {
+        let local_root = TestDir::new();
+        let destination = local_root.path().join("destination.txt");
+        fs::write(&destination, b"original").expect("destination should be created");
+        let mut writer =
+            LocalDownloadWriter::new(&destination, true).expect("download stage should open");
+        writer
+            .write_all(b"replacement")
+            .expect("replacement should be staged");
+
+        let error = writer
+            .finish_with(
+                |file, _staged, _destination| {
+                    file.flush().expect("staged file should flush");
+                    file.sync_all().expect("staged file should sync");
+                    Ok(())
+                },
+                |_stage, _destination| {
+                    Err(FsError::new(
+                        "injected_commit_failure",
+                        "Injected local commit failure.",
+                        None,
+                    ))
+                },
+            )
+            .expect_err("injected commit failure should abort overwrite");
+
+        assert_eq!(error.code, "injected_commit_failure");
+        assert_original_destination_and_no_stage(local_root.path(), &destination);
     }
 
     #[test]
@@ -2734,6 +3641,69 @@ mod tests {
             fs::read(move_down).expect("moved local file should be readable"),
             b"move up"
         );
+    }
+
+    #[test]
+    fn search_stream_skips_oversized_files_and_honors_cancellation() {
+        let state = RemoteVolumeState::default();
+        let remote_root = TestDir::new();
+        fs::write(remote_root.path().join("search.txt"), b"0123456789")
+            .expect("remote search fixture should be created");
+        add_fs_remote(&state, remote_root.path());
+
+        let mut full_read_checkpoints = 0_u8;
+        let full = tauri::async_runtime::block_on(read_remote_search_file_streamed(
+            &state,
+            remote("remote://test/search.txt"),
+            10,
+            || {
+                full_read_checkpoints = full_read_checkpoints.saturating_add(1);
+                Ok(())
+            },
+        ))
+        .expect("remote search stream should read the complete file");
+        assert_eq!(full.bytes, b"0123456789");
+        assert!(!full.truncated);
+        assert_eq!(full.total_bytes, 10);
+        assert!(full_read_checkpoints >= 4);
+
+        let mut checkpoints = 0_u8;
+        let preview = tauri::async_runtime::block_on(read_remote_search_file_streamed(
+            &state,
+            remote("remote://test/search.txt"),
+            9,
+            || {
+                checkpoints = checkpoints.saturating_add(1);
+                Ok(())
+            },
+        ))
+        .expect("oversized remote search file should be skipped");
+        assert!(preview.bytes.is_empty());
+        assert!(preview.truncated);
+        assert_eq!(preview.total_bytes, 10);
+        assert_eq!(checkpoints, 2);
+
+        let mut cancellation_checkpoints = 0_u8;
+        let error = tauri::async_runtime::block_on(read_remote_search_file_streamed(
+            &state,
+            remote("remote://test/search.txt"),
+            10,
+            || {
+                cancellation_checkpoints = cancellation_checkpoints.saturating_add(1);
+                if cancellation_checkpoints == 4 {
+                    Err(FsError::new(
+                        "operation_cancelled",
+                        "Search cancelled.",
+                        Some("remote://test/search.txt".to_string()),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        ))
+        .expect_err("remote stream should observe cancellation after receiving data");
+        assert_eq!(error.code, "operation_cancelled");
+        assert_eq!(cancellation_checkpoints, 4);
     }
 
     #[test]

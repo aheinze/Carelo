@@ -1,6 +1,13 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { useDialog } from './useDialog';
 import { isArchivePath } from '../utils/archivePaths';
+import {
+  buildFileOperationBatchError,
+  buildFileOperationSubset,
+  extractFileOperationBatch,
+  isSafeSudoRetryFileOperationItem,
+  mergeFileOperationSubsetBatch,
+} from '../utils/fileOperationResults';
 
 function hasTauriBridge() {
   return (
@@ -240,6 +247,124 @@ async function invokeCommand(command, args = {}, options = {}) {
   }
 }
 
+function batchItemHasError(item, code) {
+  return Array.isArray(item?.errors) && item.errors.some((error) => error?.code === code);
+}
+
+function isLocalBatchInput(command, input) {
+  if (command === 'delete_items') {
+    return typeof input === 'string' && !isRemotePath(input) && !isArchivePath(input);
+  }
+
+  return Boolean(input)
+    && !isRemotePath(input.from)
+    && !isRemotePath(input.to)
+    && !isArchivePath(input.from)
+    && !isArchivePath(input.to);
+}
+
+function batchInputKey(command) {
+  return command === 'delete_items' ? 'paths' : 'items';
+}
+
+function permissionSubset(batch, inputs, command) {
+  return buildFileOperationSubset(batch, inputs, (result, input) => (
+    isSafeSudoRetryFileOperationItem(command, result)
+    && isLocalBatchInput(command, input)
+  ));
+}
+
+function sudoAuthSubset(batch, inputs, command) {
+  return buildFileOperationSubset(batch, inputs, (result, input) => (
+    result?.affected === false
+    && result.status === 'failed'
+    && (batchItemHasError(result, 'sudo_auth_failed') || batchItemHasError(result, 'sudo_password_required'))
+    && isLocalBatchInput(command, input)
+  ));
+}
+
+function firstBatchItemError(results = []) {
+  return results.flatMap((result) => result?.errors || [])[0] || null;
+}
+
+async function invokeBatchAttempt(command, args) {
+  try {
+    return await invoke(command, args);
+  } catch (error) {
+    const batch = extractFileOperationBatch(error);
+
+    if (!batch) {
+      throw error;
+    }
+
+    return batch;
+  }
+}
+
+async function retryBatchWithSudo(command, args, initialBatch, initialSubset) {
+  const inputKey = batchInputKey(command);
+  const originalInputs = Array.isArray(args[inputKey]) ? args[inputKey] : [];
+  let mergedBatch = initialBatch;
+  let subset = initialSubset;
+  let lastError = firstBatchItemError(subset.results);
+
+  for (let attempt = 0; attempt < 2 && subset.items.length > 0; attempt += 1) {
+    const password = await promptSudoPassword(command, args, lastError, attempt > 0);
+
+    if (password === null) {
+      throw buildFileOperationBatchError(mergedBatch);
+    }
+
+    const subsetBatch = await invokeBatchAttempt(command, {
+      ...args,
+      [inputKey]: subset.items,
+      sudoPassword: password,
+    });
+    mergedBatch = mergeFileOperationSubsetBatch(
+      mergedBatch,
+      subsetBatch,
+      subset.originalIndices,
+    );
+
+    if (mergedBatch.cancelled) {
+      throw buildFileOperationBatchError(mergedBatch);
+    }
+
+    subset = sudoAuthSubset(mergedBatch, originalInputs, command);
+    lastError = firstBatchItemError(subset.results);
+  }
+
+  return mergedBatch;
+}
+
+async function invokeFileBatchCommand(command, args = {}, options = {}) {
+  if (!hasTauriBridge()) {
+    throw bridgeUnavailableError();
+  }
+
+  let batch = await invokeBatchAttempt(command, args);
+
+  if (batch.cancelled) {
+    throw buildFileOperationBatchError(batch);
+  }
+
+  if (options.sudo === true && !args.sudoPassword) {
+    const inputKey = batchInputKey(command);
+    const inputs = Array.isArray(args[inputKey]) ? args[inputKey] : [];
+    const subset = permissionSubset(batch, inputs, command);
+
+    if (subset.items.length > 0) {
+      batch = await retryBatchWithSudo(command, args, batch, subset);
+    }
+  }
+
+  if (batch.items.some((item) => item.status !== 'completed')) {
+    throw buildFileOperationBatchError(batch);
+  }
+
+  return batch;
+}
+
 export async function listDirectory(path) {
   return invokeCommand('list_directory', { path }, { sudo: true });
 }
@@ -250,6 +375,10 @@ export async function searchFiles(root, query, options = {}, jobId = null) {
 
 export async function searchContent(root, query, options = {}, jobId = null) {
   return invokeCommand('search_content', { root, query, options, jobId });
+}
+
+export async function unifiedSearch(root, query, options = {}, jobId = null) {
+  return invokeCommand('unified_search', { root, query, options, jobId });
 }
 
 export async function getFileMetadata(path) {
@@ -416,6 +545,22 @@ export async function saveAppSettings(settings) {
   return invokeCommand('save_app_settings', { settings });
 }
 
+export async function listOperationJournalEntries() {
+  return invokeCommand('list_operation_journal_entries');
+}
+
+export async function upsertOperationJournalEntry(entry) {
+  return invokeCommand('upsert_operation_journal_entry', { entry });
+}
+
+export async function removeOperationJournalEntry(id) {
+  return invokeCommand('remove_operation_journal_entry', { id });
+}
+
+export async function clearFinishedOperationJournalEntries() {
+  return invokeCommand('clear_finished_operation_journal_entries');
+}
+
 export async function createOAuthTokens(provider, clientId, clientSecret = '') {
   return invokeCommand('create_oauth_tokens', {
     provider,
@@ -443,7 +588,11 @@ export async function renameItem(from, to) {
 export async function deleteItems(paths, deleteMode = 'trash') {
   const mode = normalizeDeleteMode(deleteMode);
 
-  return invokeCommand('delete_items', { paths, deleteMode: mode }, { sudo: mode === 'permanent' });
+  return invokeFileBatchCommand(
+    'delete_items',
+    { paths, deleteMode: mode },
+    { sudo: mode === 'permanent' },
+  );
 }
 
 export async function restoreFromTrash(paths) {
@@ -479,11 +628,11 @@ export async function clearRecentLocations() {
 }
 
 export async function copyItems(items, jobId = null, maxConcurrency = null) {
-  return invokeCommand('copy_items', { items, jobId, maxConcurrency }, { sudo: true });
+  return invokeFileBatchCommand('copy_items', { items, jobId, maxConcurrency }, { sudo: true });
 }
 
 export async function moveItems(items, jobId = null, maxConcurrency = null) {
-  return invokeCommand('move_items', { items, jobId, maxConcurrency }, { sudo: true });
+  return invokeFileBatchCommand('move_items', { items, jobId, maxConcurrency }, { sudo: true });
 }
 
 export async function archiveItems(paths, destination, options = {}, overwrite = false, jobId = null) {
@@ -607,6 +756,7 @@ export function useFileOperations() {
     listDirectory,
     searchContent,
     searchFiles,
+    unifiedSearch,
     listOpenWithApps,
     listRemoteVolumes,
     listVolumes,

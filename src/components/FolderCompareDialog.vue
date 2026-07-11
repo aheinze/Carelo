@@ -6,6 +6,10 @@ import { useDialog } from '../composables/useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { compareDirectories, copyItems, deleteItems } from '../composables/useFileOperations';
 import { formatFileDateTime } from '../utils/dateFormat';
+import {
+  extractFileOperationBatch,
+  listCompletedFileOperationItems,
+} from '../utils/fileOperationResults';
 
 const panel = useFolderCompare();
 const dialog = useDialog();
@@ -277,10 +281,7 @@ async function runSync() {
   });
 
   const refreshAfterSync = async () => {
-    await Promise.all([
-      store.reloadDirectoryInPanes(leftRootPath).catch(() => {}),
-      store.reloadDirectoryInPanes(rightRootPath).catch(() => {}),
-    ]);
+    await store.reloadDirectoriesInPanes([leftRootPath, rightRootPath]).catch(() => {});
     // Only re-run the diff if the dialog is still open.
     if (panel.visible.value) {
       await runCompare();
@@ -293,7 +294,27 @@ async function runSync() {
     }
 
     if (deletes.length > 0) {
-      await deleteItems(deletes, 'trash');
+      let deleteBatch = null;
+      let deleteError = null;
+
+      try {
+        deleteBatch = await deleteItems(deletes, 'trash');
+      } catch (error) {
+        deleteBatch = extractFileOperationBatch(error);
+        deleteError = error;
+      }
+
+      const deletedPaths = listCompletedFileOperationItems(deleteBatch).map((item) => item.from);
+      store.recordTrashDelete({
+        paths: deletedPaths,
+        directories: [destRoot],
+        label: deletedPaths.length === 1 ? 'Deleted 1 sync item' : `Deleted ${deletedPaths.length} sync items`,
+        deleteMode: 'trash',
+      });
+
+      if (deleteError) {
+        throw deleteError;
+      }
     }
 
     store.completeQueueJob(jobId, 'Folders synced');

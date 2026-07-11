@@ -13,6 +13,11 @@ const CONTENT_RESULT_RETAIN_MULTIPLIER: usize = 2;
 const CONTENT_PROGRESS_INTERVAL: Duration = Duration::from_millis(140);
 const CONTENT_SNIPPET_CONTEXT_CHARS: usize = 90;
 const CONTENT_SNIPPET_MAX_CHARS: usize = 260;
+const CONTENT_SEARCH_MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+const CONTENT_SEARCH_READ_CHUNK_BYTES: usize = 256 * 1024;
+const UNIFIED_SEARCH_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const UNIFIED_RESULT_BUFFER_MULTIPLIER: usize = 4;
+const UNIFIED_RESULT_RETAIN_MULTIPLIER: usize = 2;
 
 #[derive(Debug, Clone, Default)]
 struct FileSearchProgress {
@@ -32,6 +37,18 @@ struct FileSearchResultsPayload {
     matched_entries: u64,
     done: bool,
     results: Vec<FileSearchResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnifiedSearchResultsPayload {
+    job_id: String,
+    root: String,
+    query: String,
+    scanned_entries: u64,
+    matched_entries: u64,
+    done: bool,
+    results: Vec<UnifiedSearchResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +113,24 @@ struct ContentSearchProgress {
     scanned_files: u64,
     matched_files: u64,
     current_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct UnifiedSearchProgress {
+    scanned_entries: u64,
+    matched_entries: u64,
+    current_path: Option<String>,
+}
+
+struct PreparedUnifiedSearch {
+    options: UnifiedSearchOptions,
+    categories: HashSet<UnifiedSearchCategory>,
+    extensions: HashSet<String>,
+    content_matcher: Option<regex::Regex>,
+}
+
+fn bounded_content_search_bytes(requested: u64) -> u64 {
+    requested.clamp(1024, CONTENT_SEARCH_MAX_FILE_BYTES)
 }
 
 #[tauri::command]
@@ -182,6 +217,55 @@ pub async fn search_content(
                 emit_content_search_progress(&search_app, &search_job_id, progress);
             },
             |path| search_operation_state.checkpoint(&search_job_id, path),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn unified_search(
+    app: AppHandle,
+    operation_state: tauri::State<'_, FileOperationState>,
+    root: String,
+    query: String,
+    options: Option<UnifiedSearchOptions>,
+    job_id: Option<String>,
+    remotes: tauri::State<'_, RemoteVolumeState>,
+    file_search_index: tauri::State<'_, FileSearchIndexState>,
+) -> Result<UnifiedSearchResponse, FsError> {
+    let _operation_cleanup =
+        OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
+    let prepared = prepare_unified_search(options.unwrap_or_default(), query.trim())?;
+
+    if let Some(remote_root) = parse_remote_path(&root) {
+        return search_remote_unified(
+            &app,
+            operation_state.inner(),
+            &job_id,
+            &remotes,
+            file_search_index.inner(),
+            &root,
+            remote_root,
+            &query,
+            prepared,
+        )
+        .await;
+    }
+
+    let search_app = app.clone();
+    let search_job_id = job_id.clone();
+    let search_operation_state = operation_state.inner().clone();
+    let search_index = file_search_index.inner().clone();
+    run_local(move |_| {
+        search_local_unified(
+            Some(&search_app),
+            &search_operation_state,
+            &search_job_id,
+            &search_index,
+            &root,
+            &query,
+            prepared,
         )
     })
     .await
@@ -1447,7 +1531,7 @@ fn search_local_content(
     }
 
     let limit = options.limit.clamp(1, 500);
-    let max_file_bytes = options.max_file_bytes.max(1024);
+    let max_file_bytes = bounded_content_search_bytes(options.max_file_bytes);
     let matcher = if options.regex {
         Some(
             RegexBuilder::new(query)
@@ -1519,15 +1603,22 @@ fn search_local_content(
             Some("pdf") | Some("docx") | Some("docm") | Some("dotx") | Some("dotm")
             | Some("xlsx") | Some("xlsm") | Some("xltx") | Some("xltm") | Some("pptx")
             | Some("pptm") | Some("potx") | Some("potm") | Some("ppsx") | Some("ppsm")
-            | Some("odt") | Some("ods") | Some("odp") => {
-                search_extracted_content_file(&root_path, path, query, &options, matcher.as_ref())
-            }
+            | Some("odt") | Some("ods") | Some("odp") => search_extracted_content_file(
+                &root_path,
+                path,
+                query,
+                &options,
+                matcher.as_ref(),
+                max_file_bytes,
+                &mut checkpoint,
+            ),
             _ => search_plain_text_file(
                 &root_path,
                 path,
                 query,
                 &options,
                 matcher.as_ref(),
+                max_file_bytes,
                 &mut checkpoint,
             ),
         };
@@ -1582,24 +1673,62 @@ fn search_extracted_content_file(
     query: &str,
     options: &ContentSearchOptions,
     matcher: Option<&regex::Regex>,
+    max_file_bytes: u64,
+    checkpoint: &mut impl FnMut(Option<&Path>) -> FsResult<()>,
 ) -> FsResult<Option<ContentSearchResult>> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(_) => return Ok(None),
-    };
-
-    let Some(content) = searchable_content_for_path(path, &bytes) else {
+    let Some(bytes) = read_extracted_search_file(path, max_file_bytes, checkpoint)? else {
         return Ok(None);
     };
 
-    Ok(best_content_file_match(
+    checkpoint(Some(path))?;
+    let Some(content) = searchable_content_for_path(path, &bytes) else {
+        return Ok(None);
+    };
+    checkpoint(Some(path))?;
+
+    best_content_file_match(
         root_path,
         path,
         content.as_ref(),
         query,
         options,
         matcher,
-    ))
+        checkpoint,
+    )
+}
+
+fn read_extracted_search_file(
+    path: &Path,
+    max_file_bytes: u64,
+    checkpoint: &mut impl FnMut(Option<&Path>) -> FsResult<()>,
+) -> FsResult<Option<Vec<u8>>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    let read_limit = max_file_bytes.saturating_add(1);
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0_u8; CONTENT_SEARCH_READ_CHUNK_BYTES];
+
+    while (bytes.len() as u64) < read_limit {
+        checkpoint(Some(path))?;
+        let remaining = read_limit.saturating_sub(bytes.len() as u64);
+        let chunk_len = usize::try_from(remaining.min(chunk.len() as u64)).unwrap_or(chunk.len());
+        let read = match file.read(&mut chunk[..chunk_len]) {
+            Ok(read) => read,
+            Err(_) => return Ok(None),
+        };
+
+        if read == 0 {
+            checkpoint(Some(path))?;
+            return Ok(Some(bytes));
+        }
+
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+
+    checkpoint(Some(path))?;
+    Ok(None)
 }
 
 fn search_plain_text_file(
@@ -1608,16 +1737,20 @@ fn search_plain_text_file(
     query: &str,
     options: &ContentSearchOptions,
     matcher: Option<&regex::Regex>,
+    max_file_bytes: u64,
     checkpoint: &mut impl FnMut(Option<&Path>) -> FsResult<()>,
 ) -> FsResult<Option<ContentSearchResult>> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(_) => return Ok(None),
     };
+    checkpoint(Some(path))?;
     let mut probe = [0_u8; 8192];
+    let probe_len = usize::try_from(max_file_bytes.min(probe.len() as u64)).unwrap_or(probe.len());
     let bytes_read = file
-        .read(&mut probe)
+        .read(&mut probe[..probe_len])
         .map_err(|error| FsError::io("Unable to read search candidate", path, error))?;
+    checkpoint(Some(path))?;
 
     if is_probably_binary(&probe[..bytes_read]) {
         return Ok(None);
@@ -1638,24 +1771,52 @@ fn search_plain_text_file(
         .to_string_lossy()
         .into_owned();
     let mut accumulator = ContentMatchAccumulator::new(name, path_string, parent_path);
-    let mut reader = BufReader::new(file);
-    let mut buffer = Vec::new();
+    let mut reader = BufReader::with_capacity(CONTENT_SEARCH_READ_CHUNK_BYTES, file);
+    let mut line_bytes = Vec::new();
     let mut line_number = 0_usize;
+    let mut total_bytes = 0_u64;
 
     loop {
         checkpoint(Some(path))?;
-        buffer.clear();
-
-        let bytes_read = reader
-            .read_until(b'\n', &mut buffer)
+        let available = reader
+            .fill_buf()
             .map_err(|error| FsError::io("Unable to read search candidate", path, error))?;
 
-        if bytes_read == 0 {
+        if available.is_empty() {
             break;
         }
 
-        line_number += 1;
-        let line = String::from_utf8_lossy(&buffer);
+        let available_len = available.len();
+        let remaining_bytes = max_file_bytes.saturating_sub(total_bytes);
+
+        if available_len as u64 > remaining_bytes {
+            return Ok(None);
+        }
+
+        let mut line_start = 0_usize;
+        for (index, byte) in available.iter().enumerate() {
+            if *byte != b'\n' {
+                continue;
+            }
+
+            line_bytes.extend_from_slice(&available[line_start..=index]);
+            line_number = line_number.saturating_add(1);
+            let line = String::from_utf8_lossy(&line_bytes);
+            accumulator.push_line(line_number, &line, query, options, matcher);
+            line_bytes.clear();
+            line_start = index + 1;
+        }
+
+        line_bytes.extend_from_slice(&available[line_start..]);
+        total_bytes = total_bytes.saturating_add(available_len as u64);
+        reader.consume(available_len);
+        checkpoint(Some(path))?;
+    }
+
+    if !line_bytes.is_empty() {
+        checkpoint(Some(path))?;
+        line_number = line_number.saturating_add(1);
+        let line = String::from_utf8_lossy(&line_bytes);
         accumulator.push_line(line_number, &line, query, options, matcher);
     }
 
@@ -1669,7 +1830,8 @@ fn best_content_file_match(
     query: &str,
     options: &ContentSearchOptions,
     matcher: Option<&regex::Regex>,
-) -> Option<ContentSearchResult> {
+    checkpoint: &mut impl FnMut(Option<&Path>) -> FsResult<()>,
+) -> FsResult<Option<ContentSearchResult>> {
     let name = path
         .file_name()
         .unwrap_or_else(|| OsStr::new(""))
@@ -1684,10 +1846,11 @@ fn best_content_file_match(
     let mut accumulator = ContentMatchAccumulator::new(name, path_string, parent_path);
 
     for (line_index, line) in content.lines().enumerate() {
+        checkpoint(Some(path))?;
         accumulator.push_line(line_index + 1, line, query, options, matcher);
     }
 
-    accumulator.finish()
+    Ok(accumulator.finish())
 }
 
 async fn search_remote_content(
@@ -1706,7 +1869,7 @@ async fn search_remote_content(
     }
 
     let limit = options.limit.clamp(1, 500);
-    let max_file_bytes = options.max_file_bytes.max(1024);
+    let max_file_bytes = bounded_content_search_bytes(options.max_file_bytes);
     let matcher = if options.regex {
         Some(
             RegexBuilder::new(query)
@@ -1783,15 +1946,24 @@ async fn search_remote_content(
             let Some(remote_path) = parse_remote_path(&entry.path) else {
                 continue;
             };
-            let preview = match read_remote_file_prefix(remotes, remote_path, max_file_bytes).await
+            let preview = match crate::fs::remote::read_remote_file_prefix_for_search(
+                remotes,
+                remote_path,
+                max_file_bytes,
+                || operation_state.checkpoint(job_id, None),
+            )
+            .await
             {
                 Ok(preview) if !preview.truncated => preview,
+                Err(error) if error.code == "operation_cancelled" => return Err(error),
                 _ => continue,
             };
+            operation_state.checkpoint(job_id, None)?;
             let Some(content) = searchable_content_for_path(Path::new(&entry.name), &preview.bytes)
             else {
                 continue;
             };
+            operation_state.checkpoint(job_id, None)?;
 
             if let Some(result) = best_remote_content_file_match(
                 &entry,
@@ -1799,7 +1971,8 @@ async fn search_remote_content(
                 query,
                 &options,
                 matcher.as_ref(),
-            ) {
+                &mut || operation_state.checkpoint(job_id, None),
+            )? {
                 matched_files = matched_files.saturating_add(1);
                 results.push(result);
                 maybe_trim_content_results(&mut results, limit);
@@ -1841,7 +2014,8 @@ fn best_remote_content_file_match(
     query: &str,
     options: &ContentSearchOptions,
     matcher: Option<&regex::Regex>,
-) -> Option<ContentSearchResult> {
+    checkpoint: &mut impl FnMut() -> FsResult<()>,
+) -> FsResult<Option<ContentSearchResult>> {
     let mut accumulator = ContentMatchAccumulator::new(
         entry.name.clone(),
         entry.path.clone(),
@@ -1849,10 +2023,1126 @@ fn best_remote_content_file_match(
     );
 
     for (line_index, line) in content.lines().enumerate() {
+        checkpoint()?;
         accumulator.push_line(line_index + 1, line, query, options, matcher);
     }
 
-    accumulator.finish()
+    Ok(accumulator.finish())
+}
+
+fn unified_scope_searches_names(scope: UnifiedSearchMatchScope) -> bool {
+    matches!(
+        scope,
+        UnifiedSearchMatchScope::Name | UnifiedSearchMatchScope::All
+    )
+}
+
+fn unified_scope_searches_content(scope: UnifiedSearchMatchScope, query: &str) -> bool {
+    !query.is_empty()
+        && matches!(
+            scope,
+            UnifiedSearchMatchScope::Content | UnifiedSearchMatchScope::All
+        )
+}
+
+fn prepare_unified_search(
+    mut options: UnifiedSearchOptions,
+    query: &str,
+) -> FsResult<PreparedUnifiedSearch> {
+    if options
+        .min_size_bytes
+        .zip(options.max_size_bytes)
+        .is_some_and(|(minimum, maximum)| minimum > maximum)
+        || options
+            .modified_after
+            .zip(options.modified_before)
+            .is_some_and(|(after, before)| after > before)
+    {
+        return Err(FsError::new(
+            "invalid_search_options",
+            "Search filter ranges must have a minimum that is not greater than the maximum.",
+            None,
+        ));
+    }
+
+    options.limit = options.limit.clamp(1, 500);
+    options.max_content_bytes = bounded_content_search_bytes(options.max_content_bytes);
+    let categories = options.categories.iter().copied().collect::<HashSet<_>>();
+    let extensions = options
+        .extensions
+        .iter()
+        .map(|extension| {
+            extension
+                .trim()
+                .trim_start_matches('.')
+                .to_ascii_lowercase()
+        })
+        .filter(|extension| !extension.is_empty())
+        .collect::<HashSet<_>>();
+    let content_matcher =
+        if options.regex && unified_scope_searches_content(options.match_scope, query) {
+            Some(
+                RegexBuilder::new(query)
+                    .case_insensitive(!options.case_sensitive)
+                    .build()
+                    .map_err(|error| {
+                        FsError::new(
+                            "invalid_regex",
+                            format!("Invalid search regex: {error}"),
+                            None,
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+
+    Ok(PreparedUnifiedSearch {
+        options,
+        categories,
+        extensions,
+        content_matcher,
+    })
+}
+
+fn unified_search_category(name: &str, kind: &str) -> UnifiedSearchCategory {
+    if kind == "directory" {
+        return UnifiedSearchCategory::Directory;
+    }
+
+    const ARCHIVE_SUFFIXES: &[&str] = &[
+        ".zip", ".tar", ".tar.gz", ".tgz", ".tar.zst", ".tzst", ".7z",
+    ];
+    const IMAGE_EXTENSIONS: &[&str] = &[
+        "apng", "avif", "bmp", "cur", "gif", "heic", "heif", "ico", "jfif", "jpeg", "jpg", "pjpeg",
+        "pjp", "png", "svg", "tif", "tiff", "webp",
+    ];
+    const VIDEO_EXTENSIONS: &[&str] = &[
+        "3g2", "3gp", "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ogv", "webm",
+    ];
+    const AUDIO_EXTENSIONS: &[&str] = &[
+        "aac", "aif", "aiff", "alac", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav", "weba",
+        "wma",
+    ];
+    const CODE_EXTENSIONS: &[&str] = &[
+        "bash", "c", "cc", "cpp", "cs", "css", "go", "h", "hpp", "htm", "html", "java", "js",
+        "jsx", "lua", "php", "pl", "py", "rb", "rs", "scss", "sh", "sql", "svelte", "swift", "ts",
+        "tsx", "vue", "zsh",
+    ];
+    const CONFIG_EXTENSIONS: &[&str] = &[
+        "cfg",
+        "conf",
+        "env",
+        "gitignore",
+        "ini",
+        "json",
+        "lock",
+        "properties",
+        "toml",
+        "xml",
+        "yaml",
+        "yml",
+    ];
+    const CONFIG_NAMES: &[&str] = &[
+        ".dockerignore",
+        ".editorconfig",
+        ".env",
+        ".gitattributes",
+        ".gitignore",
+        "dockerfile",
+        "makefile",
+    ];
+    const DOCUMENT_EXTENSIONS: &[&str] = &[
+        "doc", "docx", "epub", "md", "odt", "pages", "pdf", "rtf", "txt",
+    ];
+    const SPREADSHEET_EXTENSIONS: &[&str] = &["csv", "ods", "numbers", "xls", "xlsx"];
+    const PRESENTATION_EXTENSIONS: &[&str] = &["key", "odp", "ppt", "pptx"];
+
+    let lower_name = name.to_ascii_lowercase();
+    let extension = lower_name.rsplit_once('.').map(|(_, extension)| extension);
+
+    if ARCHIVE_SUFFIXES
+        .iter()
+        .any(|suffix| lower_name.ends_with(suffix))
+    {
+        UnifiedSearchCategory::Archive
+    } else if extension.is_some_and(|extension| IMAGE_EXTENSIONS.contains(&extension)) {
+        UnifiedSearchCategory::Image
+    } else if extension.is_some_and(|extension| VIDEO_EXTENSIONS.contains(&extension)) {
+        UnifiedSearchCategory::Video
+    } else if extension.is_some_and(|extension| AUDIO_EXTENSIONS.contains(&extension)) {
+        UnifiedSearchCategory::Audio
+    } else if CONFIG_NAMES.contains(&lower_name.as_str())
+        || extension.is_some_and(|extension| CONFIG_EXTENSIONS.contains(&extension))
+    {
+        UnifiedSearchCategory::Config
+    } else if extension.is_some_and(|extension| CODE_EXTENSIONS.contains(&extension)) {
+        UnifiedSearchCategory::Code
+    } else if extension.is_some_and(|extension| SPREADSHEET_EXTENSIONS.contains(&extension)) {
+        UnifiedSearchCategory::Spreadsheet
+    } else if extension.is_some_and(|extension| PRESENTATION_EXTENSIONS.contains(&extension)) {
+        UnifiedSearchCategory::Presentation
+    } else if extension.is_some_and(|extension| DOCUMENT_EXTENSIONS.contains(&extension)) {
+        UnifiedSearchCategory::Document
+    } else {
+        UnifiedSearchCategory::File
+    }
+}
+
+fn unified_name_has_extension(name: &str, extension: &str) -> bool {
+    let lower_name = name.to_ascii_lowercase();
+    lower_name
+        .strip_suffix(extension)
+        .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+fn unified_candidate_passes_filters(
+    candidate: &FileSearchCandidate,
+    category: UnifiedSearchCategory,
+    prepared: &PreparedUnifiedSearch,
+) -> bool {
+    let is_directory = candidate.kind == "directory";
+
+    if (is_directory && !prepared.options.include_directories)
+        || (!is_directory && !prepared.options.include_files)
+    {
+        return false;
+    }
+
+    if !prepared.categories.is_empty() && !prepared.categories.contains(&category) {
+        return false;
+    }
+
+    if !prepared.extensions.is_empty()
+        && (is_directory
+            || !prepared
+                .extensions
+                .iter()
+                .any(|extension| unified_name_has_extension(&candidate.name, extension)))
+    {
+        return false;
+    }
+
+    if prepared.options.min_size_bytes.is_some() || prepared.options.max_size_bytes.is_some() {
+        let Some(size) = candidate.size else {
+            return false;
+        };
+
+        if prepared
+            .options
+            .min_size_bytes
+            .is_some_and(|minimum| size < minimum)
+            || prepared
+                .options
+                .max_size_bytes
+                .is_some_and(|maximum| size > maximum)
+        {
+            return false;
+        }
+    }
+
+    if prepared.options.modified_after.is_some() || prepared.options.modified_before.is_some() {
+        let Some(modified_at) = candidate.modified_at else {
+            return false;
+        };
+
+        if prepared
+            .options
+            .modified_after
+            .is_some_and(|after| modified_at < after)
+            || prepared
+                .options
+                .modified_before
+                .is_some_and(|before| modified_at > before)
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn unified_content_options(prepared: &PreparedUnifiedSearch) -> ContentSearchOptions {
+    ContentSearchOptions {
+        limit: prepared.options.limit,
+        include_hidden: prepared.options.include_hidden,
+        respect_ignore: prepared.options.respect_ignore,
+        case_sensitive: prepared.options.case_sensitive,
+        regex: prepared.options.regex,
+        max_file_bytes: prepared.options.max_content_bytes,
+        max_depth: prepared.options.max_depth,
+    }
+}
+
+fn unified_result_from_matches(
+    candidate: &FileSearchCandidate,
+    category: UnifiedSearchCategory,
+    name_match: Option<FileSearchResult>,
+    content_match: Option<ContentSearchResult>,
+) -> Option<UnifiedSearchResult> {
+    let match_source = match (name_match.is_some(), content_match.is_some()) {
+        (true, true) => UnifiedSearchMatchSource::Both,
+        (true, false) => UnifiedSearchMatchSource::Name,
+        (false, true) => UnifiedSearchMatchSource::Content,
+        (false, false) => return None,
+    };
+    let name_score = name_match.as_ref().map(|result| result.score).unwrap_or(0);
+    let content_score = content_match
+        .as_ref()
+        .map(|result| result.score)
+        .unwrap_or(0);
+    let match_indices = name_match
+        .map(|result| result.match_indices)
+        .unwrap_or_default();
+    let (line_number, line_text, match_start, match_end, match_count) =
+        if let Some(content_match) = content_match {
+            let start = byte_to_char_index(
+                &content_match.line_text,
+                content_match.match_start.min(content_match.line_text.len()),
+            );
+            let end = byte_to_char_index(
+                &content_match.line_text,
+                content_match.match_end.min(content_match.line_text.len()),
+            );
+            (
+                Some(content_match.line_number),
+                Some(content_match.line_text),
+                Some(start),
+                Some(end.max(start)),
+                Some(content_match.match_count),
+            )
+        } else {
+            (None, None, None, None, None)
+        };
+
+    Some(UnifiedSearchResult {
+        name: candidate.name.clone(),
+        path: candidate.path.clone(),
+        parent_path: candidate.parent_path.clone(),
+        kind: candidate.kind.clone(),
+        category,
+        size: candidate.size,
+        modified_at: candidate.modified_at,
+        match_source,
+        match_indices,
+        line_number,
+        line_text,
+        match_start,
+        match_end,
+        match_count,
+        score: name_score.saturating_add(content_score),
+    })
+}
+
+fn unified_match_source_rank(source: UnifiedSearchMatchSource) -> u8 {
+    match source {
+        UnifiedSearchMatchSource::Both => 3,
+        UnifiedSearchMatchSource::Name => 2,
+        UnifiedSearchMatchSource::Content => 1,
+    }
+}
+
+fn sort_unified_results(results: &mut [UnifiedSearchResult]) {
+    results.sort_by(|a, b| {
+        unified_match_source_rank(b.match_source)
+            .cmp(&unified_match_source_rank(a.match_source))
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| a.kind.cmp(&b.kind))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+}
+
+fn sort_and_truncate_unified_results(results: &mut Vec<UnifiedSearchResult>, limit: usize) {
+    sort_unified_results(results);
+    results.truncate(limit);
+}
+
+fn maybe_trim_unified_results(results: &mut Vec<UnifiedSearchResult>, limit: usize) {
+    let buffer_limit = limit
+        .saturating_mul(UNIFIED_RESULT_BUFFER_MULTIPLIER)
+        .max(limit);
+
+    if results.len() <= buffer_limit {
+        return;
+    }
+
+    let retain_limit = limit
+        .saturating_mul(UNIFIED_RESULT_RETAIN_MULTIPLIER)
+        .max(limit);
+    sort_and_truncate_unified_results(results, retain_limit);
+}
+
+fn top_unified_results(results: &[UnifiedSearchResult], limit: usize) -> Vec<UnifiedSearchResult> {
+    let mut top_results = results.to_vec();
+    sort_and_truncate_unified_results(&mut top_results, limit);
+    top_results
+}
+
+fn emit_unified_search_update(
+    app: &AppHandle,
+    job_id: &Option<String>,
+    root: &str,
+    query: &str,
+    progress: &UnifiedSearchProgress,
+    results: Vec<UnifiedSearchResult>,
+    done: bool,
+) {
+    emit_file_operation_progress(
+        app,
+        job_id,
+        "unified-search",
+        "running",
+        ProgressSnapshot {
+            processed_entries: progress.scanned_entries,
+            current_path: progress.current_path.clone(),
+            current_bytes: progress.matched_entries,
+            ..ProgressSnapshot::default()
+        },
+    );
+
+    let Some(job_id) = job_id else {
+        return;
+    };
+
+    let _ = app.emit(
+        "unified-search-results",
+        unified_search_results_payload(job_id, root, query, progress, results, done),
+    );
+}
+
+fn unified_search_results_payload(
+    job_id: &str,
+    root: &str,
+    query: &str,
+    progress: &UnifiedSearchProgress,
+    results: Vec<UnifiedSearchResult>,
+    done: bool,
+) -> UnifiedSearchResultsPayload {
+    UnifiedSearchResultsPayload {
+        job_id: job_id.to_string(),
+        root: root.to_string(),
+        query: query.to_string(),
+        scanned_entries: progress.scanned_entries,
+        matched_entries: progress.matched_entries,
+        done,
+        results,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn maybe_emit_unified_search_update(
+    app: Option<&AppHandle>,
+    job_id: &Option<String>,
+    root: &str,
+    query: &str,
+    last_emit: &mut Instant,
+    progress: &UnifiedSearchProgress,
+    results: &[UnifiedSearchResult],
+    limit: usize,
+    force: bool,
+    done: bool,
+) {
+    if !force && last_emit.elapsed() < UNIFIED_SEARCH_PROGRESS_INTERVAL {
+        return;
+    }
+
+    *last_emit = Instant::now();
+
+    if let Some(app) = app {
+        emit_unified_search_update(
+            app,
+            job_id,
+            root,
+            query,
+            progress,
+            top_unified_results(results, limit),
+            done,
+        );
+    }
+}
+
+fn source_has_name(source: UnifiedSearchMatchSource) -> bool {
+    matches!(
+        source,
+        UnifiedSearchMatchSource::Name | UnifiedSearchMatchSource::Both
+    )
+}
+
+fn source_has_content(source: UnifiedSearchMatchSource) -> bool {
+    matches!(
+        source,
+        UnifiedSearchMatchSource::Content | UnifiedSearchMatchSource::Both
+    )
+}
+
+fn merge_unified_result(existing: &mut UnifiedSearchResult, incoming: UnifiedSearchResult) {
+    let existing_has_name = source_has_name(existing.match_source);
+    let existing_has_content = source_has_content(existing.match_source);
+    let incoming_has_name = source_has_name(incoming.match_source);
+    let incoming_has_content = source_has_content(incoming.match_source);
+
+    if incoming_has_name && !existing_has_name {
+        existing.match_indices = incoming.match_indices.clone();
+    }
+
+    if incoming_has_content && !existing_has_content {
+        existing.line_number = incoming.line_number;
+        existing.line_text = incoming.line_text.clone();
+        existing.match_start = incoming.match_start;
+        existing.match_end = incoming.match_end;
+        existing.match_count = incoming.match_count;
+    }
+
+    existing.score = if (incoming_has_name && !existing_has_name)
+        || (incoming_has_content && !existing_has_content)
+    {
+        existing.score.saturating_add(incoming.score)
+    } else {
+        existing.score.max(incoming.score)
+    };
+    existing.match_source = match (
+        existing_has_name || incoming_has_name,
+        existing_has_content || incoming_has_content,
+    ) {
+        (true, true) => UnifiedSearchMatchSource::Both,
+        (true, false) => UnifiedSearchMatchSource::Name,
+        (false, true) => UnifiedSearchMatchSource::Content,
+        (false, false) => existing.match_source,
+    };
+}
+
+fn push_unified_result(
+    results: &mut Vec<UnifiedSearchResult>,
+    seen_paths: &mut HashSet<String>,
+    progress: &mut UnifiedSearchProgress,
+    result: UnifiedSearchResult,
+    limit: usize,
+) {
+    if !seen_paths.insert(result.path.clone()) {
+        if let Some(existing) = results
+            .iter_mut()
+            .find(|existing| existing.path == result.path)
+        {
+            merge_unified_result(existing, result);
+        }
+        return;
+    }
+
+    progress.matched_entries = progress.matched_entries.saturating_add(1);
+    results.push(result);
+    maybe_trim_unified_results(results, limit);
+}
+
+fn unified_cache_options(prepared: &PreparedUnifiedSearch) -> FileSearchOptions {
+    FileSearchOptions {
+        limit: prepared.options.limit,
+        include_hidden: prepared.options.include_hidden,
+        respect_ignore: prepared.options.respect_ignore,
+        include_files: true,
+        include_directories: true,
+        follow_symlinks: prepared.options.follow_symlinks,
+        max_depth: prepared.options.max_depth,
+    }
+}
+
+fn unified_query_is_name_only(prepared: &PreparedUnifiedSearch, query: &str) -> bool {
+    unified_scope_searches_names(prepared.options.match_scope)
+        && !unified_scope_searches_content(prepared.options.match_scope, query)
+}
+
+fn search_cached_unified_candidates(
+    app: Option<&AppHandle>,
+    operation_state: &FileOperationState,
+    job_id: &Option<String>,
+    root: &str,
+    query: &str,
+    prepared: PreparedUnifiedSearch,
+    candidates: Vec<FileSearchCandidate>,
+) -> FsResult<UnifiedSearchResponse> {
+    let limit = prepared.options.limit;
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let mut haystack_buf = Vec::new();
+    let mut indices_buf = Vec::new();
+    let mut results = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut progress = UnifiedSearchProgress::default();
+    let mut last_emit = Instant::now()
+        .checked_sub(UNIFIED_SEARCH_PROGRESS_INTERVAL)
+        .unwrap_or_else(Instant::now);
+
+    maybe_emit_unified_search_update(
+        app,
+        job_id,
+        root,
+        query,
+        &mut last_emit,
+        &progress,
+        &results,
+        limit,
+        true,
+        false,
+    );
+
+    for candidate in candidates {
+        operation_state.checkpoint(job_id, None)?;
+        progress.scanned_entries = progress.scanned_entries.saturating_add(1);
+        progress.current_path = Some(candidate.path.clone());
+        let category = unified_search_category(&candidate.name, &candidate.kind);
+
+        if unified_candidate_passes_filters(&candidate, category, &prepared) {
+            let name_match = file_search_result_from_candidate(
+                &candidate,
+                query,
+                &pattern,
+                &mut matcher,
+                &mut haystack_buf,
+                &mut indices_buf,
+            );
+
+            if let Some(result) =
+                unified_result_from_matches(&candidate, category, name_match, None)
+            {
+                push_unified_result(&mut results, &mut seen_paths, &mut progress, result, limit);
+            }
+        }
+
+        maybe_emit_unified_search_update(
+            app,
+            job_id,
+            root,
+            query,
+            &mut last_emit,
+            &progress,
+            &results,
+            limit,
+            false,
+            false,
+        );
+    }
+
+    progress.current_path = None;
+    let results = top_unified_results(&results, limit);
+    maybe_emit_unified_search_update(
+        app,
+        job_id,
+        root,
+        query,
+        &mut last_emit,
+        &progress,
+        &results,
+        limit,
+        true,
+        true,
+    );
+    Ok(UnifiedSearchResponse {
+        results,
+        scanned_entries: progress.scanned_entries,
+        matched_entries: progress.matched_entries,
+    })
+}
+
+fn unified_local_kind(
+    metadata: &fs::Metadata,
+    is_symlink: bool,
+    follow_symlinks: bool,
+) -> &'static str {
+    if is_symlink && !follow_symlinks {
+        "symlink"
+    } else if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_file() {
+        "file"
+    } else if is_symlink {
+        "symlink"
+    } else {
+        "other"
+    }
+}
+
+fn search_local_unified(
+    app: Option<&AppHandle>,
+    operation_state: &FileOperationState,
+    job_id: &Option<String>,
+    file_search_index: &FileSearchIndexState,
+    root: &str,
+    query: &str,
+    prepared: PreparedUnifiedSearch,
+) -> FsResult<UnifiedSearchResponse> {
+    let root_path = expand_local_search_root(root)?;
+    let root_metadata = fs::metadata(&root_path)
+        .map_err(|error| FsError::io("Unable to read search root", &root_path, error))?;
+
+    if !root_metadata.is_dir() {
+        return Err(FsError::new(
+            "search_root_not_directory",
+            "Search root must be a local folder.",
+            Some(root_path.to_string_lossy().into_owned()),
+        ));
+    }
+
+    let query = query.trim();
+    let root_label = root_path.to_string_lossy().into_owned();
+
+    if !unified_scope_searches_names(prepared.options.match_scope)
+        && !unified_scope_searches_content(prepared.options.match_scope, query)
+    {
+        let response = UnifiedSearchResponse {
+            results: Vec::new(),
+            scanned_entries: 0,
+            matched_entries: 0,
+        };
+        let mut last_emit = Instant::now();
+        maybe_emit_unified_search_update(
+            app,
+            job_id,
+            root,
+            query,
+            &mut last_emit,
+            &UnifiedSearchProgress::default(),
+            &response.results,
+            prepared.options.limit,
+            true,
+            true,
+        );
+        return Ok(response);
+    }
+
+    let cache_options = unified_cache_options(&prepared);
+    let cache_key = file_search_cache_key("local", &root_label, &cache_options);
+    let name_only = unified_query_is_name_only(&prepared, query);
+
+    if name_only {
+        if let Some(candidates) = file_search_index.get(&cache_key) {
+            return search_cached_unified_candidates(
+                app,
+                operation_state,
+                job_id,
+                root,
+                query,
+                prepared,
+                candidates,
+            );
+        }
+    }
+
+    let builder = configure_walk_builder(
+        &root_path,
+        prepared.options.include_hidden,
+        prepared.options.respect_ignore,
+        prepared.options.follow_symlinks,
+        prepared.options.max_depth,
+    );
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let mut haystack_buf = Vec::new();
+    let mut indices_buf = Vec::new();
+    let content_options = unified_content_options(&prepared);
+    let mut results = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut cached_candidates = Vec::new();
+    let mut cacheable = name_only;
+    let mut progress = UnifiedSearchProgress::default();
+    let mut last_emit = Instant::now()
+        .checked_sub(UNIFIED_SEARCH_PROGRESS_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    let limit = prepared.options.limit;
+
+    maybe_emit_unified_search_update(
+        app,
+        job_id,
+        root,
+        query,
+        &mut last_emit,
+        &progress,
+        &results,
+        limit,
+        true,
+        false,
+    );
+
+    for entry in builder.build() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        operation_state.checkpoint(job_id, Some(path))?;
+
+        if path == root_path {
+            continue;
+        }
+
+        let symlink_metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let is_symlink = symlink_metadata.file_type().is_symlink();
+        let metadata = if is_symlink && prepared.options.follow_symlinks {
+            fs::metadata(path).unwrap_or(symlink_metadata)
+        } else {
+            symlink_metadata
+        };
+        let kind = unified_local_kind(&metadata, is_symlink, prepared.options.follow_symlinks);
+        let candidate = local_file_search_candidate(&root_path, path, &metadata, kind);
+        progress.scanned_entries = progress.scanned_entries.saturating_add(1);
+        progress.current_path = Some(candidate.path.clone());
+
+        if cacheable {
+            if cached_candidates.len() < FILE_SEARCH_CACHE_MAX_CANDIDATES {
+                cached_candidates.push(candidate.clone());
+            } else {
+                cached_candidates.clear();
+                cacheable = false;
+            }
+        }
+
+        let category = unified_search_category(&candidate.name, &candidate.kind);
+
+        if unified_candidate_passes_filters(&candidate, category, &prepared) {
+            let name_match = if unified_scope_searches_names(prepared.options.match_scope) {
+                file_search_result_from_candidate(
+                    &candidate,
+                    query,
+                    &pattern,
+                    &mut matcher,
+                    &mut haystack_buf,
+                    &mut indices_buf,
+                )
+            } else {
+                None
+            };
+            let content_match =
+                if unified_scope_searches_content(prepared.options.match_scope, query)
+                    && metadata.is_file()
+                    && metadata.len() <= prepared.options.max_content_bytes
+                {
+                    let result = match lower_extension(path).as_deref() {
+                        Some("pdf") | Some("docx") | Some("docm") | Some("dotx") | Some("dotm")
+                        | Some("xlsx") | Some("xlsm") | Some("xltx") | Some("xltm")
+                        | Some("pptx") | Some("pptm") | Some("potx") | Some("potm")
+                        | Some("ppsx") | Some("ppsm") | Some("odt") | Some("ods") | Some("odp") => {
+                            search_extracted_content_file(
+                                &root_path,
+                                path,
+                                query,
+                                &content_options,
+                                prepared.content_matcher.as_ref(),
+                                prepared.options.max_content_bytes,
+                                &mut |checkpoint_path| {
+                                    operation_state.checkpoint(job_id, checkpoint_path)
+                                },
+                            )
+                        }
+                        _ => search_plain_text_file(
+                            &root_path,
+                            path,
+                            query,
+                            &content_options,
+                            prepared.content_matcher.as_ref(),
+                            prepared.options.max_content_bytes,
+                            &mut |checkpoint_path| {
+                                operation_state.checkpoint(job_id, checkpoint_path)
+                            },
+                        ),
+                    };
+
+                    match result {
+                        Ok(result) => result,
+                        Err(error) if error.code == "operation_cancelled" => return Err(error),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+
+            if let Some(result) =
+                unified_result_from_matches(&candidate, category, name_match, content_match)
+            {
+                push_unified_result(&mut results, &mut seen_paths, &mut progress, result, limit);
+            }
+        }
+
+        maybe_emit_unified_search_update(
+            app,
+            job_id,
+            root,
+            query,
+            &mut last_emit,
+            &progress,
+            &results,
+            limit,
+            false,
+            false,
+        );
+    }
+
+    if cacheable {
+        file_search_index.put(cache_key, cached_candidates);
+    }
+    progress.current_path = None;
+    let results = top_unified_results(&results, limit);
+    maybe_emit_unified_search_update(
+        app,
+        job_id,
+        root,
+        query,
+        &mut last_emit,
+        &progress,
+        &results,
+        limit,
+        true,
+        true,
+    );
+    Ok(UnifiedSearchResponse {
+        results,
+        scanned_entries: progress.scanned_entries,
+        matched_entries: progress.matched_entries,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn search_remote_unified(
+    app: &AppHandle,
+    operation_state: &FileOperationState,
+    job_id: &Option<String>,
+    remotes: &RemoteVolumeState,
+    file_search_index: &FileSearchIndexState,
+    root_label: &str,
+    root: RemotePath,
+    query: &str,
+    prepared: PreparedUnifiedSearch,
+) -> FsResult<UnifiedSearchResponse> {
+    let query = query.trim();
+
+    if !unified_scope_searches_names(prepared.options.match_scope)
+        && !unified_scope_searches_content(prepared.options.match_scope, query)
+    {
+        let response = UnifiedSearchResponse {
+            results: Vec::new(),
+            scanned_entries: 0,
+            matched_entries: 0,
+        };
+        emit_unified_search_update(
+            app,
+            job_id,
+            root_label,
+            query,
+            &UnifiedSearchProgress::default(),
+            Vec::new(),
+            true,
+        );
+        return Ok(response);
+    }
+
+    let cache_options = unified_cache_options(&prepared);
+    let cache_key = file_search_cache_key("remote", root_label, &cache_options);
+    let name_only = unified_query_is_name_only(&prepared, query);
+
+    if name_only {
+        if let Some(candidates) = file_search_index.get(&cache_key) {
+            return search_cached_unified_candidates(
+                Some(app),
+                operation_state,
+                job_id,
+                root_label,
+                query,
+                prepared,
+                candidates,
+            );
+        }
+    }
+
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let mut haystack_buf = Vec::new();
+    let mut indices_buf = Vec::new();
+    let content_options = unified_content_options(&prepared);
+    let mut results = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut cached_candidates = Vec::new();
+    let mut cacheable = name_only;
+    let mut stack = vec![(root, 0_usize)];
+    let mut progress = UnifiedSearchProgress::default();
+    let mut last_emit = Instant::now()
+        .checked_sub(UNIFIED_SEARCH_PROGRESS_INTERVAL)
+        .unwrap_or_else(Instant::now);
+    let limit = prepared.options.limit;
+
+    maybe_emit_unified_search_update(
+        Some(app),
+        job_id,
+        root_label,
+        query,
+        &mut last_emit,
+        &progress,
+        &results,
+        limit,
+        true,
+        false,
+    );
+
+    while let Some((directory, depth)) = stack.pop() {
+        operation_state.checkpoint(job_id, None)?;
+        let entries = list_remote_directory(remotes, directory).await?;
+
+        for entry in entries {
+            operation_state.checkpoint(job_id, None)?;
+
+            if !prepared.options.include_hidden && entry.is_hidden {
+                continue;
+            }
+
+            let is_directory = entry.kind == FileEntryKind::Directory;
+            if is_directory && should_descend_remote(depth, prepared.options.max_depth) {
+                if let Some(remote_path) = parse_remote_path(&entry.path) {
+                    stack.push((remote_path, depth + 1));
+                }
+            }
+
+            let candidate = remote_file_search_candidate(root_label, &entry);
+            progress.scanned_entries = progress.scanned_entries.saturating_add(1);
+            progress.current_path = Some(candidate.path.clone());
+
+            if cacheable {
+                if cached_candidates.len() < FILE_SEARCH_CACHE_MAX_CANDIDATES {
+                    cached_candidates.push(candidate.clone());
+                } else {
+                    cached_candidates.clear();
+                    cacheable = false;
+                }
+            }
+
+            let category = unified_search_category(&candidate.name, &candidate.kind);
+
+            if unified_candidate_passes_filters(&candidate, category, &prepared) {
+                let name_match = if unified_scope_searches_names(prepared.options.match_scope) {
+                    file_search_result_from_candidate(
+                        &candidate,
+                        query,
+                        &pattern,
+                        &mut matcher,
+                        &mut haystack_buf,
+                        &mut indices_buf,
+                    )
+                } else {
+                    None
+                };
+                let can_read_content = entry.kind == FileEntryKind::File
+                    || (entry.kind == FileEntryKind::Symlink && prepared.options.follow_symlinks);
+                let content_match =
+                    if unified_scope_searches_content(prepared.options.match_scope, query)
+                        && can_read_content
+                        && entry
+                            .size
+                            .is_none_or(|size| size <= prepared.options.max_content_bytes)
+                    {
+                        if let Some(remote_path) = parse_remote_path(&entry.path) {
+                            match crate::fs::remote::read_remote_file_prefix_for_search(
+                                remotes,
+                                remote_path,
+                                prepared.options.max_content_bytes,
+                                || operation_state.checkpoint(job_id, None),
+                            )
+                            .await
+                            {
+                                Ok(preview) if !preview.truncated => {
+                                    operation_state.checkpoint(job_id, None)?;
+                                    if let Some(content) = searchable_content_for_path(
+                                        Path::new(&entry.name),
+                                        &preview.bytes,
+                                    ) {
+                                        operation_state.checkpoint(job_id, None)?;
+                                        best_remote_content_file_match(
+                                            &entry,
+                                            content.as_ref(),
+                                            query,
+                                            &content_options,
+                                            prepared.content_matcher.as_ref(),
+                                            &mut || operation_state.checkpoint(job_id, None),
+                                        )?
+                                    } else {
+                                        None
+                                    }
+                                }
+                                Err(error) if error.code == "operation_cancelled" => {
+                                    return Err(error)
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                if let Some(result) =
+                    unified_result_from_matches(&candidate, category, name_match, content_match)
+                {
+                    push_unified_result(
+                        &mut results,
+                        &mut seen_paths,
+                        &mut progress,
+                        result,
+                        limit,
+                    );
+                }
+            }
+
+            maybe_emit_unified_search_update(
+                Some(app),
+                job_id,
+                root_label,
+                query,
+                &mut last_emit,
+                &progress,
+                &results,
+                limit,
+                false,
+                false,
+            );
+        }
+    }
+
+    if cacheable {
+        file_search_index.put(cache_key, cached_candidates);
+    }
+    progress.current_path = None;
+    let results = top_unified_results(&results, limit);
+    maybe_emit_unified_search_update(
+        Some(app),
+        job_id,
+        root_label,
+        query,
+        &mut last_emit,
+        &progress,
+        &results,
+        limit,
+        true,
+        true,
+    );
+    Ok(UnifiedSearchResponse {
+        results,
+        scanned_entries: progress.scanned_entries,
+        matched_entries: progress.matched_entries,
+    })
 }
 
 #[cfg(test)]
@@ -1865,6 +3155,206 @@ mod tests {
         options: ContentSearchOptions,
     ) -> FsResult<Vec<ContentSearchResult>> {
         search_local_content(root.to_str().unwrap(), query, options, |_| {}, |_| Ok(()))
+    }
+
+    fn search_local_unified_for_test(
+        root: &Path,
+        query: &str,
+        options: UnifiedSearchOptions,
+    ) -> FsResult<UnifiedSearchResponse> {
+        let prepared = prepare_unified_search(options, query)?;
+        search_local_unified(
+            None,
+            &FileOperationState::default(),
+            &None,
+            &FileSearchIndexState::default(),
+            root.to_str().unwrap(),
+            query,
+            prepared,
+        )
+    }
+
+    #[test]
+    fn content_search_caps_requested_file_bytes() {
+        assert_eq!(bounded_content_search_bytes(0), 1024);
+        assert_eq!(
+            bounded_content_search_bytes(24 * 1024 * 1024),
+            24 * 1024 * 1024
+        );
+        assert_eq!(
+            bounded_content_search_bytes(512 * 1024 * 1024),
+            CONTENT_SEARCH_MAX_FILE_BYTES
+        );
+
+        let prepared = prepare_unified_search(
+            UnifiedSearchOptions {
+                max_content_bytes: 512 * 1024 * 1024,
+                ..UnifiedSearchOptions::default()
+            },
+            "needle",
+        )
+        .expect("prepare capped unified search");
+        assert_eq!(
+            prepared.options.max_content_bytes,
+            CONTENT_SEARCH_MAX_FILE_BYTES
+        );
+    }
+
+    #[test]
+    fn extracted_file_read_checks_cancellation_between_chunks() {
+        let path = std::env::temp_dir().join(format!(
+            "carelo-search-cancellable-read-{}",
+            random_token(10)
+        ));
+        fs::write(
+            &path,
+            vec![b'x'; CONTENT_SEARCH_READ_CHUNK_BYTES.saturating_mul(2)],
+        )
+        .expect("write extracted search fixture");
+        let mut checkpoints = 0_u8;
+        let error = read_extracted_search_file(&path, CONTENT_SEARCH_MAX_FILE_BYTES, &mut |_| {
+            checkpoints = checkpoints.saturating_add(1);
+            if checkpoints == 2 {
+                Err(FsError::new(
+                    "operation_cancelled",
+                    "Search cancelled.",
+                    Some(path.to_string_lossy().into_owned()),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("second chunk should observe cancellation");
+
+        assert_eq!(error.code, "operation_cancelled");
+        assert_eq!(checkpoints, 2);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn extracted_content_scan_checks_cancellation_between_lines() {
+        let root = Path::new("/tmp");
+        let path = root.join("search-cancellable.docx");
+        let mut checkpoints = 0_u8;
+        let error = best_content_file_match(
+            root,
+            &path,
+            "first line\nsecond line\nthird line",
+            "line",
+            &default_content_search_options(),
+            None,
+            &mut |_| {
+                checkpoints = checkpoints.saturating_add(1);
+                if checkpoints == 2 {
+                    Err(FsError::new(
+                        "operation_cancelled",
+                        "Search cancelled.",
+                        Some(path.to_string_lossy().into_owned()),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("second extracted line should observe cancellation");
+
+        assert_eq!(error.code, "operation_cancelled");
+        assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn plain_text_search_enforces_the_runtime_byte_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "carelo-search-bounded-plain-text-{}",
+            random_token(10)
+        ));
+        let path = root.join("growing.txt");
+        fs::create_dir_all(&root).expect("create bounded search root");
+        fs::write(&path, b"needle after the configured limit")
+            .expect("write bounded search fixture");
+
+        let result = search_plain_text_file(
+            &root,
+            &path,
+            "needle",
+            &default_content_search_options(),
+            None,
+            8,
+            &mut |_| Ok(()),
+        )
+        .expect("bounded plain-text search should not fail");
+
+        assert!(result.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plain_text_search_checks_cancellation_between_fixed_size_reads() {
+        let root = std::env::temp_dir().join(format!(
+            "carelo-search-cancellable-plain-text-{}",
+            random_token(10)
+        ));
+        let path = root.join("one-line.txt");
+        let bytes = vec![b'x'; CONTENT_SEARCH_READ_CHUNK_BYTES.saturating_mul(2)];
+        fs::create_dir_all(&root).expect("create cancellable search root");
+        fs::write(&path, &bytes).expect("write one-line search fixture");
+        let mut checkpoints = 0_u8;
+
+        let error = search_plain_text_file(
+            &root,
+            &path,
+            "needle",
+            &default_content_search_options(),
+            None,
+            bytes.len() as u64,
+            &mut |_| {
+                checkpoints = checkpoints.saturating_add(1);
+                if checkpoints == 4 {
+                    Err(FsError::new(
+                        "operation_cancelled",
+                        "Search cancelled.",
+                        Some(path.to_string_lossy().into_owned()),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("the first completed chunk should observe cancellation");
+
+        assert_eq!(error.code, "operation_cancelled");
+        assert_eq!(checkpoints, 4);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plain_text_search_preserves_matches_across_read_boundaries() {
+        let root = std::env::temp_dir().join(format!(
+            "carelo-search-boundary-plain-text-{}",
+            random_token(10)
+        ));
+        let path = root.join("boundary.txt");
+        let mut bytes = vec![b'a'; CONTENT_SEARCH_READ_CHUNK_BYTES.saturating_sub(3)];
+        bytes.extend_from_slice(b"needle tail");
+        fs::create_dir_all(&root).expect("create boundary search root");
+        fs::write(&path, &bytes).expect("write boundary search fixture");
+
+        let result = search_plain_text_file(
+            &root,
+            &path,
+            "needle",
+            &default_content_search_options(),
+            None,
+            bytes.len() as u64,
+            &mut |_| Ok(()),
+        )
+        .expect("boundary search should complete")
+        .expect("boundary-spanning query should match");
+
+        assert_eq!(result.line_number, 1);
+        assert!(result.line_text.contains("needle"));
+        assert_eq!(result.match_end.saturating_sub(result.match_start), 6);
+        let _ = fs::remove_dir_all(root);
     }
 
     fn office_zip_bytes(parts: &[(&str, &str)]) -> Vec<u8> {
@@ -1931,6 +3421,295 @@ mod tests {
         .expect("write trailer");
 
         pdf
+    }
+
+    #[test]
+    fn unified_search_classifies_frontend_file_categories() {
+        let cases = [
+            ("folder", "directory", UnifiedSearchCategory::Directory),
+            ("BACKUP.TAR.GZ", "file", UnifiedSearchCategory::Archive),
+            ("photo.JPEG", "file", UnifiedSearchCategory::Image),
+            ("clip.mp4", "file", UnifiedSearchCategory::Video),
+            ("song.flac", "file", UnifiedSearchCategory::Audio),
+            (".gitignore", "file", UnifiedSearchCategory::Config),
+            ("main.rs", "file", UnifiedSearchCategory::Code),
+            ("budget.xlsx", "file", UnifiedSearchCategory::Spreadsheet),
+            ("pitch.pptx", "file", UnifiedSearchCategory::Presentation),
+            ("manual.pdf", "file", UnifiedSearchCategory::Document),
+            ("payload.bin", "file", UnifiedSearchCategory::File),
+        ];
+
+        for (name, kind, expected) in cases {
+            assert_eq!(
+                unified_search_category(name, kind),
+                expected,
+                "unexpected category for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unified_search_applies_facets_before_result_limit() {
+        let root =
+            std::env::temp_dir().join(format!("carelo-unified-search-filter-{}", random_token(10)));
+        fs::create_dir_all(&root).expect("create search root");
+        fs::write(root.join("needle.rs"), b"rust").expect("write excluded file");
+        fs::write(root.join("zzz-needle.txt"), b"text").expect("write included file");
+
+        let response = search_local_unified_for_test(
+            &root,
+            "needle",
+            UnifiedSearchOptions {
+                limit: 1,
+                match_scope: UnifiedSearchMatchScope::Name,
+                categories: vec![UnifiedSearchCategory::Document],
+                extensions: vec![".TXT".to_string()],
+                min_size_bytes: Some(4),
+                max_size_bytes: Some(4),
+                ..UnifiedSearchOptions::default()
+            },
+        )
+        .expect("run filtered unified search");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].name, "zzz-needle.txt");
+        assert_eq!(
+            response.results[0].category,
+            UnifiedSearchCategory::Document
+        );
+        assert_eq!(response.matched_entries, 1);
+        assert_eq!(response.scanned_entries, 2);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unified_name_search_allows_empty_query_with_category_and_size_facets() {
+        let root = std::env::temp_dir().join(format!(
+            "carelo-unified-search-facet-only-{}",
+            random_token(10)
+        ));
+        fs::create_dir_all(&root).expect("create search root");
+        fs::write(root.join("selected.pdf"), b"12345678").expect("write selected document");
+        fs::write(root.join("wrong-size.pdf"), b"123").expect("write wrong-size document");
+        fs::write(root.join("wrong-category.png"), b"12345678")
+            .expect("write wrong-category image");
+
+        let response = search_local_unified_for_test(
+            &root,
+            "",
+            UnifiedSearchOptions {
+                match_scope: UnifiedSearchMatchScope::Name,
+                categories: vec![UnifiedSearchCategory::Document],
+                min_size_bytes: Some(8),
+                max_size_bytes: Some(8),
+                ..UnifiedSearchOptions::default()
+            },
+        )
+        .expect("run facet-only unified search");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].name, "selected.pdf");
+        assert_eq!(
+            response.results[0].category,
+            UnifiedSearchCategory::Document
+        );
+        assert_eq!(
+            response.results[0].match_source,
+            UnifiedSearchMatchSource::Name
+        );
+        assert!(response.results[0].match_indices.is_empty());
+        assert_eq!(response.matched_entries, 1);
+        assert_eq!(response.scanned_entries, 3);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unified_search_combines_name_and_content_once_with_character_offsets() {
+        let root = std::env::temp_dir().join(format!(
+            "carelo-unified-search-combined-{}",
+            random_token(10)
+        ));
+        fs::create_dir_all(&root).expect("create search root");
+        fs::write(
+            root.join("café-needle.txt"),
+            "préfix needle suffix\nsecond needle\n",
+        )
+        .expect("write combined search file");
+
+        let response = search_local_unified_for_test(
+            &root,
+            "needle",
+            UnifiedSearchOptions {
+                match_scope: UnifiedSearchMatchScope::All,
+                ..UnifiedSearchOptions::default()
+            },
+        )
+        .expect("run combined unified search");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.matched_entries, 1);
+        let result = &response.results[0];
+        assert_eq!(result.match_source, UnifiedSearchMatchSource::Both);
+        assert!(!result.match_indices.is_empty());
+        assert_eq!(result.match_count, Some(2));
+        let line_text = result.line_text.as_deref().expect("content snippet");
+        let needle_byte = line_text.find("needle").expect("needle in snippet");
+        let expected_start = line_text[..needle_byte].chars().count();
+        assert_eq!(result.match_start, Some(expected_start));
+        assert_eq!(
+            result.match_end,
+            Some(expected_start + "needle".chars().count())
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unified_search_rejects_invalid_content_regex_before_scanning() {
+        let root =
+            std::env::temp_dir().join(format!("carelo-unified-search-regex-{}", random_token(10)));
+        fs::create_dir_all(&root).expect("create search root");
+        fs::write(root.join("note.txt"), "text").expect("write search file");
+
+        let error = search_local_unified_for_test(
+            &root,
+            "[",
+            UnifiedSearchOptions {
+                match_scope: UnifiedSearchMatchScope::Content,
+                regex: true,
+                ..UnifiedSearchOptions::default()
+            },
+        )
+        .expect_err("invalid regex should fail");
+
+        assert_eq!(error.code, "invalid_regex");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unified_search_contract_accepts_all_and_compatibility_aliases() {
+        let all: UnifiedSearchOptions = serde_json::from_value(serde_json::json!({
+            "matchScope": "all",
+            "categories": ["directory", "file"]
+        }))
+        .expect("deserialize canonical unified search options");
+        assert_eq!(all.match_scope, UnifiedSearchMatchScope::All);
+        assert_eq!(
+            all.categories,
+            vec![
+                UnifiedSearchCategory::Directory,
+                UnifiedSearchCategory::File
+            ]
+        );
+
+        let aliases: UnifiedSearchOptions = serde_json::from_value(serde_json::json!({
+            "matchScope": "both",
+            "categories": ["folder", "other"]
+        }))
+        .expect("deserialize unified search aliases");
+        assert_eq!(aliases.match_scope, UnifiedSearchMatchScope::All);
+        assert_eq!(
+            aliases.categories,
+            vec![
+                UnifiedSearchCategory::Directory,
+                UnifiedSearchCategory::File
+            ]
+        );
+    }
+
+    #[test]
+    fn unified_search_serializes_the_frontend_result_contract() {
+        let value = serde_json::to_value(UnifiedSearchResponse {
+            results: vec![UnifiedSearchResult {
+                name: "notes.txt".to_string(),
+                path: "/tmp/notes.txt".to_string(),
+                parent_path: "/tmp".to_string(),
+                kind: "file".to_string(),
+                category: UnifiedSearchCategory::Document,
+                size: Some(42),
+                modified_at: Some(7),
+                match_source: UnifiedSearchMatchSource::Both,
+                match_indices: vec![0, 1],
+                line_number: Some(3),
+                line_text: Some("needle".to_string()),
+                match_start: Some(0),
+                match_end: Some(6),
+                match_count: Some(1),
+                score: 99,
+            }],
+            scanned_entries: 4,
+            matched_entries: 1,
+        })
+        .expect("serialize unified response");
+        let result = &value["results"][0];
+
+        assert_eq!(value["scannedEntries"], 4);
+        assert_eq!(value["matchedEntries"], 1);
+        assert_eq!(result["parentPath"], "/tmp");
+        assert_eq!(result["category"], "document");
+        assert_eq!(result["matchSource"], "both");
+        assert_eq!(result["matchIndices"], serde_json::json!([0, 1]));
+        assert_eq!(result["matchStart"], 0);
+        assert!(result.get("nameMatchIndices").is_none());
+    }
+
+    #[test]
+    fn unified_search_rejects_reversed_filter_ranges() {
+        let size_error = prepare_unified_search(
+            UnifiedSearchOptions {
+                min_size_bytes: Some(10),
+                max_size_bytes: Some(9),
+                ..UnifiedSearchOptions::default()
+            },
+            "needle",
+        )
+        .err()
+        .expect("reversed size range should fail");
+        let time_error = prepare_unified_search(
+            UnifiedSearchOptions {
+                modified_after: Some(10),
+                modified_before: Some(9),
+                ..UnifiedSearchOptions::default()
+            },
+            "needle",
+        )
+        .err()
+        .expect("reversed time range should fail");
+
+        assert_eq!(size_error.code, "invalid_search_options");
+        assert_eq!(time_error.code, "invalid_search_options");
+    }
+
+    #[test]
+    fn unified_search_direct_depth_excludes_nested_descendants() {
+        let root =
+            std::env::temp_dir().join(format!("carelo-unified-search-depth-{}", random_token(10)));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested search root");
+        fs::write(root.join("direct-needle.txt"), "direct").expect("write direct file");
+        fs::write(nested.join("deep-needle.txt"), "deep").expect("write nested file");
+
+        let response = search_local_unified_for_test(
+            &root,
+            "needle",
+            UnifiedSearchOptions {
+                match_scope: UnifiedSearchMatchScope::Name,
+                max_depth: Some(1),
+                ..UnifiedSearchOptions::default()
+            },
+        )
+        .expect("run direct-depth unified search");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].name, "direct-needle.txt");
+        assert!(response
+            .results
+            .iter()
+            .all(|result| result.name != "deep-needle.txt"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

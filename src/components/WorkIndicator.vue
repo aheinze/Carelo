@@ -138,14 +138,18 @@ function metricDetail(job) {
 }
 
 function searchProgressDetail(job, metric = '') {
-  if (!['content-search', 'file-search'].includes(job?.operation) || !['running', 'cancelling'].includes(job.status)) {
+  if (!['content-search', 'file-search', 'unified-search'].includes(job?.operation) || !['running', 'cancelling'].includes(job.status)) {
     return '';
   }
 
   const scannedItems = Number(job.processedEntries || 0);
   const matchedItems = Number(job.currentBytes || 0);
   const scannedUnit = job.operation === 'content-search' ? 'file' : 'item';
-  const matchedUnit = job.operation === 'content-search' ? 'file' : 'match';
+  const matchedUnit = job.operation === 'content-search'
+    ? 'file'
+    : job.operation === 'unified-search'
+      ? 'result'
+      : 'match';
 
   if (scannedItems <= 0) {
     return '';

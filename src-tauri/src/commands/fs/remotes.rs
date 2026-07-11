@@ -73,7 +73,28 @@ pub async fn list_remote_volumes(
 pub async fn check_remote_volume(
     id: String,
     remotes: tauri::State<'_, RemoteVolumeState>,
+    store: tauri::State<'_, AppStoreState>,
 ) -> Result<RemoteVolumeInfo, FsError> {
+    // A desktop credential store can be locked while Carelo starts. Reload the
+    // persisted config before an explicit/periodic health check so credentials
+    // become usable as soon as the user unlocks the keyring, without requiring
+    // an application restart. A still-locked keyring simply yields the same
+    // safe, credential-free config that was loaded during startup.
+    if let Some(mut config) = store
+        .list_remote_volume_configs()?
+        .into_iter()
+        .find(|config| config.id == id)
+    {
+        // Do not discard credentials that are already live merely because the
+        // keyring became temporarily unavailable after startup. A later
+        // successful load replaces these values normally.
+        if let Ok(current) = remotes.config(&id) {
+            retain_live_remote_options(&mut config, current);
+        }
+
+        remotes.add(config)?;
+    }
+
     let info = check_registered_remote(&remotes, id.clone()).await?;
     if info.health.status == "connected" {
         release_inactive_remote_after_check(&remotes, &id).await?;
@@ -84,6 +105,12 @@ pub async fn check_remote_volume(
         .into_iter()
         .find(|remote| remote.id == id)
         .unwrap_or(info))
+}
+
+fn retain_live_remote_options(config: &mut RemoteVolumeConfig, current: RemoteVolumeConfig) {
+    for (key, value) in current.options {
+        config.options.entry(key).or_insert(value);
+    }
 }
 
 #[tauri::command]
@@ -206,4 +233,48 @@ fn current_unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn remote_with_options(options: &[(&str, &str)]) -> RemoteVolumeConfig {
+        RemoteVolumeConfig {
+            id: "remote".to_string(),
+            name: "Remote".to_string(),
+            scheme: "webdav".to_string(),
+            root: None,
+            options: options
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn credential_refresh_retains_options_missing_from_a_locked_keyring() {
+        let mut persisted = remote_with_options(&[("endpoint", "https://dav.test")]);
+        let current = remote_with_options(&[("password", "already-loaded")]);
+
+        retain_live_remote_options(&mut persisted, current);
+
+        assert_eq!(
+            persisted.options.get("password").map(String::as_str),
+            Some("already-loaded")
+        );
+    }
+
+    #[test]
+    fn credential_refresh_prefers_newly_loaded_values() {
+        let mut persisted = remote_with_options(&[("password", "newly-loaded")]);
+        let current = remote_with_options(&[("password", "stale")]);
+
+        retain_live_remote_options(&mut persisted, current);
+
+        assert_eq!(
+            persisted.options.get("password").map(String::as_str),
+            Some("newly-loaded")
+        );
+    }
 }

@@ -1498,14 +1498,18 @@ function metricDetail(job) {
 }
 
 function searchProgressDetail(job, metric = '') {
-  if (!['content-search', 'file-search'].includes(job?.operation) || !['running', 'cancelling'].includes(job.status)) {
+  if (!['content-search', 'file-search', 'unified-search'].includes(job?.operation) || !['running', 'cancelling'].includes(job.status)) {
     return '';
   }
 
   const scannedItems = Number(job.processedEntries || 0);
   const matchedItems = Number(job.currentBytes || 0);
   const scannedUnit = job.operation === 'content-search' ? 'file' : 'item';
-  const matchedUnit = job.operation === 'content-search' ? 'file' : 'match';
+  const matchedUnit = job.operation === 'content-search'
+    ? 'file'
+    : job.operation === 'unified-search'
+      ? 'result'
+      : 'match';
 
   if (scannedItems <= 0) {
     return '';
@@ -1603,6 +1607,7 @@ function statusLabel(status) {
   if (status === 'completed') return 'Done';
   if (status === 'failed') return 'Failed';
   if (status === 'cancelled') return 'Cancelled';
+  if (status === 'interrupted') return 'Interrupted';
   if (status === 'cancelling') return 'Cancelling';
   if (status === 'paused') return 'Paused';
   if (status === 'running') return 'Started';
@@ -3111,7 +3116,8 @@ dd {
 
 .inspector-log-entry--cancelled .inspector-log-dot,
 .inspector-log-entry--cancelling .inspector-log-dot,
-.inspector-log-entry--paused .inspector-log-dot {
+.inspector-log-entry--paused .inspector-log-dot,
+.inspector-log-entry--interrupted .inspector-log-dot {
   background: rgb(var(--warning-rgb));
 }
 

@@ -10,6 +10,78 @@ use crate::fs::models::{
 
 const FIND_FIELD_COUNT: usize = 9;
 const STAT_FIELD_COUNT: usize = 10;
+const TRANSACTIONAL_COPY_MOVE_SCRIPT: &str = r#"
+set -eu
+
+mode=$1
+overwrite=$2
+source_path=$3
+destination_path=$4
+destination_parent=$5
+force_stage=${6:-0}
+stage_container=
+
+path_exists() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+cleanup_stage() {
+  if [ -n "$stage_container" ]; then
+    rm -rf -- "$stage_container"
+  fi
+}
+
+commit_path() {
+  staged_path=$1
+
+  if [ "$overwrite" = "1" ]; then
+    mv -f -T -- "$staged_path" "$destination_path"
+    return
+  fi
+
+  mv -n -T -- "$staged_path" "$destination_path"
+  if path_exists "$staged_path"; then
+    echo "CARELO_DESTINATION_EXISTS" >&2
+    return 73
+  fi
+}
+
+if [ -d "$source_path" ] && [ ! -L "$source_path" ]; then
+  resolved_source=$(readlink -f -- "$source_path")
+  resolved_destination=$(readlink -m -- "$destination_path")
+
+  case "$resolved_destination" in
+    "$resolved_source"|"$resolved_source"/*)
+      echo "CARELO_INVALID_TRANSFER_TARGET" >&2
+      exit 74
+      ;;
+  esac
+fi
+
+if [ "$mode" = "move" ] && [ "$force_stage" != "1" ]; then
+  source_device=$(stat -c %d -- "$source_path")
+  destination_device=$(stat -c %d -- "$destination_parent")
+
+  if [ "$source_device" = "$destination_device" ]; then
+    commit_path "$source_path"
+    sync -f "$destination_parent" 2>/dev/null || true
+    exit 0
+  fi
+fi
+
+stage_container=$(mktemp -d "$destination_parent/.carelo-stage.XXXXXX")
+trap cleanup_stage EXIT HUP INT TERM
+staged_path="$stage_container/item"
+
+cp -a -T -- "$source_path" "$staged_path"
+sync -f "$staged_path" 2>/dev/null || true
+commit_path "$staged_path"
+sync -f "$destination_parent" 2>/dev/null || true
+
+if [ "$mode" = "move" ]; then
+  rm -rf -- "$source_path"
+fi
+"#;
 
 pub fn list_directory(password: &str, path: &str) -> FsResult<Vec<FileEntry>> {
     let directory = expand_path(path)?;
@@ -197,19 +269,7 @@ pub fn copy_item(password: &str, from: &str, to: &str, overwrite: bool) -> FsRes
         return Err(destination_type_error(&to));
     }
 
-    run_sudo_command(
-        password,
-        "cp",
-        [
-            OsString::from("-a"),
-            OsString::from("-T"),
-            OsString::from("--"),
-            OsString::from(from.as_os_str()),
-            OsString::from(to.as_os_str()),
-        ],
-        Some(&from),
-    )
-    .map(|_| ())
+    run_transactional_copy_move(password, &from, &to, overwrite, false)
 }
 
 pub fn move_item(password: &str, from: &str, to: &str, overwrite: bool) -> FsResult<()> {
@@ -228,29 +288,54 @@ pub fn move_item(password: &str, from: &str, to: &str, overwrite: bool) -> FsRes
         return Err(destination_type_error(&to));
     }
 
-    match run_sudo_command(
+    run_transactional_copy_move(password, &from, &to, overwrite, true)
+}
+
+fn run_transactional_copy_move(
+    password: &str,
+    from: &Path,
+    to: &Path,
+    overwrite: bool,
+    move_source: bool,
+) -> FsResult<()> {
+    let destination_parent = usable_parent(to);
+    let result = run_sudo_command(
         password,
-        "mv",
+        "sh",
         [
-            OsString::from("-f"),
-            OsString::from("-T"),
-            OsString::from("--"),
+            OsString::from("-c"),
+            OsString::from(TRANSACTIONAL_COPY_MOVE_SCRIPT),
+            OsString::from("carelo-transaction"),
+            OsString::from(if move_source { "move" } else { "copy" }),
+            OsString::from(if overwrite { "1" } else { "0" }),
             OsString::from(from.as_os_str()),
             OsString::from(to.as_os_str()),
+            OsString::from(destination_parent.as_os_str()),
+            OsString::from("0"),
         ],
-        Some(&from),
-    ) {
+        Some(from),
+    );
+
+    match result {
         Ok(_) => Ok(()),
-        Err(error)
-            if error.code == "sudo_failed"
-                && error.message.contains("cannot stat")
-                && error.message.contains("No such file or directory")
-                && to.exists() =>
-        {
-            Ok(())
+        Err(error) if error.message.contains("CARELO_INVALID_TRANSFER_TARGET") => {
+            Err(FsError::new(
+                "invalid_transfer_target",
+                "A folder cannot be copied or moved into itself or one of its descendants.",
+                Some(to.to_string_lossy().into_owned()),
+            ))
+        }
+        Err(error) if error.message.contains("CARELO_DESTINATION_EXISTS") => {
+            Err(destination_exists_error(to))
         }
         Err(error) => Err(error),
     }
+}
+
+fn usable_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn destination_exists_error(path: &Path) -> FsError {
@@ -1183,4 +1268,192 @@ fn sort_entries(entries: &mut [FileEntry]) {
             entry.name.clone(),
         )
     });
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod transactional_tests {
+    use super::TRANSACTIONAL_COPY_MOVE_SCRIPT;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "carelo-sudo-{label}-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn run_script(
+        mode: &str,
+        overwrite: bool,
+        source: &Path,
+        destination: &Path,
+        force_stage: bool,
+    ) -> Output {
+        Command::new("sh")
+            .arg("-c")
+            .arg(TRANSACTIONAL_COPY_MOVE_SCRIPT)
+            .arg("carelo-transaction-test")
+            .arg(mode)
+            .arg(if overwrite { "1" } else { "0" })
+            .arg(source)
+            .arg(destination)
+            .arg(destination.parent().expect("destination parent"))
+            .arg(if force_stage { "1" } else { "0" })
+            .output()
+            .expect("run transactional transfer script")
+    }
+
+    fn stage_entries(parent: &Path) -> Vec<PathBuf> {
+        fs::read_dir(parent)
+            .expect("read test directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".carelo-stage."))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn staged_copy_replaces_only_after_complete_copy_and_cleans_stage() {
+        let directory = TestDirectory::new("copy");
+        let source = directory.path().join("source with spaces.txt");
+        let destination = directory.path().join("destination with spaces.txt");
+        fs::write(&source, b"complete replacement").expect("write source");
+        fs::write(&destination, b"original destination").expect("write destination");
+
+        let output = run_script("copy", true, &source, &destination, true);
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            b"complete replacement"
+        );
+        assert_eq!(
+            fs::read(&source).expect("source remains"),
+            b"complete replacement"
+        );
+        assert!(stage_entries(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn failed_staged_copy_preserves_existing_destination_and_cleans_stage() {
+        let directory = TestDirectory::new("copy-failure");
+        let missing_source = directory.path().join("missing");
+        let destination = directory.path().join("destination");
+        fs::write(&destination, b"keep me").expect("write destination");
+
+        let output = run_script("copy", true, &missing_source, &destination, true);
+
+        assert!(!output.status.success());
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            b"keep me"
+        );
+        assert!(stage_entries(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn no_clobber_commit_preserves_racing_destination() {
+        let directory = TestDirectory::new("no-clobber");
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination");
+        fs::write(&source, b"new").expect("write source");
+        fs::write(&destination, b"existing").expect("write destination");
+
+        let output = run_script("copy", false, &source, &destination, true);
+
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("CARELO_DESTINATION_EXISTS"));
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            b"existing"
+        );
+        assert!(stage_entries(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn staged_move_removes_source_only_after_successful_commit() {
+        let directory = TestDirectory::new("move");
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination");
+        fs::write(&source, b"new").expect("write source");
+        fs::write(&destination, b"old").expect("write destination");
+
+        let output = run_script("move", true, &source, &destination, true);
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).expect("read destination"), b"new");
+        assert!(stage_entries(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn failed_move_commit_keeps_source_and_existing_destination() {
+        let directory = TestDirectory::new("move-commit-failure");
+        let source = directory.path().join("source");
+        let destination = directory.path().join("destination-directory");
+        fs::write(&source, b"source data").expect("write source");
+        fs::create_dir(&destination).expect("create conflicting destination");
+        fs::write(destination.join("child"), b"existing data").expect("write destination child");
+
+        let output = run_script("move", true, &source, &destination, true);
+
+        assert!(!output.status.success());
+        assert_eq!(fs::read(&source).expect("source remains"), b"source data");
+        assert_eq!(
+            fs::read(destination.join("child")).expect("destination remains"),
+            b"existing data"
+        );
+        assert!(stage_entries(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn privileged_script_rejects_directory_descendant_targets() {
+        let directory = TestDirectory::new("descendant-target");
+        let source = directory.path().join("source");
+        let destination = source.join("nested/copy");
+        fs::create_dir(&source).expect("create source directory");
+        fs::write(source.join("file.txt"), b"source data").expect("write source file");
+
+        let output = run_script("copy", false, &source, &destination, true);
+
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("CARELO_INVALID_TRANSFER_TARGET"));
+        assert!(!destination.exists());
+        assert!(stage_entries(directory.path()).is_empty());
+    }
 }

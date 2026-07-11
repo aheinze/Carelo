@@ -32,6 +32,10 @@ import {
   OPEN_REMOTE_STORAGE_EVENT,
   RUN_COMMAND_EVENT,
 } from '../utils/appEvents';
+import {
+  extractFileOperationBatch,
+  listCompletedFileOperationItems,
+} from '../utils/fileOperationResults';
 
 let fileClipboard = null;
 const FILE_CLIPBOARD_STORAGE_KEY = 'carelo.fileClipboard';
@@ -272,7 +276,7 @@ function dispatchSelectedContextMenu(store) {
 function shortcutHelpText() {
   return [
     'F2 Rename, F3 Preview, F4 Edit, F5 Copy, F6 Move, F7 New Folder, F8/Delete Delete',
-    'Ctrl+Shift+P Commands, Ctrl+P Fuzzy Search, Ctrl+Shift+F Content Search, Ctrl+C Copy, Ctrl+X Cut, Ctrl+V Paste',
+    'Ctrl+Shift+P Commands, Ctrl+P Search Names, Ctrl+Shift+F Search Content, Ctrl+C Copy, Ctrl+X Cut, Ctrl+V Paste',
     'Tab Switch Pane, Alt+Left/Right History, Ctrl+\\ Root, Ctrl+PageUp Parent',
     'Insert/Space Toggle Selection, Ctrl+A/Num+ Select All, Num- Clear, Num* Invert',
     'Ctrl+F1 Grid, Ctrl+F2 List, Ctrl+F3 Name, Ctrl+F4 Extension, Ctrl+F5 Date, Ctrl+F6 Size, Ctrl+F7 Unsorted',
@@ -377,7 +381,7 @@ export function useKeyboardShortcuts() {
   async function refreshDirectories(paths, paneIds = null) {
     const uniquePaths = [...new Set(paths.filter(Boolean))];
 
-    await Promise.all(uniquePaths.map((path) => store.reloadDirectoryInPanes(path, paneIds)));
+    await store.reloadDirectoriesInPanes(uniquePaths, paneIds);
   }
 
   async function reloadTransferPanes(sourcePaneId, targetPaneId, paths = []) {
@@ -587,14 +591,28 @@ export function useKeyboardShortcuts() {
     }
 
     const touchedDirectories = parentDirectoriesForEntries(entries);
-    await deleteItems(entries.map((entry) => entry.path), store.appSettings.deleteMode);
+    let batch = null;
+    let deleteError = null;
+
+    try {
+      batch = await deleteItems(entries.map((entry) => entry.path), store.appSettings.deleteMode);
+    } catch (error) {
+      batch = extractFileOperationBatch(error);
+      deleteError = error;
+    }
+
+    const completedPaths = listCompletedFileOperationItems(batch).map((item) => item.from);
     store.clearSelection(paneId);
     await refreshDirectories(touchedDirectories);
     store.recordTrashDelete({
-      paths: entries.map((entry) => entry.path),
+      paths: completedPaths,
       directories: touchedDirectories,
-      label: entries.length === 1 ? `Deleted "${entries[0].name}"` : `Deleted ${entries.length} items`,
+      label: completedPaths.length === 1 ? 'Deleted 1 item' : `Deleted ${completedPaths.length} items`,
     });
+
+    if (deleteError) {
+      throw deleteError;
+    }
   }
 
   async function openFocusedExternally() {

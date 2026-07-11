@@ -1,7 +1,8 @@
 use crate::fs::models::{FsError, FsResult};
 use crate::store::{
     window_dimensions as build_window_dimensions, AppStoreState, FavoriteEntry, FavoriteGroupEntry,
-    FavoriteInput, RecentLocationEntry, WindowDimensions,
+    FavoriteInput, OperationJournalEntry, OperationJournalInput, RecentLocationEntry,
+    WindowDimensions,
 };
 use serde_json::Value;
 
@@ -82,6 +83,36 @@ pub fn get_app_settings(store: tauri::State<'_, AppStoreState>) -> FsResult<Opti
 #[tauri::command]
 pub fn save_app_settings(settings: Value, store: tauri::State<'_, AppStoreState>) -> FsResult<()> {
     store.save_app_settings(settings)
+}
+
+#[tauri::command]
+pub fn list_operation_journal_entries(
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<Vec<OperationJournalEntry>> {
+    store.list_operation_journal_entries()
+}
+
+#[tauri::command]
+pub fn upsert_operation_journal_entry(
+    entry: OperationJournalInput,
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<OperationJournalEntry> {
+    store.upsert_operation_journal_entry(entry)
+}
+
+#[tauri::command]
+pub fn remove_operation_journal_entry(
+    id: String,
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<bool> {
+    store.remove_operation_journal_entry(&id)
+}
+
+#[tauri::command]
+pub fn clear_finished_operation_journal_entries(
+    store: tauri::State<'_, AppStoreState>,
+) -> FsResult<u64> {
+    store.clear_finished_operation_journal_entries()
 }
 
 #[derive(serde::Deserialize)]

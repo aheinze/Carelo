@@ -7,6 +7,7 @@ import {
   cancelFileOperation,
   canUseLocalFileAssets,
   checkRemoteVolume,
+  clearFinishedOperationJournalEntries,
   clearRecentLocations as clearStoredRecentLocations,
   clearRemotePreviewCache,
   copyItems,
@@ -18,6 +19,7 @@ import {
   listFavoriteGroups as listStoredFavoriteGroups,
   listFavorites as listStoredFavorites,
   listFileTags,
+  listOperationJournalEntries,
   listRecentLocations as listStoredRecentLocations,
   listVolumes,
   mountVolume,
@@ -36,6 +38,7 @@ import {
   setActiveRemoteVolumes,
   setFileTags,
   unlockVolume,
+  upsertOperationJournalEntry,
   watchActiveDirectories,
 } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
@@ -54,6 +57,20 @@ import {
   normalizeColorScheme,
 } from '../utils/colorSchemes';
 import { normalizeDateFormat } from '../utils/dateFormat';
+import { parentLocalPath } from '../utils/localPaths';
+import {
+  extractFileOperationBatch,
+  listCompletedFileOperationItems,
+  splitFileOperationHistoryEntry,
+} from '../utils/fileOperationResults';
+import {
+  isTerminalOperationJournalStatus,
+  nextOperationJournalTimestamp,
+  operationJournalUpdateMode,
+  restoreOperationLogFromJournal,
+  serializeOperationLogForJournal,
+  serializeQueueJobForJournal,
+} from '../utils/operationJournal';
 
 let nextTabId = 1;
 let nextTabActivityId = 1;
@@ -88,6 +105,7 @@ const DIRECTORY_RELOAD_BATCH_DELAY_MS = 120;
 const INACTIVE_TAB_ENTRY_CACHE_LIMIT = 2;
 const LARGE_TAB_ENTRY_CACHE_ENTRY_LIMIT = 1500;
 const OPERATION_LOG_LIMIT = 120;
+const OPERATION_JOURNAL_PROGRESS_DEBOUNCE_MS = 450;
 const HISTORY_LIMIT = 50;
 const WORKSPACE_LIMIT = 32;
 const WORKSPACE_TAB_LIMIT = 64;
@@ -468,12 +486,7 @@ function parentPathFor(path) {
       : `remote://${volumeId}/${objectPath.slice(0, parentIndex)}`;
   }
 
-  if (!cleanPath.includes('/')) {
-    return '~';
-  }
-
-  const parent = cleanPath.slice(0, cleanPath.lastIndexOf('/'));
-  return parent || '/';
+  return parentLocalPath(cleanPath);
 }
 
 function fileNameForPath(path) {
@@ -1136,7 +1149,8 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   );
   const settingsVisible = ref(false);
   const fileSearchVisible = ref(false);
-  const fileSearchMode = ref('files');
+  const fileSearchMode = ref('search');
+  const fileSearchMatchScope = ref('name');
   const searchQuery = ref('');
   const queue = ref([]);
   const operationLog = ref([]);
@@ -1163,6 +1177,10 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   let nextDirectoryRefreshId = 1;
   let nextFileDragId = 1;
   let claimedFileDragDropId = null;
+  const operationJournalUpdatedAt = new Map();
+  const operationJournalProgressTimers = new Map();
+  const operationJournalWrites = new Set();
+  let operationJournalClearPromise = null;
 
   const sidebarSections = computed(() => {
     const sections = [
@@ -1506,6 +1524,119 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     return true;
   }
 
+  function cancelOperationJournalProgressWrite(id) {
+    const timer = operationJournalProgressTimers.get(id);
+
+    if (timer !== undefined) {
+      globalThis.clearTimeout(timer);
+      operationJournalProgressTimers.delete(id);
+    }
+  }
+
+  function writeOperationJournalEntry(entry) {
+    if (!entry || !canUseLocalFileAssets()) {
+      return null;
+    }
+
+    // Terminal records created after Clear starts belong to the new log. Queue
+    // them behind the clear fence so the broad backend cleanup cannot erase a
+    // newly completed operation that is already visible in the UI.
+    const startWrite = operationJournalClearPromise
+      && isTerminalOperationJournalStatus(entry.status)
+      ? operationJournalClearPromise.then(() => upsertOperationJournalEntry(entry))
+      : upsertOperationJournalEntry(entry);
+    const write = startWrite
+      .catch(() => null)
+      .finally(() => operationJournalWrites.delete(write));
+    operationJournalWrites.add(write);
+    return write;
+  }
+
+  function nextJournalTimestamp(id, createdAt = Date.now()) {
+    const timestamp = nextOperationJournalTimestamp(
+      operationJournalUpdatedAt.get(id),
+      Math.max(Date.now(), Number(createdAt || 0)),
+    );
+    operationJournalUpdatedAt.set(id, timestamp);
+    return timestamp;
+  }
+
+  function persistQueueJob(job, mode = 'state') {
+    if (!job?.id || !canUseLocalFileAssets()) {
+      return;
+    }
+
+    const entry = serializeQueueJobForJournal(
+      job,
+      nextJournalTimestamp(job.id, job.createdAt),
+    );
+    operationJournalUpdatedAt.set(job.id, entry.updatedAt);
+
+    if (mode !== 'progress') {
+      // A state or terminal write supersedes any older, delayed progress
+      // snapshot. The backend timestamp check is a second line of defence for
+      // a write that was already in flight.
+      cancelOperationJournalProgressWrite(job.id);
+      writeOperationJournalEntry(entry);
+      return;
+    }
+
+    cancelOperationJournalProgressWrite(job.id);
+    operationJournalProgressTimers.set(job.id, globalThis.setTimeout(() => {
+      operationJournalProgressTimers.delete(job.id);
+      writeOperationJournalEntry(entry);
+    }, OPERATION_JOURNAL_PROGRESS_DEBOUNCE_MS));
+  }
+
+  function persistOperationLogEntry(entry) {
+    if (!entry?.id || entry.jobId || !canUseLocalFileAssets()) {
+      return;
+    }
+
+    const journalEntry = serializeOperationLogForJournal(
+      entry,
+      nextJournalTimestamp(entry.id, entry.createdAt),
+    );
+
+    if (!journalEntry) {
+      return;
+    }
+
+    operationJournalUpdatedAt.set(entry.id, journalEntry.updatedAt);
+    writeOperationJournalEntry(journalEntry);
+  }
+
+  async function loadOperationJournal() {
+    if (!canUseLocalFileAssets()) {
+      return;
+    }
+
+    try {
+      const entries = await listOperationJournalEntries();
+
+      for (const entry of Array.isArray(entries) ? entries : []) {
+        const id = String(entry?.id || '');
+        const updatedAt = Number(entry?.updatedAt);
+
+        if (id && Number.isFinite(updatedAt)) {
+          operationJournalUpdatedAt.set(
+            id,
+            Math.max(operationJournalUpdatedAt.get(id) || 0, updatedAt),
+          );
+        }
+      }
+
+      operationLog.value = restoreOperationLogFromJournal(
+        entries,
+        operationLog.value,
+        OPERATION_LOG_LIMIT,
+      );
+    } catch {
+      // The journal is recovery metadata. A read failure must never prevent
+      // Carelo from starting or using the filesystem.
+    }
+  }
+
   async function initialize() {
     if (initializePromise) {
       return initializePromise;
@@ -1514,6 +1645,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     initializePromise = (async () => {
       await loadAppSettings();
       await loadHomeDirectory();
+      await loadOperationJournal();
       await Promise.all([
         initializeOperationProgressListener(),
         initializeRemoteEditSyncListener(),
@@ -2644,14 +2776,18 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     }
   }
 
-  function requestColumnDirectoryRefresh(paneId, path) {
+  function requestColumnDirectoryRefresh(paneId, paths) {
     if (!panes.value[paneId]) {
       return;
     }
 
-    const nextPath = String(path || '').trim();
+    const nextPaths = [...new Set(
+      (Array.isArray(paths) ? paths : [paths])
+        .map((path) => String(path || '').trim())
+        .filter(Boolean),
+    )];
 
-    if (!nextPath) {
+    if (nextPaths.length === 0) {
       return;
     }
 
@@ -2659,13 +2795,23 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       ...columnRefreshRequests.value,
       [paneId]: {
         id: `refresh-${Date.now()}-${nextDirectoryRefreshId++}`,
-        path: nextPath,
+        paths: nextPaths,
       },
     };
   }
 
-  async function reloadDirectoryInPanes(path, paneIds = null) {
-    const normalizedPath = directoryReloadComparablePath(path);
+  async function reloadDirectoriesInPanes(paths, paneIds = null) {
+    const reloadPaths = [...new Set(
+      (Array.isArray(paths) ? paths : [paths])
+        .map((path) => String(path || '').trim())
+        .filter(Boolean),
+    )];
+
+    if (reloadPaths.length === 0) {
+      return;
+    }
+
+    const normalizedPaths = new Set(reloadPaths.map(directoryReloadComparablePath));
     const targetPaneIds = Array.isArray(paneIds) && paneIds.length > 0
       ? [...new Set(paneIds.filter((paneId) => panes.value[paneId]))]
       : Object.keys(panes.value);
@@ -2673,16 +2819,20 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
     for (const paneId of targetPaneIds) {
       const pane = panes.value[paneId];
-      requestColumnDirectoryRefresh(paneId, path);
+      requestColumnDirectoryRefresh(paneId, reloadPaths);
 
       for (const tab of pane.tabs) {
-        if (directoryReloadComparablePath(tab.currentPath) === normalizedPath) {
+        if (normalizedPaths.has(directoryReloadComparablePath(tab.currentPath))) {
           reloads.push(loadPane(paneId, tab.id));
         }
       }
     }
 
     await Promise.all(reloads);
+  }
+
+  async function reloadDirectoryInPanes(path, paneIds = null) {
+    await reloadDirectoriesInPanes([path], paneIds);
   }
 
   function scheduleDirectoryReloadInPanes(path) {
@@ -2703,32 +2853,51 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       scheduledDirectoryReloadPaths = new Set();
       scheduledDirectoryReloadTimer = null;
 
-      await Promise.all(paths.map((reloadPath) => reloadDirectoryInPanes(reloadPath).catch(() => {})));
+      await reloadDirectoriesInPanes(paths).catch(() => {});
     }, DIRECTORY_RELOAD_BATCH_DELAY_MS);
   }
 
   function addOperationLog(entry = {}) {
     const id = `log-${Date.now()}-${nextOperationLogId++}`;
+    const logEntry = {
+      id,
+      jobId: entry.jobId || null,
+      operation: entry.operation || 'operation',
+      label: entry.label || 'File operation',
+      detail: entry.detail || '',
+      status: entry.status || 'info',
+      path: entry.path || '',
+      createdAt: entry.createdAt || Date.now(),
+    };
 
     operationLog.value = [
-      {
-        id,
-        jobId: entry.jobId || null,
-        operation: entry.operation || 'operation',
-        label: entry.label || 'File operation',
-        detail: entry.detail || '',
-        status: entry.status || 'info',
-        path: entry.path || '',
-        createdAt: entry.createdAt || Date.now(),
-      },
+      logEntry,
       ...operationLog.value,
     ].slice(0, OPERATION_LOG_LIMIT);
+    persistOperationLogEntry(logEntry);
 
     return id;
   }
 
   function clearOperationLog() {
     operationLog.value = [];
+
+    if (!canUseLocalFileAssets()) {
+      return;
+    }
+
+    // Wait for terminal writes that were already dispatched so Clear cannot
+    // race them and leave an entry to reappear on the next launch.
+    const pendingWrites = [...operationJournalWrites];
+    const clearPromise = Promise.allSettled(pendingWrites)
+      .then(() => clearFinishedOperationJournalEntries())
+      .catch(() => {});
+    operationJournalClearPromise = clearPromise;
+    void clearPromise.finally(() => {
+      if (operationJournalClearPromise === clearPromise) {
+        operationJournalClearPromise = null;
+      }
+    });
   }
 
   function recordQueueJob(id, status, detail = '') {
@@ -2795,6 +2964,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       detail: job.detail || 'Started',
       status: job.status,
     });
+    persistQueueJob(job, 'state');
 
     return id;
   }
@@ -2804,10 +2974,14 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       return;
     }
 
+    let previousJournalJob = null;
+    let nextJournalJob = null;
     queue.value = queue.value.map((job) => {
       if (job.id !== id) {
         return job;
       }
+
+      previousJournalJob = job;
 
       const previousProcessedBytes = Number(job.processedBytes || 0);
       const previousProgressAt = Number(job.lastProgressAt || job.createdAt || Date.now());
@@ -2859,8 +3033,16 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         nextJob.etaSeconds = null;
       }
 
+      nextJournalJob = nextJob;
       return nextJob;
     });
+
+    if (nextJournalJob) {
+      persistQueueJob(
+        nextJournalJob,
+        operationJournalUpdateMode(previousJournalJob, nextJournalJob),
+      );
+    }
   }
 
   function updateQueueJobFromProgress(progress = {}) {
@@ -3052,14 +3234,19 @@ export const useFileManagerStore = defineStore('file-manager', () => {
 
   // Only Trash deletes are reversible (undo restores from Trash); permanent
   // deletes are never recorded.
-  function recordTrashDelete({ paths = [], directories = [], label = 'Deleted items' } = {}) {
+  function recordTrashDelete({
+    paths = [],
+    directories = [],
+    label = 'Deleted items',
+    deleteMode = appSettings.value.deleteMode,
+  } = {}) {
     // Only local Trash deletes are restorable — remote deletes bypass the
     // Trash and archives are read-only.
     const targets = (Array.isArray(paths) ? paths : []).filter(
       (path) => path && !String(path).startsWith('remote://') && !isArchivePath(path),
     );
 
-    if (appSettings.value.deleteMode !== 'trash' || targets.length === 0) {
+    if (deleteMode !== 'trash' || targets.length === 0) {
       return;
     }
 
@@ -3069,6 +3256,14 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   function clearHistory() {
     undoStack.value = [];
     redoStack.value = [];
+  }
+
+  function splitHistoryEntryForBatch(entry, batch) {
+    return splitFileOperationHistoryEntry(
+      entry,
+      batch,
+      () => `hist-${Date.now()}-${nextHistoryId++}`,
+    );
   }
 
   // Concurrency cap to pass to copy/move commands: 1 when the user turned
@@ -3093,18 +3288,19 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     });
 
     try {
-      await run(jobId);
-      await Promise.all(
-        [...new Set(directories.filter(Boolean))].map((path) =>
-          reloadDirectoryInPanes(path).catch(() => {}),
-        ),
-      );
+      const result = await run(jobId);
+      await reloadDirectoriesInPanes(directories).catch(() => {});
       completeQueueJob(jobId, 'Done');
-      return true;
+      return { applied: true, batch: extractFileOperationBatch(result) };
     } catch (error) {
+      const batch = extractFileOperationBatch(error);
+      // A rejected batch can still contain completed top-level items. Refresh
+      // before splitting history so those partial effects are visible.
+      await reloadDirectoriesInPanes(directories).catch(() => {});
+
       if (error?.code === 'operation_cancelled') {
         cancelQueueJobDone(jobId);
-        return false;
+        return { applied: false, batch };
       }
 
       failQueueJob(jobId, error?.message || `${label} failed.`);
@@ -3129,9 +3325,28 @@ export const useFileManagerStore = defineStore('file-manager', () => {
         label: `${verb}: ${entry.label}`,
         directories: entry.directories,
         run: async (jobId) => {
-          await moveItems(items, jobId, transferMaxConcurrency());
-          // Keep color tags attached as files move back/forward.
-          await relocateFileTags(items.map((item) => ({ from: item.from, to: item.to }))).catch(() => {});
+          let batch = null;
+          let moveError = null;
+
+          try {
+            batch = await moveItems(items, jobId, transferMaxConcurrency());
+          } catch (error) {
+            batch = extractFileOperationBatch(error);
+            moveError = error;
+          }
+
+          const completedMoves = listCompletedFileOperationItems(batch)
+            .map((result) => items[result.index])
+            .filter(Boolean);
+          await relocateFileTags(
+            completedMoves.map((item) => ({ from: item.from, to: item.to })),
+          ).catch(() => {});
+
+          if (moveError) {
+            throw moveError;
+          }
+
+          return batch;
         },
       });
     }
@@ -3193,7 +3408,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
       });
     }
 
-    return false;
+    return { applied: false, batch: null };
   }
 
   async function undoLastOperation() {
@@ -3206,16 +3421,28 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     undoStack.value = undoStack.value.slice(0, -1);
 
     try {
-      const applied = await applyHistoryEntry(entry, 'undo');
+      const result = await applyHistoryEntry(entry, 'undo');
+      const split = result?.batch
+        ? splitHistoryEntryForBatch(entry, result.batch)
+        : result?.applied
+          ? { completed: entry, pending: null }
+          : { completed: null, pending: entry };
 
-      if (applied) {
-        redoStack.value = [...redoStack.value, entry].slice(-HISTORY_LIMIT);
-      } else {
-        undoStack.value = [...undoStack.value, entry];
+      if (split.completed) {
+        redoStack.value = [...redoStack.value, split.completed].slice(-HISTORY_LIMIT);
       }
-    } catch {
-      // The queue job surfaces the failure; restore the entry so it can retry.
-      undoStack.value = [...undoStack.value, entry];
+      if (split.pending) {
+        undoStack.value = [...undoStack.value, split.pending].slice(-HISTORY_LIMIT);
+      }
+    } catch (error) {
+      const split = splitHistoryEntryForBatch(entry, extractFileOperationBatch(error));
+
+      if (split.completed) {
+        redoStack.value = [...redoStack.value, split.completed].slice(-HISTORY_LIMIT);
+      }
+      if (split.pending) {
+        undoStack.value = [...undoStack.value, split.pending].slice(-HISTORY_LIMIT);
+      }
     } finally {
       historyBusy = false;
     }
@@ -3231,15 +3458,28 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     redoStack.value = redoStack.value.slice(0, -1);
 
     try {
-      const applied = await applyHistoryEntry(entry, 'redo');
+      const result = await applyHistoryEntry(entry, 'redo');
+      const split = result?.batch
+        ? splitHistoryEntryForBatch(entry, result.batch)
+        : result?.applied
+          ? { completed: entry, pending: null }
+          : { completed: null, pending: entry };
 
-      if (applied) {
-        undoStack.value = [...undoStack.value, entry].slice(-HISTORY_LIMIT);
-      } else {
-        redoStack.value = [...redoStack.value, entry];
+      if (split.completed) {
+        undoStack.value = [...undoStack.value, split.completed].slice(-HISTORY_LIMIT);
       }
-    } catch {
-      redoStack.value = [...redoStack.value, entry];
+      if (split.pending) {
+        redoStack.value = [...redoStack.value, split.pending].slice(-HISTORY_LIMIT);
+      }
+    } catch (error) {
+      const split = splitHistoryEntryForBatch(entry, extractFileOperationBatch(error));
+
+      if (split.completed) {
+        undoStack.value = [...undoStack.value, split.completed].slice(-HISTORY_LIMIT);
+      }
+      if (split.pending) {
+        redoStack.value = [...redoStack.value, split.pending].slice(-HISTORY_LIMIT);
+      }
     } finally {
       historyBusy = false;
     }
@@ -3727,6 +3967,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     if (tab) {
       tab.selectedPaths = [];
       tab.selectionAnchorIndex = tab.selectedIndex;
+      clearColumnPreviewEntry(paneId);
+      clearColumnSelectionState(paneId);
+      columnSelectionResetKeys.value = {
+        ...columnSelectionResetKeys.value,
+        [paneId]: (columnSelectionResetKeys.value[paneId] || 0) + 1,
+      };
     }
   }
 
@@ -4252,8 +4498,12 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     settingsVisible.value = !settingsVisible.value;
   }
 
-  function openFileSearch(mode = 'files') {
-    fileSearchMode.value = ['commands', 'content', 'files'].includes(mode) ? mode : 'files';
+  function openFileSearch(mode = 'search', matchScope = null) {
+    const legacyScope = mode === 'content' ? 'content' : mode === 'files' ? 'name' : null;
+    fileSearchMode.value = mode === 'commands' ? 'commands' : 'search';
+    fileSearchMatchScope.value = ['all', 'name', 'content'].includes(matchScope)
+      ? matchScope
+      : legacyScope || (mode === 'search' ? 'name' : fileSearchMatchScope.value || 'name');
     fileSearchVisible.value = true;
   }
 
@@ -4262,7 +4512,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
   }
 
   function openContentSearch() {
-    openFileSearch('content');
+    openFileSearch('search', 'content');
   }
 
   function closeFileSearch() {
@@ -4371,6 +4621,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     settingsVisible,
     fileSearchVisible,
     fileSearchMode,
+    fileSearchMatchScope,
     appSettings,
     transferMaxConcurrency,
     searchQuery,
@@ -4410,6 +4661,7 @@ export const useFileManagerStore = defineStore('file-manager', () => {
     setColumnSelectionState,
     setColumnTargetDirectory,
     loadPane,
+    reloadDirectoriesInPanes,
     reloadDirectoryInPanes,
     requestColumnDirectoryRefresh,
     startQueueJob,

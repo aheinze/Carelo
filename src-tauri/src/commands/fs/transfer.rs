@@ -18,11 +18,223 @@ enum RemoteTransfer {
     },
 }
 
+#[derive(Clone)]
+struct IndexedTransferItem {
+    index: usize,
+    item: TransferItem,
+}
+
 struct RemoteTask {
+    index: usize,
     transfer: RemoteTransfer,
     overwrite: bool,
+    from: String,
+    to: String,
     /// Path shown in progress events as the "current" item.
     label: String,
+}
+
+fn operation_error_with_batch(
+    batch: FileOperationBatchResult,
+) -> Result<FileOperationBatchResult, FsError> {
+    if batch.is_complete() {
+        return Ok(batch);
+    }
+
+    if batch.cancelled {
+        let path = batch
+            .items
+            .iter()
+            .find(|item| item.status == FileOperationItemStatus::Cancelled)
+            .and_then(|item| item.errors.first().and_then(|error| error.path.clone()));
+        return Err(FsError::new(
+            "operation_cancelled",
+            "The file operation was cancelled.",
+            path,
+        )
+        .with_batch(batch));
+    }
+
+    let problem_items = batch
+        .items
+        .iter()
+        .filter(|item| item.status != FileOperationItemStatus::Completed)
+        .collect::<Vec<_>>();
+    let errors = problem_items
+        .iter()
+        .flat_map(|item| item.errors.iter())
+        .collect::<Vec<_>>();
+
+    let error = if errors.len() == 1 {
+        let error = errors[0];
+        FsError::new(
+            error.code.clone(),
+            error.message.clone(),
+            error.path.clone(),
+        )
+    } else {
+        let first = errors.first();
+        FsError::new(
+            "operation_partial_failure",
+            if let Some(first) = first {
+                format!(
+                    "{} items could not be completed. First error: {}",
+                    problem_items.len(),
+                    first.message
+                )
+            } else {
+                format!("{} items could not be completed.", problem_items.len())
+            },
+            first.and_then(|error| error.path.clone()),
+        )
+    };
+
+    Err(error.with_batch(batch))
+}
+
+fn finish_indexed_batch(
+    templates: &[(String, Option<String>)],
+    outcomes: Vec<FileOperationItemResult>,
+    cancelled: bool,
+) -> FileOperationBatchResult {
+    let mut by_index = outcomes
+        .into_iter()
+        .map(|outcome| (outcome.index, outcome))
+        .collect::<HashMap<_, _>>();
+    let items = templates
+        .iter()
+        .enumerate()
+        .map(|(index, (from, to))| {
+            by_index.remove(&index).unwrap_or_else(|| {
+                FileOperationItemResult::not_started(index, from.clone(), to.clone())
+            })
+        })
+        .collect();
+
+    FileOperationBatchResult::new(items, cancelled)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LocalPathSnapshot {
+    kind: u8,
+    len: u64,
+    modified_nanos: Option<u128>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+fn local_path_snapshot(path: &str) -> Option<LocalPathSnapshot> {
+    let path = expand_local_path(path).ok()?;
+    let metadata = fs::symlink_metadata(path).ok()?;
+    let file_type = metadata.file_type();
+
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    Some(LocalPathSnapshot {
+        kind: if file_type.is_symlink() {
+            2
+        } else if metadata.is_dir() {
+            1
+        } else {
+            0
+        },
+        len: metadata.len(),
+        modified_nanos: metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos()),
+        #[cfg(unix)]
+        device: metadata.dev(),
+        #[cfg(unix)]
+        inode: metadata.ino(),
+    })
+}
+
+fn local_path_exists_for_result(path: &str) -> bool {
+    local_path_snapshot(path).is_some()
+}
+
+fn local_path_is_directory_for_result(path: &str) -> bool {
+    local_path_snapshot(path)
+        .map(|snapshot| snapshot.kind == 1)
+        .unwrap_or(false)
+}
+
+fn copy_error_affected(
+    item: &TransferItem,
+    _error: &FsError,
+    _source_before: &Option<LocalPathSnapshot>,
+    destination_before: &Option<LocalPathSnapshot>,
+) -> bool {
+    local_path_snapshot(&item.to) != *destination_before
+}
+
+fn move_error_affected(
+    item: &TransferItem,
+    _error: &FsError,
+    source_before: &Option<LocalPathSnapshot>,
+    destination_before: &Option<LocalPathSnapshot>,
+) -> bool {
+    local_path_snapshot(&item.from) != *source_before
+        || local_path_snapshot(&item.to) != *destination_before
+}
+
+fn remote_delete_error_affected(error: &FsError) -> bool {
+    // delete_remote_item stats the top-level path before issuing any delete.
+    // Every later provider failure may represent a partially removed tree.
+    error.code != "remote_stat_failed"
+}
+
+fn remote_task_error_affected(
+    task: &RemoteTask,
+    error: &FsError,
+    is_move: bool,
+    local_source_before: &Option<LocalPathSnapshot>,
+    local_destination_before: &Option<LocalPathSnapshot>,
+) -> bool {
+    match &task.transfer {
+        RemoteTransfer::RemoteToLocal { to, .. } => {
+            let destination_after = local_path_snapshot(&to.to_string_lossy());
+
+            // A move can finish the local copy and then fail while deleting the
+            // remote source. The local snapshot normally catches that commit;
+            // keep the provider's delete failure conservative on every OS.
+            if is_move && error.code == "remote_delete_failed" {
+                return true;
+            }
+
+            // Absence before and after proves that the local side was cleaned.
+            if local_destination_before.is_none() && destination_after.is_none() {
+                return false;
+            }
+
+            // These failures occur before a top-level local destination write.
+            // Requiring an unchanged snapshot avoids treating the same codes
+            // from a later directory traversal as clean.
+            if matches!(
+                error.code.as_str(),
+                "remote_stat_failed" | "destination_exists" | "destination_type_conflict"
+            ) && destination_after == *local_destination_before
+            {
+                return false;
+            }
+
+            true
+        }
+        RemoteTransfer::LocalToRemote { .. } if local_source_before.is_none() => {
+            // Source metadata is read before an upload creates anything, so a
+            // source that was already absent is a clean preflight failure.
+            false
+        }
+        // Remote-to-remote helpers can reuse the same error codes during a
+        // recursive traversal, after earlier descendants were copied. Without
+        // a trustworthy provider snapshot, affected=true is the safe result.
+        _ => true,
+    }
 }
 
 async fn run_one_remote_task(
@@ -76,7 +288,7 @@ async fn run_remote_tasks<P>(
     processed: &std::sync::atomic::AtomicU64,
     total: u64,
     on_progress: P,
-) -> Result<(), FsError>
+) -> (Vec<FileOperationItemResult>, bool)
 where
     P: Fn(u64, u64, String),
 {
@@ -88,60 +300,322 @@ where
 
     // Each future owns its task (rather than borrowing an iterator item), which
     // keeps the command's boxed future `Send` without higher-ranked lifetimes.
-    let results: Vec<Result<(), FsError>> = futures::stream::iter(tasks)
+    let results: Vec<(FileOperationItemResult, bool)> = futures::stream::iter(tasks)
         .map(|task| async move {
             // Cancellation is checked (non-blocking) before each transfer starts.
             if op_state.cancel_requested(job_id) {
-                return Err(FsError::new(
-                    "operation_cancelled",
-                    "The file operation was cancelled.",
-                    None,
-                ));
+                return (
+                    FileOperationItemResult::not_started(task.index, task.from, Some(task.to)),
+                    true,
+                );
             }
 
-            run_one_remote_task(remotes, is_move, &task).await?;
+            let local_source_before = match &task.transfer {
+                RemoteTransfer::LocalToRemote { from, .. } => {
+                    local_path_snapshot(&from.to_string_lossy())
+                }
+                _ => None,
+            };
+            let local_destination_before = match &task.transfer {
+                RemoteTransfer::RemoteToLocal { to, .. } => {
+                    local_path_snapshot(&to.to_string_lossy())
+                }
+                _ => None,
+            };
 
-            let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
-            on_progress(done, total, task.label);
-            Ok(())
+            match run_one_remote_task(remotes, is_move, &task).await {
+                Ok(()) => {
+                    let done = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                    on_progress(done, total, task.label);
+                    (
+                        FileOperationItemResult::completed(task.index, task.from, Some(task.to)),
+                        false,
+                    )
+                }
+                Err(error) if error.code == "operation_cancelled" => {
+                    let affected = remote_task_error_affected(
+                        &task,
+                        &error,
+                        is_move,
+                        &local_source_before,
+                        &local_destination_before,
+                    );
+                    (
+                        FileOperationItemResult::cancelled(
+                            task.index,
+                            task.from,
+                            Some(task.to),
+                            error,
+                            affected,
+                        ),
+                        true,
+                    )
+                }
+                // Only errors known to happen during preflight are cleanly
+                // retryable. Provider write/rename failures stay conservative.
+                Err(error) => {
+                    let affected = remote_task_error_affected(
+                        &task,
+                        &error,
+                        is_move,
+                        &local_source_before,
+                        &local_destination_before,
+                    );
+                    (
+                        FileOperationItemResult::failed(
+                            task.index,
+                            task.from,
+                            Some(task.to),
+                            error,
+                            affected,
+                        ),
+                        false,
+                    )
+                }
+            }
         })
         .buffer_unordered(concurrency)
         .collect()
         .await;
 
-    let mut failures = Vec::new();
-
-    for result in results {
-        if let Err(error) = result {
-            if error.code == "operation_cancelled" {
-                return Err(error);
-            }
-
-            failures.push(error);
-        }
-    }
-
-    aggregate_transfer_failures(failures)
+    let cancelled = results.iter().any(|(_, cancelled)| *cancelled);
+    let mut outcomes = results
+        .into_iter()
+        .map(|(result, _)| result)
+        .collect::<Vec<_>>();
+    outcomes.sort_by_key(|result| result.index);
+    (outcomes, cancelled)
 }
 
-/// A lone failure is returned verbatim (so its code still drives sudo
-/// escalation); multiple failures aggregate into one reported error.
-fn aggregate_transfer_failures(mut failures: Vec<FsError>) -> Result<(), FsError> {
-    match failures.len() {
-        0 => Ok(()),
-        1 => Err(failures.remove(0)),
-        count => {
-            let first = failures.remove(0);
-            Err(FsError::new(
-                "operation_partial_failure",
-                format!(
-                    "{count} items could not be completed. First error: {}",
-                    first.message
-                ),
-                first.path,
-            ))
+fn local_transfer_item(item: &TransferItem) -> operations::LocalTransferItem {
+    operations::LocalTransferItem {
+        from: item.from.clone(),
+        to: item.to.clone(),
+        overwrite: item.overwrite,
+        symlink_mode: item.symlink_mode,
+    }
+}
+
+fn aggregate_copy_progress(
+    slots: &Mutex<Vec<operations::OperationProgress>>,
+    slot: usize,
+    progress: operations::OperationProgress,
+) -> operations::OperationProgress {
+    let mut slots = slots.lock().expect("copy progress lock poisoned");
+    slots[slot] = progress.clone();
+
+    operations::OperationProgress {
+        processed_bytes: slots.iter().map(|item| item.processed_bytes).sum(),
+        total_bytes: slots.iter().map(|item| item.total_bytes).sum(),
+        processed_entries: slots.iter().map(|item| item.processed_entries).sum(),
+        total_entries: slots.iter().map(|item| item.total_entries).sum(),
+        current_path: progress.current_path,
+        current_bytes: progress.current_bytes,
+        current_total_bytes: progress.current_total_bytes,
+    }
+}
+
+fn run_native_copy_items(
+    app: AppHandle,
+    operation_state: FileOperationState,
+    job_id: Option<String>,
+    items: Vec<IndexedTransferItem>,
+    concurrency: usize,
+) -> (Vec<FileOperationItemResult>, bool) {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    if items.is_empty() {
+        return (Vec::new(), false);
+    }
+
+    let results = Mutex::new(vec![None; items.len()]);
+    let progress_slots = Mutex::new(vec![operations::OperationProgress::default(); items.len()]);
+    let next = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(false);
+    let worker_count = concurrency.max(1).min(items.len());
+
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| loop {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let slot = next.fetch_add(1, Ordering::Relaxed);
+                let Some(indexed) = items.get(slot) else {
+                    break;
+                };
+                let source_before = local_path_snapshot(&indexed.item.from);
+                let destination_before = local_path_snapshot(&indexed.item.to);
+                let operation_item = local_transfer_item(&indexed.item);
+                let result = if items.len() == 1 && concurrency > 1 {
+                    operations::copy_items_parallel(
+                        &[operation_item],
+                        concurrency,
+                        |progress| {
+                            let progress = aggregate_copy_progress(&progress_slots, slot, progress);
+                            emit_transfer_operation_progress(
+                                &app, &job_id, "copy", "running", progress,
+                            );
+                        },
+                        |path| operation_state.checkpoint(&job_id, path),
+                    )
+                } else {
+                    operations::copy_items_with_progress(
+                        &[operation_item],
+                        |progress| {
+                            let progress = aggregate_copy_progress(&progress_slots, slot, progress);
+                            emit_transfer_operation_progress(
+                                &app, &job_id, "copy", "running", progress,
+                            );
+                        },
+                        |path| operation_state.checkpoint(&job_id, path),
+                    )
+                };
+
+                let outcome = match result {
+                    Ok(()) => FileOperationItemResult::completed(
+                        indexed.index,
+                        indexed.item.from.clone(),
+                        Some(indexed.item.to.clone()),
+                    ),
+                    Err(error) if error.code == "operation_cancelled" => {
+                        cancelled.store(true, Ordering::Relaxed);
+                        FileOperationItemResult::cancelled(
+                            indexed.index,
+                            indexed.item.from.clone(),
+                            Some(indexed.item.to.clone()),
+                            error.clone(),
+                            copy_error_affected(
+                                &indexed.item,
+                                &error,
+                                &source_before,
+                                &destination_before,
+                            ),
+                        )
+                    }
+                    Err(error) => FileOperationItemResult::failed(
+                        indexed.index,
+                        indexed.item.from.clone(),
+                        Some(indexed.item.to.clone()),
+                        error.clone(),
+                        copy_error_affected(
+                            &indexed.item,
+                            &error,
+                            &source_before,
+                            &destination_before,
+                        ),
+                    ),
+                };
+
+                results.lock().expect("copy result lock poisoned")[slot] = Some(outcome);
+            });
+        }
+    });
+
+    let outcomes = results
+        .into_inner()
+        .expect("copy result lock poisoned")
+        .into_iter()
+        .flatten()
+        .collect();
+    (outcomes, cancelled.load(Ordering::Relaxed))
+}
+
+fn run_sequential_local_transfer<E, A>(
+    app: &AppHandle,
+    operation_state: &FileOperationState,
+    job_id: &Option<String>,
+    operation: &str,
+    items: Vec<IndexedTransferItem>,
+    mut execute: E,
+    affected_after_error: A,
+) -> (Vec<FileOperationItemResult>, bool)
+where
+    E: FnMut(&TransferItem) -> FsResult<()>,
+    A: Fn(&TransferItem, &FsError, &Option<LocalPathSnapshot>, &Option<LocalPathSnapshot>) -> bool,
+{
+    let mut outcomes = Vec::new();
+    let mut completed = 0_u64;
+    let total = items.len() as u64;
+    let mut cancelled = false;
+
+    for indexed in items {
+        if let Err(error) = operation_state.checkpoint(job_id, None) {
+            outcomes.push(FileOperationItemResult::cancelled(
+                indexed.index,
+                indexed.item.from,
+                Some(indexed.item.to),
+                error,
+                false,
+            ));
+            cancelled = true;
+            break;
+        }
+
+        let source_before = local_path_snapshot(&indexed.item.from);
+        let destination_before = local_path_snapshot(&indexed.item.to);
+        let result = execute(&indexed.item);
+        let outcome = match result {
+            Ok(()) => {
+                completed = completed.saturating_add(1);
+                emit_file_operation_progress(
+                    app,
+                    job_id,
+                    operation,
+                    "running",
+                    ProgressSnapshot {
+                        processed_entries: completed,
+                        total_entries: total,
+                        current_path: Some(indexed.item.to.clone()),
+                        ..ProgressSnapshot::default()
+                    },
+                );
+                FileOperationItemResult::completed(
+                    indexed.index,
+                    indexed.item.from.clone(),
+                    Some(indexed.item.to.clone()),
+                )
+            }
+            Err(error) if error.code == "operation_cancelled" => {
+                cancelled = true;
+                FileOperationItemResult::cancelled(
+                    indexed.index,
+                    indexed.item.from.clone(),
+                    Some(indexed.item.to.clone()),
+                    error.clone(),
+                    affected_after_error(
+                        &indexed.item,
+                        &error,
+                        &source_before,
+                        &destination_before,
+                    ),
+                )
+            }
+            Err(error) => {
+                let affected = affected_after_error(
+                    &indexed.item,
+                    &error,
+                    &source_before,
+                    &destination_before,
+                );
+                FileOperationItemResult::failed(
+                    indexed.index,
+                    indexed.item.from.clone(),
+                    Some(indexed.item.to.clone()),
+                    error,
+                    affected,
+                )
+            }
+        };
+        outcomes.push(outcome);
+
+        if cancelled {
+            break;
         }
     }
+
+    (outcomes, cancelled)
 }
 
 #[tauri::command]
@@ -405,76 +879,174 @@ pub async fn delete_items(
     delete_mode: Option<DeleteMode>,
     sudo_password: Option<String>,
     remotes: tauri::State<'_, RemoteVolumeState>,
-) -> Result<(), FsError> {
+) -> Result<FileOperationBatchResult, FsError> {
     let delete_mode = delete_mode.unwrap_or_default();
+    let templates = paths
+        .iter()
+        .cloned()
+        .map(|path| (path, None))
+        .collect::<Vec<_>>();
     let mut local_paths = Vec::new();
     let mut remote_paths = Vec::new();
+    let mut outcomes = Vec::new();
 
-    for path in paths {
+    for (index, path) in paths.into_iter().enumerate() {
         if archive::is_archive_uri(&path) {
-            return Err(archive_read_only_error(&path));
+            outcomes.push(FileOperationItemResult::failed(
+                index,
+                path.clone(),
+                None,
+                archive_read_only_error(&path),
+                false,
+            ));
         } else if let Some(remote_path) = parse_remote_path(&path) {
-            remote_paths.push((path, remote_path));
+            remote_paths.push((index, path, remote_path));
         } else {
-            local_paths.push(path);
+            local_paths.push((index, path));
         }
     }
 
-    for (_, remote_path) in remote_paths {
-        delete_remote_item(&remotes, remote_path).await?;
-    }
-
-    if local_paths.is_empty() {
-        return Ok(());
-    }
-
-    if delete_mode == DeleteMode::Trash {
-        return run_local(move |_| move_local_paths_to_trash(local_paths)).await;
-    }
-
-    let sudo_paths = local_paths.clone();
-    run_local_with_sudo(
-        sudo_password,
-        move |provider| {
-            for path in local_paths {
-                provider.delete(&path)?;
+    for (index, path, remote_path) in remote_paths {
+        match delete_remote_item(&remotes, remote_path).await {
+            Ok(()) => outcomes.push(FileOperationItemResult::completed(index, path, None)),
+            Err(error) => {
+                let affected = remote_delete_error_affected(&error);
+                outcomes.push(FileOperationItemResult::failed(
+                    index, path, None, error, affected,
+                ));
             }
+        }
+    }
 
-            Ok(())
-        },
-        move |password| {
-            for path in &sudo_paths {
-                sudo::delete_item(&password, path)?;
+    if !local_paths.is_empty() {
+        let local_result = if delete_mode == DeleteMode::Trash {
+            run_local(move |_| Ok(move_local_paths_to_trash(local_paths))).await
+        } else {
+            let sudo_paths = local_paths.clone();
+            run_local_with_sudo(
+                sudo_password,
+                move |provider| {
+                    Ok(delete_local_paths_permanently(local_paths, |path| {
+                        provider.delete(path)
+                    }))
+                },
+                move |password| {
+                    Ok(delete_local_paths_permanently(sudo_paths, |path| {
+                        sudo::delete_item(&password, path)
+                    }))
+                },
+            )
+            .await
+        };
+
+        match local_result {
+            Ok(local_outcomes) => outcomes.extend(local_outcomes),
+            Err(error) => {
+                for (index, (from, _)) in templates.iter().enumerate() {
+                    if outcomes.iter().any(|outcome| outcome.index == index) {
+                        continue;
+                    }
+                    outcomes.push(FileOperationItemResult::failed(
+                        index,
+                        from.clone(),
+                        None,
+                        error.clone(),
+                        true,
+                    ));
+                }
             }
+        }
+    }
 
-            Ok(())
-        },
-    )
-    .await
+    operation_error_with_batch(finish_indexed_batch(&templates, outcomes, false))
 }
 
-fn move_local_paths_to_trash(paths: Vec<String>) -> FsResult<()> {
-    for path in paths {
-        let path = expand_local_path(&path)?;
+fn move_local_paths_to_trash(paths: Vec<(usize, String)>) -> Vec<FileOperationItemResult> {
+    let mut outcomes = Vec::with_capacity(paths.len());
+
+    for (index, original_path) in paths {
+        let path = match expand_local_path(&original_path) {
+            Ok(path) => path,
+            Err(error) => {
+                outcomes.push(FileOperationItemResult::failed(
+                    index,
+                    original_path,
+                    None,
+                    error,
+                    false,
+                ));
+                continue;
+            }
+        };
 
         if path.as_os_str().is_empty() || path == Path::new("/") {
-            return Err(FsError::new(
-                "unsafe_delete_target",
-                "Refusing to move the root directory to Trash.",
-                Some(path.to_string_lossy().into_owned()),
+            outcomes.push(FileOperationItemResult::failed(
+                index,
+                original_path,
+                None,
+                FsError::new(
+                    "unsafe_delete_target",
+                    "Refusing to move the root directory to Trash.",
+                    Some(path.to_string_lossy().into_owned()),
+                ),
+                false,
             ));
+            continue;
         }
 
-        trash::delete(&path).map_err(|error| {
-            FsError::new(
-                "trash_delete_failed",
-                format!("Unable to move item to Trash: {error}"),
-                Some(path.to_string_lossy().into_owned()),
-            )
-        })?;
+        match trash::delete(&path) {
+            Ok(()) => outcomes.push(FileOperationItemResult::completed(
+                index,
+                original_path,
+                None,
+            )),
+            Err(error) => {
+                let affected = fs::symlink_metadata(&path).is_err();
+                outcomes.push(FileOperationItemResult::failed(
+                    index,
+                    original_path,
+                    None,
+                    FsError::new(
+                        "trash_delete_failed",
+                        format!("Unable to move item to Trash: {error}"),
+                        Some(path.to_string_lossy().into_owned()),
+                    ),
+                    affected,
+                ));
+            }
+        }
     }
 
-    Ok(())
+    outcomes
+}
+
+fn delete_local_paths_permanently<E>(
+    paths: Vec<(usize, String)>,
+    mut execute: E,
+) -> Vec<FileOperationItemResult>
+where
+    E: FnMut(&str) -> FsResult<()>,
+{
+    paths
+        .into_iter()
+        .map(|(index, path)| {
+            let existed_before = local_path_exists_for_result(&path);
+            let was_directory = local_path_is_directory_for_result(&path);
+            match execute(&path) {
+                Ok(()) => FileOperationItemResult::completed(index, path, None),
+                Err(error) => {
+                    let authentication_failed = matches!(
+                        error.code.as_str(),
+                        "sudo_auth_failed" | "sudo_password_required"
+                    );
+                    let affected = !authentication_failed
+                        && ((existed_before && !local_path_exists_for_result(&path))
+                            || was_directory);
+                    FileOperationItemResult::failed(index, path, None, error, affected)
+                }
+            }
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -572,76 +1144,108 @@ pub async fn copy_items(
     sudo_password: Option<String>,
     max_concurrency: Option<u32>,
     remotes: tauri::State<'_, RemoteVolumeState>,
-) -> Result<(), FsError> {
+) -> Result<FileOperationBatchResult, FsError> {
     let _operation_cleanup =
         OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
+    let templates = items
+        .iter()
+        .map(|item| (item.from.clone(), Some(item.to.clone())))
+        .collect::<Vec<_>>();
     let mut archive_items = Vec::new();
     let mut local_items = Vec::new();
     let mut remote_tasks: Vec<RemoteTask> = Vec::new();
     let total_items = items.len() as u64;
-    let mut processed_items = 0_u64;
+    let mut outcomes = Vec::new();
+    let mut cancelled = false;
 
-    for item in items {
-        operation_state.checkpoint(&job_id, None)?;
-
+    for (index, item) in items.into_iter().enumerate() {
+        let indexed = IndexedTransferItem { index, item };
         match (
-            archive::parse_archive_uri(&item.from),
-            archive::parse_archive_uri(&item.to),
-            parse_remote_path(&item.from),
-            parse_remote_path(&item.to),
+            archive::parse_archive_uri(&indexed.item.from),
+            archive::parse_archive_uri(&indexed.item.to),
+            parse_remote_path(&indexed.item.from),
+            parse_remote_path(&indexed.item.to),
         ) {
-            (Some(archive_from), None, None, None) => archive_items.push((item, archive_from)),
+            (Some(archive_from), None, None, None) => archive_items.push((indexed, archive_from)),
             (Some(_), _, _, _) | (_, Some(_), _, _) => {
-                return Err(archive_read_only_error(
-                    if archive::is_archive_uri(&item.from) {
-                        &item.from
-                    } else {
-                        &item.to
-                    },
+                let error_path = if archive::is_archive_uri(&indexed.item.from) {
+                    indexed.item.from.clone()
+                } else {
+                    indexed.item.to.clone()
+                };
+                outcomes.push(FileOperationItemResult::failed(
+                    indexed.index,
+                    indexed.item.from,
+                    Some(indexed.item.to),
+                    archive_read_only_error(&error_path),
+                    false,
                 ));
             }
             (None, None, Some(remote_from), Some(remote_to)) => {
                 let label =
                     crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
                 remote_tasks.push(RemoteTask {
+                    index: indexed.index,
                     transfer: RemoteTransfer::RemoteToRemote {
                         from: remote_from,
                         to: remote_to,
                     },
-                    overwrite: item.overwrite,
+                    overwrite: indexed.item.overwrite,
+                    from: indexed.item.from,
+                    to: indexed.item.to,
                     label,
                 });
             }
-            (None, None, Some(remote_from), None) => {
-                let target = expand_local_path(&item.to)?;
-                remote_tasks.push(RemoteTask {
+            (None, None, Some(remote_from), None) => match expand_local_path(&indexed.item.to) {
+                Ok(target) => remote_tasks.push(RemoteTask {
+                    index: indexed.index,
                     transfer: RemoteTransfer::RemoteToLocal {
                         from: remote_from,
                         to: target,
                     },
-                    overwrite: item.overwrite,
-                    label: item.to.clone(),
-                });
-            }
-            (None, None, None, Some(remote_to)) => {
-                let source = expand_local_path(&item.from)?;
-                let label =
-                    crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
-                remote_tasks.push(RemoteTask {
-                    transfer: RemoteTransfer::LocalToRemote {
-                        from: source,
-                        to: remote_to,
-                        symlink_mode: item.symlink_mode,
-                    },
-                    overwrite: item.overwrite,
-                    label,
-                });
-            }
-            (None, None, None, None) => local_items.push(item),
+                    overwrite: indexed.item.overwrite,
+                    from: indexed.item.from,
+                    to: indexed.item.to.clone(),
+                    label: indexed.item.to,
+                }),
+                Err(error) => outcomes.push(FileOperationItemResult::failed(
+                    indexed.index,
+                    indexed.item.from,
+                    Some(indexed.item.to),
+                    error,
+                    false,
+                )),
+            },
+            (None, None, None, Some(remote_to)) => match expand_local_path(&indexed.item.from) {
+                Ok(source) => {
+                    let label =
+                        crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
+                    remote_tasks.push(RemoteTask {
+                        index: indexed.index,
+                        transfer: RemoteTransfer::LocalToRemote {
+                            from: source,
+                            to: remote_to,
+                            symlink_mode: indexed.item.symlink_mode,
+                        },
+                        overwrite: indexed.item.overwrite,
+                        from: indexed.item.from,
+                        to: indexed.item.to,
+                        label,
+                    });
+                }
+                Err(error) => outcomes.push(FileOperationItemResult::failed(
+                    indexed.index,
+                    indexed.item.from,
+                    Some(indexed.item.to),
+                    error,
+                    false,
+                )),
+            },
+            (None, None, None, None) => local_items.push(indexed),
         }
     }
 
-    let processed = std::sync::atomic::AtomicU64::new(processed_items);
+    let processed = std::sync::atomic::AtomicU64::new(0);
 
     if !remote_tasks.is_empty() {
         let concurrency = crate::fs::storage::resolve_concurrency(
@@ -650,8 +1254,7 @@ pub async fn copy_items(
         );
         let progress_app = app.clone();
         let progress_job_id = job_id.clone();
-
-        run_remote_tasks(
+        let (remote_outcomes, remote_cancelled) = run_remote_tasks(
             &remotes,
             &operation_state,
             &job_id,
@@ -675,143 +1278,169 @@ pub async fn copy_items(
                 );
             },
         )
-        .await?;
+        .await;
+        outcomes.extend(remote_outcomes);
+        cancelled |= remote_cancelled;
     }
 
-    processed_items = processed.load(std::sync::atomic::Ordering::Relaxed);
+    let processed_items = processed.load(std::sync::atomic::Ordering::Relaxed);
 
-    if !archive_items.is_empty() {
+    if !cancelled && !archive_items.is_empty() {
+        let archive_templates = archive_items
+            .iter()
+            .map(|(indexed, _)| {
+                (
+                    indexed.index,
+                    indexed.item.from.clone(),
+                    indexed.item.to.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
         let archive_app = app.clone();
         let archive_job_id = job_id.clone();
         let archive_operation_state = operation_state.inner().clone();
         let archive_start = processed_items;
+        let archive_result = run_local(move |_| {
+            let mut archive_outcomes = Vec::new();
+            let mut archive_cancelled = false;
 
-        run_local(move |_| {
-            for (index, (item, archive_path)) in archive_items.iter().enumerate() {
-                archive_operation_state.checkpoint(&archive_job_id, None)?;
-                archive::extract_archive_entry_to(
-                    archive_path,
-                    Path::new(&item.to),
-                    item.overwrite,
-                )?;
-                emit_file_operation_progress(
-                    &archive_app,
-                    &archive_job_id,
-                    "copy",
-                    "running",
-                    ProgressSnapshot {
-                        processed_entries: archive_start + index as u64 + 1,
-                        total_entries: total_items,
-                        current_path: Some(item.to.clone()),
-                        ..ProgressSnapshot::default()
-                    },
-                );
-            }
-
-            Ok(())
-        })
-        .await?;
-    }
-
-    if local_items.is_empty() {
-        if let Some(job_id) = &job_id {
-            operation_state.clear_cancel(job_id);
-            operation_state.clear_pause(job_id);
-        }
-
-        return Ok(());
-    }
-
-    // Choose how parallel the local copy may run, based on the destination's
-    // storage type (spinning disks stay serial) and the user's override.
-    let local_concurrency = crate::fs::storage::resolve_concurrency(
-        crate::fs::storage::classify_path(&local_items[0].to),
-        max_concurrency.map(|value| value as usize),
-    );
-
-    let sudo_items = local_items.clone();
-    let native_app = app.clone();
-    let native_job_id = job_id.clone();
-    let native_operation_state = operation_state.inner().clone();
-    let sudo_app = app.clone();
-    let sudo_job_id = job_id.clone();
-    let sudo_operation_state = operation_state.inner().clone();
-    let result = run_local_with_sudo(
-        sudo_password,
-        move |provider| {
-            if native_job_id.is_some() {
-                let operation_items = transfer_items_for_operations(&local_items);
-
-                // Closures are passed inline (not via a `let`) so the compiler
-                // infers the higher-ranked lifetime the checkpoint signature needs.
-                if local_concurrency > 1 {
-                    return operations::copy_items_parallel(
-                        &operation_items,
-                        local_concurrency,
-                        |progress| {
-                            emit_transfer_operation_progress(
-                                &native_app,
-                                &native_job_id,
-                                "copy",
-                                "running",
-                                progress,
-                            );
-                        },
-                        |path| native_operation_state.checkpoint(&native_job_id, path),
-                    );
+            for (offset, (indexed, archive_path)) in archive_items.into_iter().enumerate() {
+                if let Err(error) = archive_operation_state.checkpoint(&archive_job_id, None) {
+                    archive_outcomes.push(FileOperationItemResult::cancelled(
+                        indexed.index,
+                        indexed.item.from,
+                        Some(indexed.item.to),
+                        error,
+                        false,
+                    ));
+                    archive_cancelled = true;
+                    break;
                 }
 
-                return operations::copy_items_with_progress(
-                    &operation_items,
-                    |progress| {
-                        emit_transfer_operation_progress(
-                            &native_app,
-                            &native_job_id,
+                let destination_existed = local_path_exists_for_result(&indexed.item.to);
+                match archive::extract_archive_entry_to(
+                    &archive_path,
+                    Path::new(&indexed.item.to),
+                    indexed.item.overwrite,
+                ) {
+                    Ok(()) => {
+                        emit_file_operation_progress(
+                            &archive_app,
+                            &archive_job_id,
                             "copy",
                             "running",
-                            progress,
+                            ProgressSnapshot {
+                                processed_entries: archive_start + offset as u64 + 1,
+                                total_entries: total_items,
+                                current_path: Some(indexed.item.to.clone()),
+                                ..ProgressSnapshot::default()
+                            },
                         );
-                    },
-                    |path| native_operation_state.checkpoint(&native_job_id, path),
-                );
+                        archive_outcomes.push(FileOperationItemResult::completed(
+                            indexed.index,
+                            indexed.item.from,
+                            Some(indexed.item.to),
+                        ));
+                    }
+                    Err(error) => archive_outcomes.push(FileOperationItemResult::failed(
+                        indexed.index,
+                        indexed.item.from,
+                        Some(indexed.item.to.clone()),
+                        error,
+                        indexed.item.overwrite
+                            || (!destination_existed
+                                && local_path_exists_for_result(&indexed.item.to)),
+                    )),
+                }
             }
 
-            for item in local_items {
-                provider.copy(&item.from, &item.to, item.overwrite)?;
+            Ok((archive_outcomes, archive_cancelled))
+        })
+        .await;
+
+        match archive_result {
+            Ok((archive_outcomes, archive_cancelled)) => {
+                outcomes.extend(archive_outcomes);
+                cancelled |= archive_cancelled;
             }
-
-            Ok(())
-        },
-        move |password| {
-            emit_file_operation_status(&sudo_app, &sudo_job_id, "copy", "running");
-            for (index, item) in sudo_items.iter().enumerate() {
-                sudo_operation_state.checkpoint(&sudo_job_id, None)?;
-                sudo::copy_item(&password, &item.from, &item.to, item.overwrite)?;
-                emit_file_operation_progress(
-                    &sudo_app,
-                    &sudo_job_id,
-                    "copy",
-                    "running",
-                    ProgressSnapshot {
-                        processed_entries: (index + 1) as u64,
-                        total_entries: sudo_items.len() as u64,
-                        current_path: Some(item.to.clone()),
-                        ..ProgressSnapshot::default()
-                    },
-                );
+            Err(error) => {
+                for (index, from, to) in archive_templates {
+                    if outcomes.iter().any(|outcome| outcome.index == index) {
+                        continue;
+                    }
+                    outcomes.push(FileOperationItemResult::failed(
+                        index,
+                        from,
+                        Some(to),
+                        error.clone(),
+                        true,
+                    ));
+                }
             }
-
-            Ok(())
-        },
-    )
-    .await;
-
-    if let Some(job_id) = &job_id {
-        operation_state.clear_cancel(job_id);
-        operation_state.clear_pause(job_id);
+        }
     }
 
-    result
+    if !cancelled && !local_items.is_empty() {
+        let local_concurrency = crate::fs::storage::resolve_concurrency(
+            crate::fs::storage::classify_path(&local_items[0].item.to),
+            max_concurrency.map(|value| value as usize),
+        );
+        let sudo_items = local_items.clone();
+        let native_app = app.clone();
+        let native_job_id = job_id.clone();
+        let native_operation_state = operation_state.inner().clone();
+        let sudo_app = app.clone();
+        let sudo_job_id = job_id.clone();
+        let sudo_operation_state = operation_state.inner().clone();
+        let local_result = run_local_with_sudo(
+            sudo_password,
+            move |_| {
+                Ok(run_native_copy_items(
+                    native_app,
+                    native_operation_state,
+                    native_job_id,
+                    local_items,
+                    local_concurrency,
+                ))
+            },
+            move |password| {
+                emit_file_operation_status(&sudo_app, &sudo_job_id, "copy", "running");
+                Ok(run_sequential_local_transfer(
+                    &sudo_app,
+                    &sudo_operation_state,
+                    &sudo_job_id,
+                    "copy",
+                    sudo_items,
+                    |item| sudo::copy_item(&password, &item.from, &item.to, item.overwrite),
+                    copy_error_affected,
+                ))
+            },
+        )
+        .await;
+
+        match local_result {
+            Ok((local_outcomes, local_cancelled)) => {
+                outcomes.extend(local_outcomes);
+                cancelled |= local_cancelled;
+            }
+            Err(error) => {
+                for (index, (from, to)) in templates.iter().enumerate() {
+                    if outcomes.iter().any(|outcome| outcome.index == index) {
+                        continue;
+                    }
+                    outcomes.push(FileOperationItemResult::failed(
+                        index,
+                        from.clone(),
+                        to.clone(),
+                        error.clone(),
+                        true,
+                    ));
+                }
+            }
+        }
+    }
+
+    operation_error_with_batch(finish_indexed_batch(&templates, outcomes, cancelled))
 }
 
 #[tauri::command]
@@ -823,68 +1452,108 @@ pub async fn move_items(
     sudo_password: Option<String>,
     max_concurrency: Option<u32>,
     remotes: tauri::State<'_, RemoteVolumeState>,
-) -> Result<(), FsError> {
+) -> Result<FileOperationBatchResult, FsError> {
     let _operation_cleanup =
         OperationStateCleanup::new(operation_state.inner().clone(), job_id.clone());
+    let templates = items
+        .iter()
+        .map(|item| (item.from.clone(), Some(item.to.clone())))
+        .collect::<Vec<_>>();
     let mut local_items = Vec::new();
     let mut remote_tasks: Vec<RemoteTask> = Vec::new();
     let total_items = items.len() as u64;
-    let processed_items = 0_u64;
+    let mut outcomes = Vec::new();
+    let mut cancelled = false;
 
-    for item in items {
-        operation_state.checkpoint(&job_id, None)?;
+    for (index, item) in items.into_iter().enumerate() {
+        let indexed = IndexedTransferItem { index, item };
 
-        if archive::is_archive_uri(&item.from) || archive::is_archive_uri(&item.to) {
-            return Err(FsError::new(
-                "archive_read_only",
-                "Archive browsing is read-only. Copy items out of the archive instead.",
-                Some(if archive::is_archive_uri(&item.from) {
-                    item.from
-                } else {
-                    item.to
-                }),
+        if archive::is_archive_uri(&indexed.item.from) || archive::is_archive_uri(&indexed.item.to)
+        {
+            let path = if archive::is_archive_uri(&indexed.item.from) {
+                indexed.item.from.clone()
+            } else {
+                indexed.item.to.clone()
+            };
+            outcomes.push(FileOperationItemResult::failed(
+                indexed.index,
+                indexed.item.from,
+                Some(indexed.item.to),
+                FsError::new(
+                    "archive_read_only",
+                    "Archive browsing is read-only. Copy items out of the archive instead.",
+                    Some(path),
+                ),
+                false,
             ));
+            continue;
         }
 
-        match (parse_remote_path(&item.from), parse_remote_path(&item.to)) {
+        match (
+            parse_remote_path(&indexed.item.from),
+            parse_remote_path(&indexed.item.to),
+        ) {
             (Some(remote_from), Some(remote_to)) => {
                 let label =
                     crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
                 remote_tasks.push(RemoteTask {
+                    index: indexed.index,
                     transfer: RemoteTransfer::RemoteToRemote {
                         from: remote_from,
                         to: remote_to,
                     },
-                    overwrite: item.overwrite,
+                    overwrite: indexed.item.overwrite,
+                    from: indexed.item.from,
+                    to: indexed.item.to,
                     label,
                 });
             }
-            (Some(remote_from), None) => {
-                let target = expand_local_path(&item.to)?;
-                remote_tasks.push(RemoteTask {
+            (Some(remote_from), None) => match expand_local_path(&indexed.item.to) {
+                Ok(target) => remote_tasks.push(RemoteTask {
+                    index: indexed.index,
                     transfer: RemoteTransfer::RemoteToLocal {
                         from: remote_from,
                         to: target,
                     },
-                    overwrite: item.overwrite,
-                    label: item.to.clone(),
-                });
-            }
-            (None, Some(remote_to)) => {
-                let source = expand_local_path(&item.from)?;
-                let label =
-                    crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
-                remote_tasks.push(RemoteTask {
-                    transfer: RemoteTransfer::LocalToRemote {
-                        from: source,
-                        to: remote_to,
-                        symlink_mode: item.symlink_mode,
-                    },
-                    overwrite: item.overwrite,
-                    label,
-                });
-            }
-            (None, None) => local_items.push(item),
+                    overwrite: indexed.item.overwrite,
+                    from: indexed.item.from,
+                    to: indexed.item.to.clone(),
+                    label: indexed.item.to,
+                }),
+                Err(error) => outcomes.push(FileOperationItemResult::failed(
+                    indexed.index,
+                    indexed.item.from,
+                    Some(indexed.item.to),
+                    error,
+                    false,
+                )),
+            },
+            (None, Some(remote_to)) => match expand_local_path(&indexed.item.from) {
+                Ok(source) => {
+                    let label =
+                        crate::fs::remote::format_remote_uri(&remote_to.volume_id, &remote_to.path);
+                    remote_tasks.push(RemoteTask {
+                        index: indexed.index,
+                        transfer: RemoteTransfer::LocalToRemote {
+                            from: source,
+                            to: remote_to,
+                            symlink_mode: indexed.item.symlink_mode,
+                        },
+                        overwrite: indexed.item.overwrite,
+                        from: indexed.item.from,
+                        to: indexed.item.to,
+                        label,
+                    });
+                }
+                Err(error) => outcomes.push(FileOperationItemResult::failed(
+                    indexed.index,
+                    indexed.item.from,
+                    Some(indexed.item.to),
+                    error,
+                    false,
+                )),
+            },
+            (None, None) => local_items.push(indexed),
         }
     }
 
@@ -893,11 +1562,10 @@ pub async fn move_items(
             crate::fs::storage::StorageClass::Remote,
             max_concurrency.map(|value| value as usize),
         );
-        let processed = std::sync::atomic::AtomicU64::new(processed_items);
+        let processed = std::sync::atomic::AtomicU64::new(0);
         let progress_app = app.clone();
         let progress_job_id = job_id.clone();
-
-        run_remote_tasks(
+        let (remote_outcomes, remote_cancelled) = run_remote_tasks(
             &remotes,
             &operation_state,
             &job_id,
@@ -921,93 +1589,87 @@ pub async fn move_items(
                 );
             },
         )
-        .await?;
+        .await;
+        outcomes.extend(remote_outcomes);
+        cancelled |= remote_cancelled;
     }
 
-    if local_items.is_empty() {
-        if let Some(job_id) = &job_id {
-            operation_state.clear_cancel(job_id);
-            operation_state.clear_pause(job_id);
-        }
-
-        return Ok(());
-    }
-
-    let sudo_items = local_items.clone();
-    let native_app = app.clone();
-    let native_job_id = job_id.clone();
-    let native_operation_state = operation_state.inner().clone();
-    let sudo_app = app.clone();
-    let sudo_job_id = job_id.clone();
-    let sudo_operation_state = operation_state.inner().clone();
-    let result = run_local_with_sudo(
-        sudo_password,
-        move |provider| {
-            if native_job_id.is_some() {
-                let operation_items = transfer_items_for_operations(&local_items);
-                return operations::move_items_with_progress(
-                    &operation_items,
-                    |progress| {
-                        emit_transfer_operation_progress(
-                            &native_app,
-                            &native_job_id,
-                            "move",
-                            "running",
-                            progress,
-                        );
+    if !cancelled && !local_items.is_empty() {
+        let sudo_items = local_items.clone();
+        let native_app = app.clone();
+        let native_job_id = job_id.clone();
+        let native_operation_state = operation_state.inner().clone();
+        let operation_app = native_app.clone();
+        let operation_job_id = native_job_id.clone();
+        let operation_checkpoint_state = native_operation_state.clone();
+        let sudo_app = app.clone();
+        let sudo_job_id = job_id.clone();
+        let sudo_operation_state = operation_state.inner().clone();
+        let local_result = run_local_with_sudo(
+            sudo_password,
+            move |_| {
+                Ok(run_sequential_local_transfer(
+                    &native_app,
+                    &native_operation_state,
+                    &native_job_id,
+                    "move",
+                    local_items,
+                    |item| {
+                        operations::move_items_with_progress(
+                            &[local_transfer_item(item)],
+                            |progress| {
+                                emit_transfer_operation_progress(
+                                    &operation_app,
+                                    &operation_job_id,
+                                    "move",
+                                    "running",
+                                    progress,
+                                );
+                            },
+                            |path| operation_checkpoint_state.checkpoint(&operation_job_id, path),
+                        )
                     },
-                    |path| native_operation_state.checkpoint(&native_job_id, path),
-                );
-            }
-
-            for item in local_items {
-                provider.move_item(&item.from, &item.to, item.overwrite)?;
-            }
-
-            Ok(())
-        },
-        move |password| {
-            emit_file_operation_status(&sudo_app, &sudo_job_id, "move", "running");
-            for (index, item) in sudo_items.iter().enumerate() {
-                sudo_operation_state.checkpoint(&sudo_job_id, None)?;
-                sudo::move_item(&password, &item.from, &item.to, item.overwrite)?;
-                emit_file_operation_progress(
+                    move_error_affected,
+                ))
+            },
+            move |password| {
+                emit_file_operation_status(&sudo_app, &sudo_job_id, "move", "running");
+                Ok(run_sequential_local_transfer(
                     &sudo_app,
+                    &sudo_operation_state,
                     &sudo_job_id,
                     "move",
-                    "running",
-                    ProgressSnapshot {
-                        processed_entries: (index + 1) as u64,
-                        total_entries: sudo_items.len() as u64,
-                        current_path: Some(item.to.clone()),
-                        ..ProgressSnapshot::default()
-                    },
-                );
+                    sudo_items,
+                    |item| sudo::move_item(&password, &item.from, &item.to, item.overwrite),
+                    move_error_affected,
+                ))
+            },
+        )
+        .await;
+
+        match local_result {
+            Ok((local_outcomes, local_cancelled)) => {
+                outcomes.extend(local_outcomes);
+                cancelled |= local_cancelled;
             }
-
-            Ok(())
-        },
-    )
-    .await;
-
-    if let Some(job_id) = &job_id {
-        operation_state.clear_cancel(job_id);
-        operation_state.clear_pause(job_id);
+            Err(error) => {
+                for (index, (from, to)) in templates.iter().enumerate() {
+                    if outcomes.iter().any(|outcome| outcome.index == index) {
+                        continue;
+                    }
+                    outcomes.push(FileOperationItemResult::failed(
+                        index,
+                        from.clone(),
+                        to.clone(),
+                        error.clone(),
+                        true,
+                    ));
+                }
+            }
+        }
     }
 
-    result
-}
-
-fn transfer_items_for_operations(items: &[TransferItem]) -> Vec<operations::LocalTransferItem> {
-    items
-        .iter()
-        .map(|item| operations::LocalTransferItem {
-            from: item.from.clone(),
-            to: item.to.clone(),
-            overwrite: item.overwrite,
-            symlink_mode: item.symlink_mode,
-        })
-        .collect()
+    operation_error_with_batch(finish_indexed_batch(&templates, outcomes, cancelled))
 }
 
 #[cfg(test)]
@@ -1044,16 +1706,125 @@ mod tests {
         state
     }
 
-    fn local_to_remote_task(from: PathBuf, remote: &str, label: &str) -> RemoteTask {
+    fn local_to_remote_task(index: usize, from: PathBuf, remote: &str, label: &str) -> RemoteTask {
         RemoteTask {
+            index,
             transfer: RemoteTransfer::LocalToRemote {
-                from,
+                from: from.clone(),
                 to: parse_remote_path(remote).expect("remote path parses"),
                 symlink_mode: operations::SymlinkMode::Preserve,
             },
             overwrite: false,
+            from: from.to_string_lossy().into_owned(),
+            to: remote.to_string(),
             label: label.to_string(),
         }
+    }
+
+    #[test]
+    fn batch_error_preserves_lone_permission_failure_and_orders_items() {
+        let batch = FileOperationBatchResult::new(
+            vec![
+                FileOperationItemResult::failed(
+                    1,
+                    "/protected".to_string(),
+                    Some("/target/protected".to_string()),
+                    FsError::new(
+                        "permission_denied",
+                        "Permission denied",
+                        Some("/protected".to_string()),
+                    ),
+                    false,
+                ),
+                FileOperationItemResult::completed(
+                    0,
+                    "/source".to_string(),
+                    Some("/target/source".to_string()),
+                ),
+            ],
+            false,
+        );
+
+        let error = operation_error_with_batch(batch).expect_err("batch should be incomplete");
+        assert_eq!(error.code, "permission_denied");
+        let batch = error.batch.expect("structured batch should be attached");
+        assert_eq!(batch.items[0].index, 0);
+        assert_eq!(batch.items[1].index, 1);
+        assert_eq!(batch.items[1].status, FileOperationItemStatus::Failed);
+    }
+
+    #[test]
+    fn recursive_remote_errors_remain_conservatively_affected() {
+        let task = RemoteTask {
+            index: 0,
+            transfer: RemoteTransfer::RemoteToRemote {
+                from: parse_remote_path("remote://left/Folder").expect("source parses"),
+                to: parse_remote_path("remote://right/Folder").expect("target parses"),
+            },
+            overwrite: false,
+            from: "remote://left/Folder".to_string(),
+            to: "remote://right/Folder".to_string(),
+            label: "Folder".to_string(),
+        };
+        let error = FsError::new(
+            "remote_stat_failed",
+            "A descendant could not be read.",
+            Some("remote://left/Folder/child".to_string()),
+        );
+
+        assert!(remote_task_error_affected(
+            &task, &error, false, &None, &None
+        ));
+    }
+
+    #[test]
+    fn finish_batch_marks_unreported_items_not_started() {
+        let templates = vec![
+            ("/a".to_string(), Some("/to-a".to_string())),
+            ("/b".to_string(), Some("/to-b".to_string())),
+        ];
+        let batch = finish_indexed_batch(
+            &templates,
+            vec![FileOperationItemResult::completed(
+                0,
+                "/a".to_string(),
+                Some("/to-a".to_string()),
+            )],
+            true,
+        );
+
+        assert!(batch.cancelled);
+        assert_eq!(batch.items[0].status, FileOperationItemStatus::Completed);
+        assert_eq!(batch.items[1].status, FileOperationItemStatus::NotStarted);
+    }
+
+    #[test]
+    fn permanent_delete_reports_each_top_level_path() {
+        let root = unique_base("delete-results");
+        fs::create_dir_all(&root).expect("test root");
+        let existing = root.join("existing.txt");
+        let missing = root.join("missing.txt");
+        fs::write(&existing, "delete me").expect("write existing");
+        let provider = LocalFileProvider::new();
+        let outcomes = delete_local_paths_permanently(
+            vec![
+                (1, missing.to_string_lossy().into_owned()),
+                (0, existing.to_string_lossy().into_owned()),
+            ],
+            |path| provider.delete(path),
+        );
+        let templates = vec![
+            (existing.to_string_lossy().into_owned(), None),
+            (missing.to_string_lossy().into_owned(), None),
+        ];
+        let batch = finish_indexed_batch(&templates, outcomes, false);
+
+        assert_eq!(batch.items[0].status, FileOperationItemStatus::Completed);
+        assert_eq!(batch.items[1].status, FileOperationItemStatus::Failed);
+        assert!(!batch.items[1].affected);
+        assert!(!existing.exists());
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1069,6 +1840,7 @@ mod tests {
             let file = src.join(format!("f{index}.txt"));
             fs::write(&file, format!("content-{index}")).expect("write source");
             tasks.push(local_to_remote_task(
+                index,
                 file,
                 &format!("remote://test/f{index}.txt"),
                 &format!("f{index}"),
@@ -1076,6 +1848,7 @@ mod tests {
         }
         // A missing source in the middle must not abort the healthy transfers.
         tasks.push(local_to_remote_task(
+            6,
             src.join("missing.txt"),
             "remote://test/missing.txt",
             "missing",
@@ -1086,7 +1859,7 @@ mod tests {
         let processed = AtomicU64::new(0);
         let progress_calls = AtomicU64::new(0);
 
-        let result = tauri::async_runtime::block_on(run_remote_tasks(
+        let (results, cancelled) = tauri::async_runtime::block_on(run_remote_tasks(
             &state,
             &op_state,
             &None,
@@ -1100,9 +1873,13 @@ mod tests {
             },
         ));
 
-        // One failure (the missing source) is reported, verbatim (not aggregated).
-        assert!(result.is_err());
-        assert_ne!(result.unwrap_err().code, "operation_partial_failure");
+        assert!(!cancelled);
+        assert_eq!(results.len(), 7);
+        assert!(results[..6]
+            .iter()
+            .all(|result| result.status == FileOperationItemStatus::Completed));
+        assert_eq!(results[6].status, FileOperationItemStatus::Failed);
+        assert_eq!(results[6].index, 6);
 
         for index in 0..6 {
             assert!(
@@ -1129,16 +1906,16 @@ mod tests {
         fs::write(&good, "good").expect("write good");
 
         let tasks = vec![
-            local_to_remote_task(src.join("missing-a.txt"), "remote://test/a.txt", "a"),
-            local_to_remote_task(good, "remote://test/good.txt", "good"),
-            local_to_remote_task(src.join("missing-b.txt"), "remote://test/b.txt", "b"),
+            local_to_remote_task(0, src.join("missing-a.txt"), "remote://test/a.txt", "a"),
+            local_to_remote_task(1, good, "remote://test/good.txt", "good"),
+            local_to_remote_task(2, src.join("missing-b.txt"), "remote://test/b.txt", "b"),
         ];
 
         let state = fs_remote_state(&remote_root);
         let op_state = FileOperationState::default();
         let processed = AtomicU64::new(0);
 
-        let result = tauri::async_runtime::block_on(run_remote_tasks(
+        let (results, cancelled) = tauri::async_runtime::block_on(run_remote_tasks(
             &state,
             &op_state,
             &None,
@@ -1150,8 +1927,10 @@ mod tests {
             |_d, _t, _l| {},
         ));
 
-        let error = result.expect_err("two failures should be reported");
-        assert_eq!(error.code, "operation_partial_failure");
+        assert!(!cancelled);
+        assert_eq!(results[0].status, FileOperationItemStatus::Failed);
+        assert_eq!(results[1].status, FileOperationItemStatus::Completed);
+        assert_eq!(results[2].status, FileOperationItemStatus::Failed);
         assert!(remote_root.join("good.txt").is_file());
 
         let _ = fs::remove_dir_all(&base);
@@ -1167,13 +1946,13 @@ mod tests {
         let file = src.join("f.txt");
         fs::write(&file, "data").expect("write source");
 
-        let tasks = vec![local_to_remote_task(file, "remote://test/f.txt", "f")];
+        let tasks = vec![local_to_remote_task(0, file, "remote://test/f.txt", "f")];
         let state = fs_remote_state(&remote_root);
         let op_state = FileOperationState::default();
         op_state.request_cancel("job-1");
         let processed = AtomicU64::new(0);
 
-        let result = tauri::async_runtime::block_on(run_remote_tasks(
+        let (results, cancelled) = tauri::async_runtime::block_on(run_remote_tasks(
             &state,
             &op_state,
             &Some("job-1".to_string()),
@@ -1185,10 +1964,8 @@ mod tests {
             |_d, _t, _l| {},
         ));
 
-        assert_eq!(
-            result.expect_err("cancelled batch should error").code,
-            "operation_cancelled"
-        );
+        assert!(cancelled);
+        assert_eq!(results[0].status, FileOperationItemStatus::NotStarted);
         assert_eq!(processed.load(Ordering::Relaxed), 0);
 
         let _ = fs::remove_dir_all(&base);

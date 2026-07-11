@@ -17,11 +17,12 @@ use commands::fs::{
 };
 use commands::oauth::create_oauth_tokens;
 use commands::store::{
-    add_favorite, add_favorite_group, app_store_path, clear_recent_locations, get_app_settings,
-    get_window_dimensions, list_favorite_groups, list_favorites, list_file_tags,
-    list_recent_locations, move_favorite, move_file_tags, record_recent_location, remove_favorite,
-    remove_favorite_group, remove_recent_location, save_app_settings, save_window_dimensions,
-    set_file_tags,
+    add_favorite, add_favorite_group, app_store_path, clear_finished_operation_journal_entries,
+    clear_recent_locations, get_app_settings, get_window_dimensions, list_favorite_groups,
+    list_favorites, list_file_tags, list_operation_journal_entries, list_recent_locations,
+    move_favorite, move_file_tags, record_recent_location, remove_favorite, remove_favorite_group,
+    remove_operation_journal_entry, remove_recent_location, save_app_settings,
+    save_window_dimensions, set_file_tags, upsert_operation_journal_entry,
 };
 use commands::terminal::{
     terminal_close, terminal_cwd, terminal_resize, terminal_start, terminal_write, TerminalState,
@@ -71,6 +72,7 @@ pub fn run() {
             commands::fs::transfer::list_directory,
             commands::fs::search::search_files,
             commands::fs::search::search_content,
+            commands::fs::search::unified_search,
             commands::fs::transfer::get_file_metadata,
             commands::fs::git::get_git_file_info,
             commands::fs::compare::compare_directories,
@@ -125,6 +127,10 @@ pub fn run() {
             app_store_path,
             get_app_settings,
             save_app_settings,
+            list_operation_journal_entries,
+            upsert_operation_journal_entry,
+            remove_operation_journal_entry,
+            clear_finished_operation_journal_entries,
             list_file_tags,
             set_file_tags,
             move_file_tags,

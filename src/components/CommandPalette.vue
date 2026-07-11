@@ -2,16 +2,55 @@
 import { listen } from '@tauri-apps/api/event';
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import AppIcon from './AppIcon.vue';
-import { canUseLocalFileAssets, searchContent, searchFiles } from '../composables/useFileOperations';
+import { canUseLocalFileAssets, unifiedSearch } from '../composables/useFileOperations';
 import { useScrollableContentState } from '../composables/useScrollableContentState';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { isArchivePath } from '../utils/archivePaths';
 import { RUN_COMMAND_EVENT } from '../utils/appEvents';
+import {
+  buildUnifiedSearchOptions,
+  canRunUnifiedSearch,
+  categoriesForSearchKind,
+  contentSnippetSegments,
+  createUnifiedSearchFilters,
+  defaultUnifiedSearchLocation,
+  formatSearchModified,
+  formatSearchSize,
+  isUnifiedSearchRootSupported,
+  normalizeUnifiedSearchPayload,
+  parseSearchExtensions,
+  reconcileUnifiedSearchFiltersForScope,
+  resolveUnifiedSearchRoot,
+  searchKindForCategories,
+} from '../utils/unifiedSearch';
 
-const SEARCH_LIMIT = 80;
-const CONTENT_SEARCH_MAX_FILE_BYTES = 24 * 1024 * 1024;
+const SEARCH_LIMIT = 120;
+const SEARCH_LISTBOX_ID = 'carelo-unified-search-results';
+const SEARCH_INPUT_ID = 'carelo-unified-search-input';
+const SEARCH_EXTENSION_ERROR_ID = 'carelo-search-extension-error';
+const DEFAULT_CONTENT_FILE_BYTES = 24 * 1024 * 1024;
+const MODIFIED_FILTER_LABELS = Object.freeze({
+  today: 'Today',
+  week: 'Past 7 days',
+  month: 'Past 30 days',
+  year: 'Past year',
+});
+const SIZE_FILTER_LABELS = Object.freeze({
+  small: 'Under 1 MB',
+  medium: '1–<100 MB',
+  large: '100 MB–<1 GB',
+  huge: '1 GB or more',
+});
+const CONTENT_SIZE_LABELS = Object.freeze({
+  [4 * 1024 * 1024]: '4 MB',
+  [DEFAULT_CONTENT_FILE_BYTES]: '24 MB',
+  [100 * 1024 * 1024]: '100 MB',
+});
 const store = useFileManagerStore();
+const palette = ref(null);
 const input = ref(null);
+const filterMenu = ref(null);
+const filterTrigger = ref(null);
 const resultList = ref(null);
 const resultButtons = ref([]);
 const query = ref('');
@@ -20,36 +59,222 @@ const selectedIndex = ref(0);
 const loading = ref(false);
 const error = ref('');
 const activeSearchJobId = ref('');
+const scannedEntries = ref(0);
+const matchedEntries = ref(0);
+const filters = ref(createUnifiedSearchFilters());
+const extensionText = ref('');
 let searchTimer = null;
 let searchVersion = 0;
-let stopFileSearchResultsListener = null;
+let stopUnifiedSearchResultsListener = null;
+let focusBeforePalette = null;
 
 function pluralize(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+function isContentResult(result) {
+  return ['content', 'both'].includes(result?.matchSource) && Boolean(result?.lineText);
+}
+
 const contentMatchedLineCount = computed(() => (
-  results.value.reduce((total, result) => total + Math.max(Number(result.matchCount) || 1, 1), 0)
+  results.value.reduce((total, result) => (
+    isContentResult(result)
+      ? total + Math.max(Number(result.matchCount) || 1, 1)
+      : total
+  ), 0)
 ));
 const activeSearchJob = computed(() => (
   activeSearchJobId.value
     ? store.queue.find((job) => job.id === activeSearchJobId.value) || null
     : null
 ));
-const currentMode = computed(() => store.fileSearchMode || 'files');
+const currentMode = computed(() => store.fileSearchMode === 'commands' ? 'commands' : 'search');
+const activeRoot = computed(() => (
+  store.effectiveDirectoryFor(store.activePaneId) || store.activeTabFor(store.activePaneId)?.currentPath || '~'
+));
+const matchScope = computed({
+  get: () => ['all', 'name', 'content'].includes(store.fileSearchMatchScope)
+    ? store.fileSearchMatchScope
+    : 'name',
+  set: (value) => {
+    store.fileSearchMatchScope = ['all', 'name', 'content'].includes(value) ? value : 'name';
+  },
+});
+const canSearchActiveRoot = computed(() => isUnifiedSearchRootSupported(activeRoot.value));
+const defaultSearchLocation = computed(() => defaultUnifiedSearchLocation(activeRoot.value));
+const searchRoot = computed(() => resolveUnifiedSearchRoot(activeRoot.value, filters.value.location));
+const isRemoteSearchRoot = computed(() => searchRoot.value.startsWith('remote://'));
+const extensionValidation = computed(() => parseSearchExtensions(extensionText.value));
+const extensionError = computed(() => {
+  const { invalidTokens, truncatedCount } = extensionValidation.value;
+
+  if (invalidTokens.length > 0) {
+    const tokens = invalidTokens
+      .slice(0, 2)
+      .map((token) => `“${token}”`)
+      .join(', ');
+    const remaining = invalidTokens.length > 2 ? ` and ${invalidTokens.length - 2} more` : '';
+    return `Can't use ${tokens}${remaining}. Try pdf or tar.gz.`;
+  }
+
+  if (truncatedCount > 0) {
+    return 'Use no more than 32 extensions.';
+  }
+
+  return '';
+});
+const applicableExtensions = computed(() => (
+  extensionError.value ? [] : extensionValidation.value.extensions
+));
+const normalizedFilters = computed(() => reconcileUnifiedSearchFiltersForScope({
+  ...filters.value,
+  matchScope: matchScope.value,
+  extensions: applicableExtensions.value,
+}, matchScope.value));
+const selectedKind = computed({
+  get: () => searchKindForCategories(filters.value.categories),
+  set: (kind) => {
+    const nextKind = matchScope.value === 'content' && kind === 'folders' ? 'any' : kind;
+    const nextFilters = {
+      ...filters.value,
+      categories: categoriesForSearchKind(nextKind),
+    };
+
+    if (nextKind === 'folders') {
+      extensionText.value = '';
+      nextFilters.size = 'any';
+    }
+
+    filters.value = nextFilters;
+  },
+});
+const foldersOnly = computed(() => selectedKind.value === 'folders');
+const contentOptionsApplicable = computed(() => (
+  matchScope.value !== 'name' && searchKindForCategories(normalizedFilters.value.categories) !== 'folders'
+));
+const hasSearchIntent = computed(() => (
+  !extensionError.value && canRunUnifiedSearch(query.value, normalizedFilters.value)
+));
+const searchOptions = computed(() => buildUnifiedSearchOptions(normalizedFilters.value, {
+  limit: SEARCH_LIMIT,
+}));
+const searchOptionsKey = computed(() => JSON.stringify(searchOptions.value));
+const activeFacetCount = computed(() => {
+  const value = normalizedFilters.value;
+  return [
+    value.location !== defaultSearchLocation.value,
+    value.depth !== 'all',
+    value.matchScope !== 'name',
+    value.categories.length > 0,
+    value.extensions.length > 0,
+    value.modified !== 'any',
+    value.size !== 'any',
+    value.includeHidden !== Boolean(store.showHiddenFiles),
+    !isRemoteSearchRoot.value && !value.respectIgnore,
+    !isRemoteSearchRoot.value && value.followSymlinks,
+    contentOptionsApplicable.value && value.caseSensitive,
+    contentOptionsApplicable.value && value.regex,
+    contentOptionsApplicable.value && value.maxFileBytes !== DEFAULT_CONTENT_FILE_BYTES,
+  ].filter(Boolean).length;
+});
+const filterTriggerLabel = computed(() => {
+  const parts = ['Filters'];
+
+  if (activeFacetCount.value > 0) {
+    parts.push(pluralize(activeFacetCount.value, 'active filter'));
+  }
+
+  if (extensionError.value) {
+    parts.push('extension filter needs attention');
+  }
+
+  return parts.join(', ');
+});
+const activeFilterChips = computed(() => {
+  const value = normalizedFilters.value;
+  const chips = [];
+
+  if (value.location !== defaultSearchLocation.value && value.location === 'home') {
+    chips.push({ id: 'location', label: 'Home folder' });
+  }
+
+  if (value.depth === 'direct') {
+    chips.push({ id: 'depth', label: 'Direct children' });
+  }
+
+  if (value.matchScope !== 'name') {
+    chips.push({
+      id: 'matchScope',
+      label: value.matchScope === 'content' ? 'Content' : 'Name + content',
+    });
+  }
+
+  if (value.categories.length > 0) {
+    const kind = searchKindForCategories(value.categories);
+    chips.push({
+      id: 'kind',
+      label: `Kind: ${kind === 'folders' ? 'Folders' : 'Files'}`,
+    });
+  }
+
+  if (value.extensions.length > 0) {
+    const label = value.extensions.length <= 2
+      ? value.extensions.map((extension) => `.${extension}`).join(', ')
+      : `${value.extensions.slice(0, 2).map((extension) => `.${extension}`).join(', ')} +${value.extensions.length - 2}`;
+    chips.push({ id: 'extensions', label: `Ext: ${label}` });
+  }
+
+  if (value.modified !== 'any') {
+    chips.push({ id: 'modified', label: MODIFIED_FILTER_LABELS[value.modified] });
+  }
+
+  if (value.size !== 'any') {
+    chips.push({ id: 'size', label: SIZE_FILTER_LABELS[value.size] });
+  }
+
+  if (value.includeHidden !== Boolean(store.showHiddenFiles)) {
+    chips.push({
+      id: 'includeHidden',
+      label: value.includeHidden ? 'Include hidden' : 'Exclude hidden',
+    });
+  }
+
+  if (!isRemoteSearchRoot.value && !value.respectIgnore) {
+    chips.push({ id: 'respectIgnore', label: 'Include ignored' });
+  }
+
+  if (!isRemoteSearchRoot.value && value.followSymlinks) {
+    chips.push({ id: 'followSymlinks', label: 'Follow links' });
+  }
+
+  if (contentOptionsApplicable.value && value.caseSensitive) {
+    chips.push({ id: 'caseSensitive', label: 'Case-sensitive content' });
+  }
+
+  if (contentOptionsApplicable.value && value.regex) {
+    chips.push({ id: 'regex', label: 'Content regex' });
+  }
+
+  if (contentOptionsApplicable.value && value.maxFileBytes !== DEFAULT_CONTENT_FILE_BYTES) {
+    chips.push({
+      id: 'maxFileBytes',
+      label: `Content up to ${CONTENT_SIZE_LABELS[value.maxFileBytes] || formatSearchSize(value.maxFileBytes)}`,
+    });
+  }
+
+  return chips;
+});
 const { isScrollable: resultListScrollable } = useScrollableContentState(resultList, {
   watch: [
     () => store.fileSearchVisible,
     currentMode,
     () => results.value.length,
+    searchOptionsKey,
     loading,
     error,
   ],
 });
 const isCommandMode = computed(() => currentMode.value === 'commands');
-const activeRoot = computed(() => (
-  store.effectiveDirectoryFor(store.activePaneId) || store.activeTabFor(store.activePaneId)?.currentPath || '~'
-));
 const targetPaneId = computed(() => (store.activePaneId === 'left' ? 'right' : 'left'));
 const targetRoot = computed(() => (
   store.effectiveDirectoryFor(targetPaneId.value) || store.activeTabFor(targetPaneId.value)?.currentPath || '~'
@@ -76,10 +301,10 @@ const canCompareFolders = computed(() => {
   return isLocalDir(left) && isLocalDir(right);
 });
 const canSearchRoot = computed(() => {
-  const root = activeRoot.value;
+  const root = searchRoot.value;
   return isCommandMode.value || (canUseLocalFileAssets()
     && root
-    && !isArchivePath(root));
+    && isUnifiedSearchRootSupported(root));
 });
 
 function remoteVolumeIdForPath(path) {
@@ -134,7 +359,7 @@ const commandDefinitions = [
     id: 'palette.files',
     section: 'Search',
     title: 'Search files',
-    detail: 'Fuzzy search the current folder',
+    detail: 'Open unified search with the name and path preset',
     icon: 'file',
     shortcut: 'Ctrl P',
     keywords: 'finder filename current folder',
@@ -143,7 +368,7 @@ const commandDefinitions = [
     id: 'palette.content',
     section: 'Search',
     title: 'Search file contents',
-    detail: 'Find text inside files in the current folder',
+    detail: 'Open unified search with the content preset',
     icon: 'search',
     shortcut: 'Ctrl Shift F',
     keywords: 'grep content text full text',
@@ -687,22 +912,28 @@ const statusText = computed(() => {
     return 'Search unavailable';
   }
 
-  if (!query.value.trim()) {
+  if (extensionError.value) {
+    return 'Fix extension filter';
+  }
+
+  if (!hasSearchIntent.value) {
     return 'Ready';
   }
 
   if (loading.value) {
-    if (currentMode.value === 'content' || currentMode.value === 'files') {
-      const scannedFiles = Number(activeSearchJob.value?.processedEntries || 0);
-      const matchedItems = Number(activeSearchJob.value?.currentBytes || 0);
-      const scannedLabel = currentMode.value === 'content' ? 'file' : 'item';
-      const matchedLabel = currentMode.value === 'content' ? 'file' : 'match';
+    const scanned = Math.max(
+      Number(scannedEntries.value || 0),
+      Number(activeSearchJob.value?.processedEntries || 0),
+    );
+    const matched = Math.max(
+      Number(matchedEntries.value || 0),
+      Number(activeSearchJob.value?.currentBytes || 0),
+    );
 
-      if (scannedFiles > 0) {
-        return matchedItems > 0
-          ? `${pluralize(scannedFiles, scannedLabel)} scanned, ${pluralize(matchedItems, matchedLabel)}`
-          : `${pluralize(scannedFiles, scannedLabel)} scanned`;
-      }
+    if (scanned > 0) {
+      return matched > 0
+        ? `${pluralize(scanned, 'item')} scanned, ${pluralize(matched, 'result')}`
+        : `${pluralize(scanned, 'item')} scanned`;
     }
 
     return 'Searching';
@@ -712,35 +943,52 @@ const statusText = computed(() => {
     return 'Search unavailable';
   }
 
-  if (currentMode.value === 'content') {
-    return `${pluralize(results.value.length, 'file')}, ${pluralize(contentMatchedLineCount.value, 'line')}`;
-  }
+  const matched = Math.max(Number(matchedEntries.value || 0), results.value.length);
+  const resultCount = matched > results.value.length
+    ? `${results.value.length} of ${pluralize(matched, 'result')}`
+    : pluralize(results.value.length, 'result');
 
-  return pluralize(results.value.length, 'result');
+  return contentMatchedLineCount.value > 0
+    ? `${resultCount}, ${pluralize(contentMatchedLineCount.value, 'line')}`
+    : resultCount;
 });
 const inputPlaceholder = computed(() => (
   currentMode.value === 'commands'
     ? 'Select a command...'
-    : currentMode.value === 'content'
-    ? 'Search file contents in current folder'
-    : 'Search files in current folder'
+    : matchScope.value === 'content'
+      ? 'Search inside files'
+      : matchScope.value === 'all'
+        ? 'Search names, paths, and contents'
+        : 'Search names and paths'
 ));
 const emptyPlaceholder = computed(() => (
   currentMode.value === 'commands'
     ? 'Type to find an app command'
-    : currentMode.value === 'content'
-    ? 'Type to search inside files in the current folder'
-    : 'Type to fuzzy search the current folder'
+    : extensionError.value
+      ? 'Fix the extension filter to search'
+      : matchScope.value === 'content'
+        ? 'Type to search inside files'
+        : 'Type to search, or choose Direct children in Filters'
+));
+const noMatchesPlaceholder = computed(() => (
+  query.value.trim() ? 'No matches' : 'No items match these filters'
 ));
 const dialogLabel = computed(() => (
   currentMode.value === 'commands'
     ? 'Command palette'
-    : currentMode.value === 'content'
-      ? 'Content search'
-      : 'Fuzzy file search'
+    : 'Search'
 ));
 const paletteSubtitle = computed(() => (
-  currentMode.value === 'commands' ? `Active pane: ${activeRoot.value}` : activeRoot.value
+  currentMode.value === 'commands'
+    ? `Active pane: ${activeRoot.value}`
+    : filters.value.location === 'home'
+      ? filters.value.depth === 'direct'
+        ? 'Home folder · direct children'
+        : 'Home folder · all subfolders'
+      : searchRoot.value
+));
+const selectedResultDomId = computed(() => (
+  results.value.length > 0 ? `unified-search-result-${selectedIndex.value}` : undefined
 ));
 
 function normalizeCommandText(value) {
@@ -838,13 +1086,98 @@ function refreshCommandResults() {
   loading.value = false;
 }
 
-function setMode(mode) {
+async function setMode(mode, scope = matchScope.value) {
   cancelActiveSearchJob();
-  store.openFileSearch(mode);
+  store.openFileSearch(mode === 'commands' ? 'commands' : 'search', scope);
   results.value = [];
   selectedIndex.value = 0;
   error.value = '';
   scheduleSearch();
+  await nextTick();
+  input.value?.focus();
+}
+
+function resetFacets() {
+  filters.value = createUnifiedSearchFilters({
+    location: defaultSearchLocation.value,
+    includeHidden: store.showHiddenFiles,
+    matchScope: matchScope.value,
+  });
+  extensionText.value = '';
+}
+
+function handlePalettePointerDown(event) {
+  if (filterMenu.value?.open && !filterMenu.value.contains(event.target)) {
+    filterMenu.value.open = false;
+  }
+}
+
+async function clearAllFacets() {
+  matchScope.value = 'name';
+  resetFacets();
+  if (filterMenu.value) {
+    filterMenu.value.open = false;
+  }
+  await nextTick();
+  filterTrigger.value?.focus();
+}
+
+async function removeFilterChip(id) {
+  const removedIndex = activeFilterChips.value.findIndex((chip) => chip.id === id);
+
+  switch (id) {
+    case 'location':
+      filters.value = { ...filters.value, location: defaultSearchLocation.value };
+      break;
+    case 'depth':
+      filters.value = { ...filters.value, depth: 'all' };
+      break;
+    case 'matchScope':
+      matchScope.value = 'name';
+      break;
+    case 'kind':
+      selectedKind.value = 'any';
+      break;
+    case 'extensions':
+      extensionText.value = '';
+      break;
+    case 'modified':
+      filters.value = { ...filters.value, modified: 'any' };
+      break;
+    case 'size':
+      filters.value = { ...filters.value, size: 'any' };
+      break;
+    case 'includeHidden':
+      filters.value = { ...filters.value, includeHidden: Boolean(store.showHiddenFiles) };
+      break;
+    case 'respectIgnore':
+      filters.value = { ...filters.value, respectIgnore: true };
+      break;
+    case 'followSymlinks':
+      filters.value = { ...filters.value, followSymlinks: false };
+      break;
+    case 'caseSensitive':
+      filters.value = { ...filters.value, caseSensitive: false };
+      break;
+    case 'regex':
+      filters.value = { ...filters.value, regex: false };
+      break;
+    case 'maxFileBytes':
+      filters.value = { ...filters.value, maxFileBytes: DEFAULT_CONTENT_FILE_BYTES };
+      break;
+    default:
+      break;
+  }
+
+  await nextTick();
+  const remainingChips = [...(palette.value?.querySelectorAll('.command-palette__filter-chip') || [])];
+  const nextIndex = Math.min(Math.max(removedIndex, 0), remainingChips.length - 1);
+
+  if (nextIndex >= 0) {
+    remainingChips[nextIndex]?.focus();
+  } else {
+    filterTrigger.value?.focus();
+  }
 }
 
 function close() {
@@ -857,6 +1190,8 @@ function resetSearch() {
   selectedIndex.value = 0;
   error.value = '';
   loading.value = false;
+  scannedEntries.value = 0;
+  matchedEntries.value = 0;
   searchVersion += 1;
   clearTimeout(searchTimer);
 }
@@ -879,28 +1214,37 @@ function cancelActiveSearchJob() {
   store.cancelQueueJob(jobId).catch(() => {});
 }
 
-async function ensureFileSearchResultsListener() {
-  if (stopFileSearchResultsListener || !canUseLocalFileAssets()) {
+async function ensureUnifiedSearchResultsListener() {
+  if (stopUnifiedSearchResultsListener || !canUseLocalFileAssets()) {
     return;
   }
 
   try {
-    stopFileSearchResultsListener = await listen('file-search-results', (event) => {
+    stopUnifiedSearchResultsListener = await listen('unified-search-results', (event) => {
       const payload = event.payload || {};
 
       if (
-        currentMode.value !== 'files' ||
+        currentMode.value !== 'search' ||
         payload.jobId !== activeSearchJobId.value ||
-        String(payload.query || '') !== query.value.trim()
+        String(payload.query || '') !== query.value.trim() ||
+        String(payload.root || '') !== searchRoot.value
       ) {
         return;
       }
 
-      results.value = Array.isArray(payload.results) ? payload.results : [];
+      const normalized = normalizeUnifiedSearchPayload(payload);
+
+      if (!normalized) {
+        return;
+      }
+
+      results.value = normalized.results;
+      scannedEntries.value = normalized.scannedEntries;
+      matchedEntries.value = normalized.matchedEntries;
       selectedIndex.value = Math.min(selectedIndex.value, Math.max(results.value.length - 1, 0));
     });
   } catch {
-    stopFileSearchResultsListener = null;
+    stopUnifiedSearchResultsListener = null;
   }
 }
 
@@ -913,11 +1257,13 @@ async function runSearch() {
     return;
   }
 
-  if (!query.value.trim()) {
+  if (!hasSearchIntent.value) {
     results.value = [];
     selectedIndex.value = 0;
     error.value = '';
     loading.value = false;
+    scannedEntries.value = 0;
+    matchedEntries.value = 0;
     return;
   }
 
@@ -928,12 +1274,22 @@ async function runSearch() {
 
   loading.value = true;
   error.value = '';
-  const isContentSearch = currentMode.value === 'content';
+  scannedEntries.value = 0;
+  matchedEntries.value = 0;
+  const requestedRoot = searchRoot.value;
+  const requestedQuery = query.value.trim();
+  const requestedOptions = searchOptions.value;
   const jobId = store.startQueueJob({
-    operation: isContentSearch ? 'content-search' : 'file-search',
-    label: isContentSearch ? 'Content search' : 'File search',
-    detail: isContentSearch ? 'Scanning file contents' : 'Scanning file names',
-    remotePaths: [activeRoot.value],
+    operation: 'unified-search',
+    label: 'Search',
+    detail: !query.value.trim()
+      ? 'Filtering items'
+      : matchScope.value === 'content'
+        ? 'Scanning file contents'
+        : matchScope.value === 'all'
+          ? 'Scanning names, paths, and contents'
+          : 'Scanning names and paths',
+    remotePaths: [searchRoot.value],
     pausable: false,
     cancelable: true,
   });
@@ -942,28 +1298,40 @@ async function runSearch() {
     activeSearchJobId.value = jobId;
   }
 
-  if (!isContentSearch) {
-    await ensureFileSearchResultsListener();
+  await ensureUnifiedSearchResultsListener();
+
+  if (
+    version !== searchVersion
+    || !store.fileSearchVisible
+    || currentMode.value !== 'search'
+    || searchRoot.value !== requestedRoot
+    || query.value.trim() !== requestedQuery
+    || (jobId && activeSearchJobId.value !== jobId)
+  ) {
+    if (jobId) {
+      store.cancelQueueJobDone(jobId, 'Superseded');
+    }
+    if (jobId && activeSearchJobId.value === jobId) {
+      activeSearchJobId.value = '';
+    }
+    if (version === searchVersion) {
+      loading.value = false;
+    }
+    return;
   }
 
   try {
-    const nextResults = isContentSearch
-      ? await searchContent(activeRoot.value, query.value, {
-          limit: 120,
-          includeHidden: store.showHiddenFiles,
-          respectIgnore: true,
-          caseSensitive: false,
-          regex: false,
-          maxFileBytes: CONTENT_SEARCH_MAX_FILE_BYTES,
-        }, jobId)
-      : await searchFiles(activeRoot.value, query.value, {
-          limit: SEARCH_LIMIT,
-          includeHidden: store.showHiddenFiles,
-          respectIgnore: true,
-          includeFiles: true,
-          includeDirectories: true,
-          followSymlinks: false,
-        }, jobId);
+    const response = await unifiedSearch(
+      requestedRoot,
+      requestedQuery,
+      requestedOptions,
+      jobId,
+    );
+    const normalized = normalizeUnifiedSearchPayload(response);
+
+    if (!normalized) {
+      throw new Error('Search returned an unsupported response.');
+    }
 
     if (version !== searchVersion) {
       if (jobId) {
@@ -972,13 +1340,16 @@ async function runSearch() {
       return;
     }
 
-    results.value = Array.isArray(nextResults) ? nextResults : [];
+    results.value = normalized.results;
+    scannedEntries.value = normalized.scannedEntries;
+    matchedEntries.value = normalized.matchedEntries;
     selectedIndex.value = Math.min(selectedIndex.value, Math.max(results.value.length - 1, 0));
 
     if (jobId) {
+      const matched = Math.max(normalized.matchedEntries, results.value.length);
       store.completeQueueJob(
         jobId,
-        `${pluralize(results.value.length, isContentSearch ? 'file' : 'result')} found`,
+        `${pluralize(matched, 'result')} found`,
       );
     }
   } catch (searchError) {
@@ -1070,13 +1441,13 @@ async function openResult(result = results.value[selectedIndex.value]) {
   if (result.type === 'command') {
     if (result.commandId === 'palette.files') {
       query.value = '';
-      setMode('files');
+      setMode('search', 'name');
       return;
     }
 
     if (result.commandId === 'palette.content') {
       query.value = '';
-      setMode('content');
+      setMode('search', 'content');
       return;
     }
 
@@ -1094,10 +1465,7 @@ async function openResult(result = results.value[selectedIndex.value]) {
 }
 
 function handleKeydown(event) {
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    close();
-  } else if (event.key === 'ArrowDown') {
+  if (event.key === 'ArrowDown') {
     event.preventDefault();
     selectRelative(1);
   } else if (event.key === 'ArrowUp') {
@@ -1106,12 +1474,51 @@ function handleKeydown(event) {
   } else if (event.key === 'Enter') {
     event.preventDefault();
     openResult();
-  } else if (event.key === 'Tab') {
+  }
+}
+
+function handlePaletteKeydown(event) {
+  if (event.key === 'Escape') {
     event.preventDefault();
-    const modes = ['commands', 'files', 'content'];
+    event.stopPropagation();
+
+    if (event.repeat) {
+      return;
+    }
+
+    if (filterMenu.value?.open) {
+      filterMenu.value.open = false;
+      nextTick(() => filterTrigger.value?.focus());
+      return;
+    }
+
+    close();
+  } else if (event.key === 'Tab' && event.ctrlKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    const modes = ['commands', 'search'];
     const currentIndex = modes.indexOf(currentMode.value);
     const nextIndex = (currentIndex + (event.shiftKey ? -1 : 1) + modes.length) % modes.length;
     setMode(modes[nextIndex]);
+  } else if (event.key === 'Tab') {
+    event.stopPropagation();
+    const focusable = [...(palette.value?.querySelectorAll(
+      'button:not([disabled]):not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), summary:not([tabindex="-1"])',
+    ) || [])].filter((element) => element.offsetParent !== null);
+    const first = focusable[0];
+    const last = focusable.at(-1);
+
+    if (!first || !last) {
+      return;
+    }
+
+    if (event.shiftKey && (document.activeElement === first || !palette.value?.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 }
 
@@ -1120,11 +1527,26 @@ function resultIcon(result) {
     return result.icon || 'app';
   }
 
-  return result?.kind === 'directory' ? 'folder' : 'file';
+  const icons = {
+    directory: 'folder',
+    archive: 'archive',
+    image: 'image',
+    video: 'video',
+    audio: 'music',
+    config: 'file-config',
+    code: 'file-code',
+    spreadsheet: 'file-spreadsheet',
+    presentation: 'file-presentation',
+    document: 'file-text',
+  };
+
+  return icons[result?.category] || (result?.kind === 'directory' ? 'folder' : 'file');
 }
 
 function resultKey(result) {
-  return result.path;
+  return result?.type === 'command'
+    ? result.path
+    : `${result.path}:${result.matchSource || 'name'}:${result.lineNumber || 0}`;
 }
 
 function resultTitle(result) {
@@ -1133,6 +1555,20 @@ function resultTitle(result) {
 
 function resultShortcut(result) {
   return result?.type === 'command' ? result.shortcut : '';
+}
+
+function resultOptionId(index) {
+  return `unified-search-result-${index}`;
+}
+
+function resultMetadata(result) {
+  return [formatSearchSize(result?.size), formatSearchModified(result?.modifiedAt)]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function snippetSegments(result) {
+  return contentSnippetSegments(result);
 }
 
 function resultTitleSegments(result) {
@@ -1172,7 +1608,7 @@ function contentResultMeta(result) {
   const matchCount = Math.max(Number(result?.matchCount) || 1, 1);
   const lineCountText = matchCount === 1 ? '1 line' : `${matchCount} lines`;
 
-  return `Line ${lineNumber} / ${lineCountText}`;
+  return `Line ${lineNumber} · ${lineCountText}`;
 }
 
 watch(
@@ -1181,20 +1617,73 @@ watch(
     if (!visible) {
       resetSearch();
       query.value = '';
+      const focusTarget = focusBeforePalette;
+      focusBeforePalette = null;
+      await nextTick();
+      focusTarget?.isConnected && focusTarget.focus?.();
       return;
     }
 
+    focusBeforePalette = document.activeElement;
+    resetFacets();
     await nextTick();
     input.value?.focus();
     input.value?.select?.();
     scheduleSearch();
   },
+  { immediate: true },
 );
 
-watch([query, activeRoot, currentMode, () => store.showHiddenFiles], () => {
+watch([query, searchRoot, currentMode, searchOptionsKey, extensionText], () => {
   if (store.fileSearchVisible) {
+    cancelActiveSearchJob();
     selectedIndex.value = 0;
+
+    if (currentMode.value === 'search' && !hasSearchIntent.value) {
+      resetSearch();
+      return;
+    }
+
     scheduleSearch();
+  }
+});
+
+watch([matchScope, selectedKind], ([scope]) => {
+  const reconciled = reconcileUnifiedSearchFiltersForScope({
+    ...filters.value,
+    matchScope: scope,
+  }, scope);
+  const categoriesChanged = JSON.stringify(reconciled.categories) !== JSON.stringify(filters.value.categories);
+  const contentSettingsChanged = reconciled.caseSensitive !== filters.value.caseSensitive
+    || reconciled.regex !== filters.value.regex
+    || reconciled.maxFileBytes !== filters.value.maxFileBytes;
+  const sizeChanged = reconciled.size !== filters.value.size;
+
+  if (categoriesChanged || contentSettingsChanged || sizeChanged) {
+    filters.value = {
+      ...filters.value,
+      categories: reconciled.categories,
+      size: reconciled.size,
+      caseSensitive: reconciled.caseSensitive,
+      regex: reconciled.regex,
+      maxFileBytes: reconciled.maxFileBytes,
+    };
+  }
+});
+
+watch(isRemoteSearchRoot, (remote) => {
+  if (remote && (!filters.value.respectIgnore || filters.value.followSymlinks)) {
+    filters.value = {
+      ...filters.value,
+      respectIgnore: true,
+      followSymlinks: false,
+    };
+  }
+});
+
+watch(canSearchActiveRoot, (available) => {
+  if (!available && filters.value.location === 'active') {
+    filters.value = { ...filters.value, location: 'home' };
   }
 });
 
@@ -1216,9 +1705,9 @@ watch(selectedIndex, () => {
 
 onBeforeUnmount(() => {
   resetSearch();
-  if (stopFileSearchResultsListener) {
-    stopFileSearchResultsListener();
-    stopFileSearchResultsListener = null;
+  if (stopUnifiedSearchResultsListener) {
+    stopUnifiedSearchResultsListener();
+    stopUnifiedSearchResultsListener = null;
   }
 });
 </script>
@@ -1232,11 +1721,14 @@ onBeforeUnmount(() => {
         @pointerdown.self="close"
       >
         <section
+          ref="palette"
           class="command-palette"
           :class="{ 'command-palette--content-scrollable': resultListScrollable }"
           role="dialog"
           aria-modal="true"
           :aria-label="dialogLabel"
+          @pointerdown="handlePalettePointerDown"
+          @keydown.stop="handlePaletteKeydown"
         >
           <header class="command-palette__header">
             <div class="command-palette__title-group">
@@ -1263,6 +1755,7 @@ onBeforeUnmount(() => {
               :class="{ 'command-palette__mode--active': currentMode === 'commands' }"
               role="tab"
               :aria-selected="currentMode === 'commands'"
+              aria-controls="carelo-palette-panel"
               @click="setMode('commands')"
             >
               <AppIcon name="app" :size="13" :stroke-width="1.8" />
@@ -1271,38 +1764,36 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="command-palette__mode"
-              :class="{ 'command-palette__mode--active': currentMode === 'files' }"
+              :class="{ 'command-palette__mode--active': currentMode === 'search' }"
               role="tab"
-              :aria-selected="currentMode === 'files'"
-              @click="setMode('files')"
-            >
-              <AppIcon name="file" :size="13" :stroke-width="1.8" />
-              <span>Files</span>
-            </button>
-            <button
-              type="button"
-              class="command-palette__mode"
-              :class="{ 'command-palette__mode--active': currentMode === 'content' }"
-              role="tab"
-              :aria-selected="currentMode === 'content'"
-              @click="setMode('content')"
+              :aria-selected="currentMode === 'search'"
+              aria-controls="carelo-palette-panel"
+              @click="setMode('search')"
             >
               <AppIcon name="search" :size="13" :stroke-width="1.8" />
-              <span>Content</span>
+              <span>Search</span>
             </button>
           </div>
 
+          <div id="carelo-palette-panel" role="tabpanel" class="command-palette__body">
           <div class="command-palette__search">
             <span class="command-palette__search-icon" aria-hidden="true">
               <AppIcon name="search" :size="16" :stroke-width="1.9" />
             </span>
             <input
+              :id="SEARCH_INPUT_ID"
               ref="input"
               v-model="query"
               class="command-palette__input"
               type="search"
               spellcheck="false"
               autocomplete="off"
+              role="combobox"
+              aria-autocomplete="list"
+              :aria-label="currentMode === 'commands' ? 'Find a command' : 'Search files'"
+              :aria-expanded="store.fileSearchVisible"
+              :aria-controls="SEARCH_LISTBOX_ID"
+              :aria-activedescendant="selectedResultDomId"
               :placeholder="inputPlaceholder"
               @keydown="handleKeydown"
             >
@@ -1310,27 +1801,275 @@ onBeforeUnmount(() => {
               class="command-palette__status"
               :class="{
                 'command-palette__status--loading': loading,
-                'command-palette__status--error': Boolean(error),
+                'command-palette__status--error': Boolean(
+                  error || (currentMode === 'search' && extensionError)
+                ),
               }"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
             >
               <span v-if="loading" class="command-palette__spinner" aria-hidden="true"></span>
               {{ statusText }}
             </span>
           </div>
 
-          <div ref="resultList" class="command-palette__results" role="listbox">
+          <div v-if="currentMode === 'search'" class="command-palette__filterbar">
+            <details ref="filterMenu" class="command-palette__filter-menu">
+              <summary
+                ref="filterTrigger"
+                class="command-palette__filter-trigger"
+                :class="{ 'command-palette__filter-trigger--error': Boolean(extensionError) }"
+                :aria-label="filterTriggerLabel"
+              >
+                <AppIcon name="sliders" :size="13" :stroke-width="1.8" />
+                <span>Filters</span>
+                <span
+                  v-if="activeFacetCount > 0"
+                  class="command-palette__filter-count"
+                  aria-hidden="true"
+                >{{ activeFacetCount }}</span>
+                <span
+                  v-if="extensionError"
+                  class="command-palette__filter-alert"
+                  aria-hidden="true"
+                >!</span>
+                <span class="command-palette__filter-chevron" aria-hidden="true">⌄</span>
+              </summary>
+
+              <div class="command-palette__filter-panel" role="group" aria-label="Search filters">
+                <header class="command-palette__filter-panel-header">
+                  <strong>Search filters</strong>
+                  <button
+                    v-if="activeFacetCount > 0 || extensionText.trim()"
+                    type="button"
+                    @click="clearAllFacets"
+                  >Clear all</button>
+                </header>
+
+                <section class="command-palette__filter-section" aria-labelledby="search-filter-scope">
+                  <h3 id="search-filter-scope">Scope</h3>
+                  <div class="command-palette__filter-fields">
+                    <label class="command-palette__filter-field">
+                      <span>Location</span>
+                      <select v-model="filters.location" aria-label="Search location">
+                        <option value="active" :disabled="!canSearchActiveRoot">
+                          {{ canSearchActiveRoot ? 'Current folder' : 'Current location (unavailable)' }}
+                        </option>
+                        <option value="home">Home folder</option>
+                      </select>
+                    </label>
+
+                    <label class="command-palette__filter-field">
+                      <span>Depth</span>
+                      <select v-model="filters.depth" aria-label="Search depth">
+                        <option value="direct">Direct children</option>
+                        <option value="all">All subfolders</option>
+                      </select>
+                    </label>
+
+                    <label class="command-palette__filter-field">
+                      <span>Match</span>
+                      <select v-model="matchScope" aria-label="Match source">
+                        <option value="name">Name / path</option>
+                        <option value="content" :disabled="foldersOnly">Content</option>
+                        <option value="all">Name + content</option>
+                      </select>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="command-palette__filter-section" aria-labelledby="search-filter-narrow">
+                  <h3 id="search-filter-narrow">Narrow</h3>
+                  <div class="command-palette__filter-fields command-palette__filter-fields--narrow">
+                    <label class="command-palette__filter-field">
+                      <span>Kind</span>
+                      <select v-model="selectedKind" aria-label="Item kind">
+                        <option value="any">Any item</option>
+                        <option value="files">Files</option>
+                        <option value="folders" :disabled="matchScope === 'content'">Folders</option>
+                      </select>
+                    </label>
+
+                    <label class="command-palette__filter-field">
+                      <span>Modified</span>
+                      <select v-model="filters.modified" aria-label="Modified date">
+                        <option value="any">Any time</option>
+                        <option value="today">Today</option>
+                        <option value="week">Past 7 days</option>
+                        <option value="month">Past 30 days</option>
+                        <option value="year">Past year</option>
+                      </select>
+                    </label>
+
+                    <label
+                      class="command-palette__filter-field"
+                      :class="{ 'is-disabled': foldersOnly }"
+                    >
+                      <span>Size</span>
+                      <select v-model="filters.size" aria-label="File size" :disabled="foldersOnly">
+                        <option value="any">Any size</option>
+                        <option value="small">Under 1 MB</option>
+                        <option value="medium">1–&lt;100 MB</option>
+                        <option value="large" :disabled="matchScope === 'content'">100 MB–&lt;1 GB</option>
+                        <option value="huge" :disabled="matchScope === 'content'">1 GB or more</option>
+                      </select>
+                    </label>
+
+                    <label
+                      class="command-palette__filter-field"
+                      :class="{ 'is-disabled': foldersOnly }"
+                    >
+                      <span>Extensions</span>
+                      <input
+                        v-model="extensionText"
+                        type="text"
+                        inputmode="text"
+                        autocomplete="off"
+                        spellcheck="false"
+                        aria-label="File extensions"
+                        :aria-invalid="Boolean(extensionError)"
+                        :aria-describedby="extensionError ? SEARCH_EXTENSION_ERROR_ID : undefined"
+                        placeholder="pdf, tar.gz"
+                        :disabled="foldersOnly"
+                      >
+                      <small
+                        v-if="extensionError"
+                        :id="SEARCH_EXTENSION_ERROR_ID"
+                        class="command-palette__filter-error"
+                        role="status"
+                        aria-live="polite"
+                        aria-atomic="true"
+                      >{{ extensionError }}</small>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="command-palette__filter-section" aria-labelledby="search-filter-options">
+                  <h3 id="search-filter-options">Options</h3>
+                  <div class="command-palette__filter-checks">
+                    <label class="command-palette__filter-switch">
+                      <span>Include hidden items</span>
+                      <input
+                        v-model="filters.includeHidden"
+                        class="command-palette__switch-input"
+                        type="checkbox"
+                        role="switch"
+                      >
+                      <span class="command-palette__switch" aria-hidden="true"></span>
+                    </label>
+                    <label
+                      class="command-palette__filter-switch"
+                      :class="{ 'is-disabled': isRemoteSearchRoot }"
+                      :title="isRemoteSearchRoot ? 'Ignored-file rules are not available for remote searches.' : undefined"
+                    >
+                      <span>Include ignored items</span>
+                      <input
+                        class="command-palette__switch-input"
+                        type="checkbox"
+                        role="switch"
+                        :checked="!filters.respectIgnore"
+                        :disabled="isRemoteSearchRoot"
+                        @change="filters.respectIgnore = !$event.target.checked"
+                      >
+                      <span class="command-palette__switch" aria-hidden="true"></span>
+                    </label>
+                    <label
+                      class="command-palette__filter-switch"
+                      :class="{ 'is-disabled': isRemoteSearchRoot }"
+                      :title="isRemoteSearchRoot ? 'Following directory links is not available for remote searches.' : undefined"
+                    >
+                      <span>Follow symbolic links</span>
+                      <input
+                        v-model="filters.followSymlinks"
+                        class="command-palette__switch-input"
+                        type="checkbox"
+                        role="switch"
+                        :disabled="isRemoteSearchRoot"
+                      >
+                      <span class="command-palette__switch" aria-hidden="true"></span>
+                    </label>
+                    <template v-if="contentOptionsApplicable">
+                      <label class="command-palette__filter-switch">
+                        <span>Case-sensitive content</span>
+                        <input
+                          v-model="filters.caseSensitive"
+                          class="command-palette__switch-input"
+                          type="checkbox"
+                          role="switch"
+                        >
+                        <span class="command-palette__switch" aria-hidden="true"></span>
+                      </label>
+                      <label class="command-palette__filter-switch">
+                        <span>Content regex</span>
+                        <input
+                          v-model="filters.regex"
+                          class="command-palette__switch-input"
+                          type="checkbox"
+                          role="switch"
+                        >
+                        <span class="command-palette__switch" aria-hidden="true"></span>
+                      </label>
+                      <label class="command-palette__filter-content-size">
+                        <span>Content file limit</span>
+                        <select v-model.number="filters.maxFileBytes">
+                          <option :value="4 * 1024 * 1024">4 MB</option>
+                          <option :value="DEFAULT_CONTENT_FILE_BYTES">24 MB</option>
+                          <option :value="100 * 1024 * 1024">100 MB</option>
+                        </select>
+                      </label>
+                    </template>
+                  </div>
+                </section>
+              </div>
+            </details>
+
+            <div
+              v-if="activeFilterChips.length > 0"
+              class="command-palette__active-filters"
+              role="group"
+              aria-label="Active search filters"
+            >
+              <button
+                v-for="chip in activeFilterChips"
+                :key="chip.id"
+                type="button"
+                class="command-palette__filter-chip"
+                :aria-label="`Remove ${chip.label} filter`"
+                @click="removeFilterChip(chip.id)"
+              >
+                <span>{{ chip.label }}</span>
+                <AppIcon name="x" :size="11" :stroke-width="2" />
+              </button>
+              <button
+                type="button"
+                class="command-palette__filters-clear"
+                @click="clearAllFacets"
+              >Clear</button>
+            </div>
+          </div>
+
+          <div
+            :id="SEARCH_LISTBOX_ID"
+            ref="resultList"
+            class="command-palette__results"
+            role="listbox"
+            aria-label="Search results"
+          >
             <button
               v-for="(result, index) in results"
+              :id="resultOptionId(index)"
               :key="resultKey(result)"
               :ref="(element) => setResultButton(element, index)"
               class="command-palette__result"
               :class="{
                 'command-palette__result--active': index === selectedIndex,
-                'command-palette__result--content': currentMode === 'content',
+                'command-palette__result--content': isContentResult(result),
                 'command-palette__result--command': result.type === 'command',
               }"
               type="button"
               role="option"
+              tabindex="-1"
               :aria-selected="index === selectedIndex"
               @mouseenter="selectedIndex = index"
               @click="openResult(result)"
@@ -1353,7 +2092,7 @@ onBeforeUnmount(() => {
                     </template>
                   </span>
                   <span
-                    v-if="currentMode === 'content'"
+                    v-if="isContentResult(result)"
                     class="command-palette__match-meta"
                   >{{ contentResultMeta(result) }}</span>
                   <span
@@ -1366,15 +2105,26 @@ onBeforeUnmount(() => {
                   class="command-palette__path"
                 >{{ result.parentPath }}</span>
                 <span
-                  v-else-if="currentMode === 'content' && result.lineText"
+                  v-else-if="isContentResult(result)"
                   class="command-palette__snippet"
-                >{{ result.lineText }}</span>
+                >
+                  <template
+                    v-for="(segment, segmentIndex) in snippetSegments(result)"
+                    :key="`${resultKey(result)}-snippet-${segmentIndex}`"
+                  >
+                    <mark
+                      v-if="segment.match"
+                      class="command-palette__snippet-match"
+                    >{{ segment.text }}</mark>
+                    <span v-else>{{ segment.text }}</span>
+                  </template>
+                </span>
                 <span
-                  v-else-if="currentMode !== 'content' && result.parentPath"
+                  v-else-if="result.type !== 'command' && result.parentPath"
                   class="command-palette__path"
                 >{{ result.parentPath }}</span>
                 <span
-                  v-if="currentMode === 'content'"
+                  v-if="isContentResult(result)"
                   class="command-palette__path"
                 >{{ result.parentPath }}</span>
               </span>
@@ -1386,11 +2136,15 @@ onBeforeUnmount(() => {
                 <kbd>{{ resultShortcut(result) }}</kbd>
               </span>
               <span
-                v-else-if="index === selectedIndex"
-                class="command-palette__enter-hint"
-                aria-hidden="true"
+                v-else
+                class="command-palette__result-aside"
               >
-                <kbd>↵</kbd>
+                <small v-if="resultMetadata(result)">{{ resultMetadata(result) }}</small>
+                <span
+                  v-if="index === selectedIndex"
+                  class="command-palette__enter-hint"
+                  aria-hidden="true"
+                ><kbd>↵</kbd></span>
               </span>
             </button>
 
@@ -1399,7 +2153,7 @@ onBeforeUnmount(() => {
               <span>{{ error }}</span>
             </div>
             <div
-              v-else-if="!query.trim() && results.length === 0"
+              v-else-if="!hasSearchIntent && results.length === 0"
               class="command-palette__empty"
             >
               <AppIcon name="search" :size="22" :stroke-width="1.5" />
@@ -1410,11 +2164,16 @@ onBeforeUnmount(() => {
               class="command-palette__empty"
             >
               <AppIcon name="search" :size="22" :stroke-width="1.5" />
-              <span>No matches</span>
+              <span>{{ noMatchesPlaceholder }}</span>
             </div>
+          </div>
           </div>
 
           <footer class="command-palette__footer">
+            <span class="command-palette__hint">
+              <kbd>Ctrl</kbd><kbd>Tab</kbd>
+              <span>Mode</span>
+            </span>
             <span class="command-palette__hint">
               <kbd>↑</kbd><kbd>↓</kbd>
               <span>Navigate</span>
@@ -1450,14 +2209,21 @@ onBeforeUnmount(() => {
 .command-palette {
   display: flex;
   flex-direction: column;
-  width: min(720px, calc(100vw - 48px));
-  max-height: min(640px, calc(100vh - 120px));
+  width: min(800px, calc(100vw - 48px));
+  height: min(640px, calc(100vh - 120px));
   overflow: hidden;
   border: 1px solid var(--control-border);
   border-radius: 14px;
   background: var(--modal-bg);
   box-shadow: var(--shadow-overlay);
   color: var(--text);
+}
+
+.command-palette__body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
 }
 
 /* ── Header ───────────────────────────────────────────────── */
@@ -1648,6 +2414,409 @@ onBeforeUnmount(() => {
   to { transform: rotate(360deg); }
 }
 
+/* ── Search filters ───────────────────────────────────────── */
+.command-palette__filterbar {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  min-height: 28px;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 8px 16px 0;
+}
+
+.command-palette__filter-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.command-palette__filter-menu:not([open]) > .command-palette__filter-panel {
+  display: none;
+}
+
+.command-palette__filter-trigger {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 0 7px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 620;
+  line-height: 1;
+  list-style: none;
+  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+
+.command-palette__filter-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.command-palette__filter-trigger:hover,
+.command-palette__filter-menu[open] > .command-palette__filter-trigger {
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+.command-palette__filter-trigger:focus-visible {
+  border-color: var(--accent-border);
+  outline: 0;
+  box-shadow: var(--accent-focus-ring);
+  color: var(--text);
+}
+
+.command-palette__filter-trigger--error,
+.command-palette__filter-trigger--error:hover,
+.command-palette__filter-menu[open] > .command-palette__filter-trigger--error {
+  color: var(--danger);
+}
+
+.command-palette__filter-count {
+  display: grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  border-radius: 999px;
+  padding: 0 4px;
+  background: rgb(var(--accent-rgb) / 0.16);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.command-palette__filter-alert {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgb(var(--danger-rgb) / 0.14);
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.command-palette__filter-chevron {
+  color: var(--icon);
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+
+.command-palette__filter-menu[open] .command-palette__filter-chevron {
+  transform: rotate(180deg);
+}
+
+.command-palette__filter-panel {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(600px, calc(100vw - 80px));
+  max-height: min(320px, calc(100vh - 358px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--control-border);
+  border-radius: 11px;
+  padding: 6px 12px 12px;
+  background: var(--popover-bg);
+  box-shadow: var(--shadow-overlay);
+  scrollbar-gutter: stable;
+}
+
+.command-palette__filter-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.command-palette__filter-panel-header {
+  min-height: 34px;
+}
+
+.command-palette__filter-panel-header strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.command-palette__filter-panel-header button,
+.command-palette__filters-clear {
+  border-radius: 5px;
+  padding: 3px 5px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 620;
+}
+
+.command-palette__filter-panel-header button:hover,
+.command-palette__filters-clear:hover {
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+.command-palette__filter-panel-header button:focus-visible,
+.command-palette__filters-clear:focus-visible,
+.command-palette__filter-chip:focus-visible {
+  outline: 0;
+  box-shadow: var(--accent-focus-ring);
+}
+
+.command-palette__filter-section {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--hairline);
+  padding: 8px 0 2px;
+}
+
+.command-palette__filter-section + .command-palette__filter-section {
+  margin-top: 8px;
+}
+
+.command-palette__filter-section h3 {
+  margin: 0 0 8px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.045em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.command-palette__filter-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.command-palette__filter-fields--narrow {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.command-palette__filter-field {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.command-palette__filter-field > span {
+  padding-left: 1px;
+  color: var(--text-faint);
+}
+
+.command-palette__filter-field.is-disabled {
+  opacity: 0.44;
+}
+
+.command-palette__filter-field select,
+.command-palette__filter-field input,
+.command-palette__filter-content-size select {
+  width: 100%;
+  height: 30px;
+  min-width: 0;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  outline: 0;
+  padding: 0 8px;
+  background: var(--input-bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.command-palette__filter-field input::placeholder {
+  color: var(--text-faint);
+}
+
+.command-palette__filter-field input[aria-invalid="true"] {
+  border-color: rgb(var(--danger-rgb) / 0.58);
+}
+
+.command-palette__filter-error {
+  overflow-wrap: anywhere;
+  color: var(--danger);
+  font-size: 9.5px;
+  font-weight: 560;
+  line-height: 1.25;
+}
+
+.command-palette__filter-field select:focus,
+.command-palette__filter-field input:focus,
+.command-palette__filter-content-size select:focus {
+  border-color: var(--accent-border);
+  box-shadow: var(--accent-focus-ring);
+}
+
+.command-palette__filter-checks {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px 6px;
+}
+
+.command-palette__filter-checks > label {
+  display: flex;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  gap: 7px;
+  border-radius: 6px;
+  padding: 3px 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 560;
+}
+
+.command-palette__filter-checks > label:hover {
+  background: var(--btn-hover);
+  color: var(--text);
+}
+
+.command-palette__filter-checks > label.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.44;
+}
+
+.command-palette__filter-checks > label.is-disabled:hover {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.command-palette__filter-checks > label.command-palette__filter-switch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  justify-content: initial;
+  cursor: pointer;
+}
+
+.command-palette__filter-checks > label.command-palette__filter-switch.is-disabled {
+  cursor: not-allowed;
+}
+
+.command-palette__filter-switch > span:first-child {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette__switch-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.command-palette__switch {
+  position: relative;
+  display: block;
+  width: 34px;
+  height: 20px;
+  flex: 0 0 auto;
+  border: 1px solid var(--input-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  box-shadow: var(--input-shadow);
+  transition: background 130ms ease, border-color 130ms ease;
+}
+
+.command-palette__switch::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text) 70%, transparent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.26);
+  content: "";
+  transition: transform 130ms ease, background 130ms ease;
+}
+
+.command-palette__switch-input:checked + .command-palette__switch {
+  border-color: var(--accent-border);
+  background: var(--accent);
+}
+
+.command-palette__switch-input:checked + .command-palette__switch::after {
+  background: #ffffff;
+  transform: translateX(16px);
+}
+
+.command-palette__switch-input:focus-visible + .command-palette__switch {
+  box-shadow:
+    var(--accent-focus-ring),
+    var(--input-shadow);
+}
+
+.command-palette__switch-input:disabled + .command-palette__switch {
+  box-shadow: none;
+}
+
+.command-palette__filter-content-size {
+  justify-content: space-between;
+}
+
+.command-palette__filter-content-size select {
+  width: 74px;
+  height: 25px;
+  flex: 0 0 auto;
+  padding: 0 4px;
+}
+
+.command-palette__active-filters {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.command-palette__filter-chip {
+  display: inline-flex;
+  max-width: 210px;
+  height: 26px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid rgb(var(--accent-rgb) / 0.22);
+  border-radius: 999px;
+  padding: 0 7px 0 9px;
+  background: rgb(var(--accent-rgb) / 0.09);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 590;
+}
+
+.command-palette__filter-chip:hover {
+  border-color: rgb(var(--accent-rgb) / 0.36);
+  background: rgb(var(--accent-rgb) / 0.14);
+  color: var(--text);
+}
+
+.command-palette__filter-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-palette__filter-chip :deep(svg) {
+  flex: 0 0 auto;
+  color: var(--icon);
+}
+
+.command-palette__filters-clear {
+  height: 26px;
+}
+
 /* ── Results ──────────────────────────────────────────────── */
 .command-palette__results {
   flex: 1 1 auto;
@@ -1751,6 +2920,14 @@ onBeforeUnmount(() => {
   font-weight: 760;
 }
 
+.command-palette__snippet-match {
+  border-radius: 2px;
+  padding: 0 1px;
+  background: color-mix(in srgb, var(--warning) 24%, transparent);
+  color: color-mix(in srgb, var(--warning) 74%, var(--text));
+  font-weight: 700;
+}
+
 .command-palette__match-meta {
   flex: 0 0 auto;
   color: var(--text-faint);
@@ -1779,6 +2956,24 @@ onBeforeUnmount(() => {
   align-items: center;
   flex: 0 0 auto;
   opacity: 0.9;
+}
+
+.command-palette__result-aside {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.command-palette__result-aside small {
+  overflow: hidden;
+  max-width: 112px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
 }
 
 .command-palette__shortcut {
@@ -1907,6 +3102,15 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .command-palette__spinner {
+    animation: none;
+  }
+
+  .command-palette__switch,
+  .command-palette__switch::after {
+    transition: none;
+  }
+
   .command-palette-enter-active,
   .command-palette-leave-active,
   .command-palette-enter-active .command-palette,

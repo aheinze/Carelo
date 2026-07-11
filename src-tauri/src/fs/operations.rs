@@ -375,20 +375,29 @@ where
 
     emit(0, 0, None);
 
-    // 1. Create directories (depth-first order from the plan). create_dir_all is
-    //    idempotent, so a merge into an existing tree is fine.
+    // 1. Reserve directories depth-first. The final component is created with
+    //    create_dir so overwrite=false cannot merge into a directory that
+    //    appeared after planning.
     let mut failures = plan.failures;
     let mut processed_entries = 0_u64;
+    let mut blocked_destinations = Vec::new();
 
     for (from, to, _metadata) in &plan.dirs {
         checkpoint(Some(from))?;
 
-        if let Err(error) = fs::create_dir_all(to)
-            .map_err(|error| FsError::io("Unable to create destination directory", to, error))
+        if blocked_destinations
+            .iter()
+            .any(|blocked: &PathBuf| to.starts_with(blocked))
         {
-            failures.push(error);
-        } else {
-            processed_entries += 1;
+            continue;
+        }
+
+        match create_destination_directory(to) {
+            Ok(()) => processed_entries += 1,
+            Err(error) => {
+                blocked_destinations.push(to.clone());
+                failures.push(error);
+            }
         }
     }
 
@@ -420,6 +429,13 @@ where
                     }
 
                     let task = &files[index];
+
+                    if blocked_destinations
+                        .iter()
+                        .any(|blocked| task.to.starts_with(blocked))
+                    {
+                        continue;
+                    }
 
                     match copy_file(
                         &task.from,
@@ -482,6 +498,13 @@ where
     for (from, to, overwrite) in &plan.symlinks {
         checkpoint(Some(from))?;
 
+        if blocked_destinations
+            .iter()
+            .any(|blocked| to.starts_with(blocked))
+        {
+            continue;
+        }
+
         match copy_symlink(from, to, *overwrite) {
             Ok(()) => {
                 processed_entries += 1;
@@ -493,6 +516,13 @@ where
 
     // 4. Restore directory permissions/timestamps now that their contents exist.
     for (_from, to, metadata) in &plan.dirs {
+        if blocked_destinations
+            .iter()
+            .any(|blocked| to.starts_with(blocked))
+        {
+            continue;
+        }
+
         if let Ok(directory) = File::open(to) {
             preserve_metadata(&directory, metadata);
         }
@@ -506,12 +536,14 @@ fn resolve_items(items: &[LocalTransferItem]) -> FsResult<Vec<ResolvedTransferIt
     items
         .iter()
         .map(|item| {
-            Ok(ResolvedTransferItem {
+            let resolved = ResolvedTransferItem {
                 from: expand_path(&item.from)?,
                 to: expand_path(&item.to)?,
                 overwrite: item.overwrite,
                 symlink_mode: item.symlink_mode,
-            })
+            };
+            validate_directory_transfer_target(&resolved)?;
+            Ok(resolved)
         })
         .collect()
 }
@@ -522,6 +554,78 @@ struct ResolvedTransferItem {
     to: PathBuf,
     overwrite: bool,
     symlink_mode: SymlinkMode,
+}
+
+fn validate_directory_transfer_target(item: &ResolvedTransferItem) -> FsResult<()> {
+    let Ok(symlink_metadata) = fs::symlink_metadata(&item.from) else {
+        // The normal measure/copy path reports missing or unreadable sources with
+        // its established error codes. This guard is only about recursive targets.
+        return Ok(());
+    };
+
+    if symlink_metadata.file_type().is_symlink()
+        && matches!(item.symlink_mode, SymlinkMode::Preserve)
+    {
+        return Ok(());
+    }
+
+    let metadata = if symlink_metadata.file_type().is_symlink() {
+        match fs::metadata(&item.from) {
+            Ok(metadata) => metadata,
+            Err(_) => return Ok(()),
+        }
+    } else {
+        symlink_metadata
+    };
+
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+
+    let source = fs::canonicalize(&item.from)
+        .map_err(|error| FsError::io("Unable to resolve source directory", &item.from, error))?;
+    let destination = canonicalize_with_missing_tail(&item.to)
+        .map_err(|error| FsError::io("Unable to resolve destination directory", &item.to, error))?;
+
+    if destination == source || destination.starts_with(&source) {
+        return Err(FsError::new(
+            "invalid_transfer_target",
+            "A folder cannot be copied or moved into itself or one of its descendants.",
+            Some(item.to.to_string_lossy().into_owned()),
+        ));
+    }
+
+    Ok(())
+}
+
+fn canonicalize_with_missing_tail(path: &Path) -> std::io::Result<PathBuf> {
+    let mut ancestor = if path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        path.to_path_buf()
+    };
+    let mut missing = Vec::new();
+
+    loop {
+        match fs::canonicalize(&ancestor) {
+            Ok(mut resolved) => {
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = ancestor.file_name().map(|name| name.to_os_string()) else {
+                    return Err(error);
+                };
+                missing.push(name);
+                if !ancestor.pop() || ancestor.as_os_str().is_empty() {
+                    ancestor = PathBuf::from(".");
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 // Measure each item up front, collecting per-item failures (e.g. a file that
@@ -686,8 +790,7 @@ where
             return Err(destination_type_error(to));
         }
 
-        fs::create_dir_all(to)
-            .map_err(|error| FsError::io("Unable to create destination directory", to, error))?;
+        create_destination_directory(to)?;
         progress.current_bytes = 0;
         progress.current_total_bytes = 0;
         progress.processed_entries = progress.processed_entries.saturating_add(1);
@@ -764,6 +867,30 @@ where
     )
 }
 
+fn create_destination_directory(to: &Path) -> FsResult<()> {
+    if let Some(parent) = to.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|error| {
+            FsError::io(
+                "Unable to create destination directory parent",
+                parent,
+                error,
+            )
+        })?;
+    }
+
+    match fs::create_dir(to) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(destination_exists_error(to))
+        }
+        Err(error) => Err(FsError::io(
+            "Unable to create destination directory",
+            to,
+            error,
+        )),
+    }
+}
+
 fn move_path<F, C>(
     from: &Path,
     to: &Path,
@@ -825,7 +952,10 @@ where
         }
     }
 
-    match fs::rename(from, to) {
+    // Use the same platform commit primitive as staged replacements so
+    // overwrite=false cannot clobber an item created after the path_exists
+    // check, while overwrite=true still gets the native atomic replacement.
+    match commit_staged_path(from, to, overwrite) {
         Ok(()) => {
             let mut visited_directories = HashSet::new();
             let measure = measure_path(to, symlink_mode, &mut visited_directories, checkpoint)?;
@@ -883,41 +1013,105 @@ where
     F: FnMut(OperationProgress),
     C: FnMut(Option<&Path>) -> FsResult<()>,
 {
-    if overwrite && path_exists(to)? {
-        remove_existing_file_like(to)?;
-    }
-
-    let reader =
-        File::open(from).map_err(|error| FsError::io("Unable to open source file", from, error))?;
-    let mut writer = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(to)
-        .map_err(|error| FsError::io("Unable to create destination file", to, error))?;
-
-    progress.current_bytes = 0;
-    progress.current_total_bytes = metadata.len();
-    emit_progress(progress, Some(from), true, on_progress);
-
-    copy_file_contents(
-        &reader,
-        &mut writer,
+    copy_file_with_contents(
         from,
         to,
-        metadata.len(),
+        metadata,
+        overwrite,
         progress,
         on_progress,
         checkpoint,
-    )?;
+        |reader, writer, progress, on_progress, checkpoint| {
+            copy_file_contents(
+                reader,
+                writer,
+                from,
+                to,
+                metadata.len(),
+                progress,
+                on_progress,
+                checkpoint,
+            )
+        },
+    )
+}
 
-    // Preserve permissions and timestamps. Best-effort: some targets (FAT,
-    // certain network shares) can't store them, and that must not fail the copy.
-    preserve_metadata(&writer, metadata);
+// Overwrites are staged beside the destination. The existing item is not
+// touched until the complete replacement has been written and flushed, then a
+// same-directory commit asks the platform for its strongest replacement
+// guarantee (rename on Unix, MoveFileExW on Windows).
+// Keeping the writer inside this function also guarantees that it is closed
+// before the rename, which is required by Windows.
+#[allow(clippy::too_many_arguments)]
+fn copy_file_with_contents<F, C, W>(
+    from: &Path,
+    to: &Path,
+    metadata: &fs::Metadata,
+    overwrite: bool,
+    progress: &mut ProgressState,
+    on_progress: &mut F,
+    checkpoint: &mut C,
+    copy_contents: W,
+) -> FsResult<()>
+where
+    F: FnMut(OperationProgress),
+    C: FnMut(Option<&Path>) -> FsResult<()>,
+    W: FnOnce(&File, &mut File, &mut ProgressState, &mut F, &mut C) -> FsResult<()>,
+{
+    let staged_to = if overwrite {
+        Some(temporary_copy_path(to)?)
+    } else {
+        None
+    };
+    let write_to = staged_to.as_deref().unwrap_or(to);
 
-    progress.current_bytes = progress.current_total_bytes;
-    progress.processed_entries = progress.processed_entries.saturating_add(1);
-    emit_progress(progress, Some(from), true, on_progress);
-    Ok(())
+    let reader =
+        File::open(from).map_err(|error| FsError::io("Unable to open source file", from, error))?;
+    let result = (|| {
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(write_to)
+            .map_err(|error| FsError::io("Unable to create destination file", to, error))?;
+
+        progress.current_bytes = 0;
+        progress.current_total_bytes = metadata.len();
+        emit_progress(progress, Some(from), true, on_progress);
+
+        copy_contents(&reader, &mut writer, progress, on_progress, checkpoint)?;
+
+        // Preserve permissions and timestamps. Best-effort: some targets (FAT,
+        // certain network shares) can't store them, and that must not fail the copy.
+        preserve_metadata(&writer, metadata);
+
+        if staged_to.is_some() {
+            writer
+                .sync_all()
+                .map_err(|error| FsError::io("Unable to flush replacement file", to, error))?;
+        }
+
+        // Drop the handle before committing so Windows can rename the staged
+        // file over an existing destination.
+        drop(writer);
+
+        if let Some(staged_to) = staged_to.as_deref() {
+            checkpoint(Some(from))?;
+            place_staged_item(staged_to, to, true, "Unable to replace destination")?;
+        }
+
+        progress.current_bytes = progress.current_total_bytes;
+        progress.processed_entries = progress.processed_entries.saturating_add(1);
+        emit_progress(progress, Some(from), true, on_progress);
+        Ok(())
+    })();
+
+    if result.is_err() {
+        if let Some(staged_to) = staged_to.as_deref() {
+            cleanup_partial_copy(staged_to);
+        }
+    }
+
+    result
 }
 
 // Copy file contents with the fastest method the platform/filesystem offers,
@@ -1187,27 +1381,40 @@ fn path_exists(path: &Path) -> FsResult<bool> {
     }
 }
 
-fn remove_existing_file_like(path: &Path) -> FsResult<()> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| FsError::io("Unable to read destination metadata", path, error))?;
-
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        return Err(destination_type_error(path));
-    }
-
-    fs::remove_file(path)
-        .map_err(|error| FsError::io("Unable to replace existing destination", path, error))
+fn copy_symlink(from: &Path, to: &Path, overwrite: bool) -> FsResult<()> {
+    copy_symlink_with_rename(from, to, overwrite, |from, to| {
+        commit_staged_path(from, to, overwrite)
+    })
 }
 
-fn copy_symlink(from: &Path, to: &Path, overwrite: bool) -> FsResult<()> {
-    if overwrite && path_exists(to)? {
-        remove_existing_file_like(to)?;
+fn copy_symlink_with_rename<R>(from: &Path, to: &Path, overwrite: bool, rename: R) -> FsResult<()>
+where
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    if !overwrite && path_exists(to)? {
+        return Err(destination_exists_error(to));
     }
 
     let target = fs::read_link(from)
         .map_err(|error| FsError::io("Unable to read symbolic link", from, error))?;
 
-    create_symlink(&target, to, from)
+    if !overwrite {
+        return create_symlink(&target, to, from);
+    }
+
+    let staged_to = temporary_copy_path(to)?;
+    if let Err(error) = create_symlink(&target, &staged_to, from) {
+        cleanup_partial_copy(&staged_to);
+        return Err(error);
+    }
+
+    place_staged_item_with_rename(
+        &staged_to,
+        to,
+        true,
+        "Unable to replace destination",
+        rename,
+    )
 }
 
 #[cfg(unix)]
@@ -1279,8 +1486,58 @@ fn cleanup_partial_copy(path: &Path) {
     };
 }
 
+fn temporary_copy_path(to: &Path) -> FsResult<PathBuf> {
+    temporary_operation_path(to, "copy")
+}
+
+// A narrow crate-internal boundary for code paths (such as remote downloads)
+// that produce a complete local replacement themselves. Dropping an
+// uncommitted stage always removes the hidden sibling; after a successful
+// commit the staged path no longer exists, so the same cleanup is harmless.
+pub(crate) struct LocalReplacementStage {
+    path: PathBuf,
+}
+
+impl LocalReplacementStage {
+    pub(crate) fn new(destination: &Path) -> FsResult<Self> {
+        Ok(Self {
+            path: temporary_copy_path(destination)?,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn commit(self, destination: &Path) -> FsResult<()> {
+        place_staged_item(
+            &self.path,
+            destination,
+            true,
+            "Unable to replace destination",
+        )
+    }
+}
+
+impl Drop for LocalReplacementStage {
+    fn drop(&mut self) {
+        cleanup_partial_copy(&self.path);
+    }
+}
+
 fn temporary_move_path(to: &Path) -> FsResult<PathBuf> {
+    temporary_operation_path(to, "move")
+}
+
+fn temporary_operation_path(to: &Path, operation: &str) -> FsResult<PathBuf> {
+    static TEMPORARY_PATH_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
     let parent = to.parent().unwrap_or_else(|| Path::new("."));
+    // The process-wide sequence makes candidates unique even when many copy
+    // workers observe the same clock tick. create_new / symlink creation still
+    // provides the final guard against a stale path from another process.
+    let sequence = TEMPORARY_PATH_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     for attempt in 0..100 {
         let nonce = SystemTime::now()
@@ -1288,34 +1545,279 @@ fn temporary_move_path(to: &Path) -> FsResult<PathBuf> {
             .unwrap_or_default()
             .as_nanos();
         let candidate = parent.join(format!(
-            ".carelo-move-{}-{nonce}-{attempt}.tmp",
-            std::process::id()
+            ".carelo-{operation}-{}-{nonce}-{sequence}-{attempt}.tmp",
+            std::process::id(),
         ));
 
-        if !candidate.exists() {
-            return Ok(candidate);
+        match fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) => {
+                return Err(FsError::io(
+                    "Unable to inspect temporary destination",
+                    &candidate,
+                    error,
+                ))
+            }
         }
     }
 
     Err(FsError::new(
         "temporary_path_unavailable",
-        "Unable to reserve a temporary destination for the move.",
+        format!("Unable to reserve a temporary destination for the {operation}."),
         Some(to.to_string_lossy().into_owned()),
     ))
 }
 
 fn place_temporary_move(temporary_to: &Path, to: &Path, overwrite: bool) -> FsResult<()> {
-    if path_exists(to)? {
-        if !overwrite {
-            return Err(destination_exists_error(to));
-        }
+    place_temporary_move_with_rename(temporary_to, to, overwrite, |from, to| {
+        commit_staged_path(from, to, overwrite)
+    })
+}
 
-        remove_existing_file_like(to)?;
+fn place_temporary_move_with_rename<R>(
+    temporary_to: &Path,
+    to: &Path,
+    overwrite: bool,
+    rename: R,
+) -> FsResult<()>
+where
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    if let Err(error) = sync_staged_item(temporary_to, to) {
+        cleanup_partial_copy(temporary_to);
+        return Err(error);
     }
 
-    fs::rename(temporary_to, to)
-        .map_err(|error| FsError::io("Unable to place moved item", to, error))
+    place_staged_item_with_rename(
+        temporary_to,
+        to,
+        overwrite,
+        "Unable to place moved item",
+        rename,
+    )
 }
+
+fn sync_staged_item(staged_to: &Path, reported_path: &Path) -> FsResult<()> {
+    let metadata = fs::symlink_metadata(staged_to)
+        .map_err(|error| FsError::io("Unable to read staged item", reported_path, error))?;
+
+    if metadata.is_file() {
+        File::open(staged_to)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| FsError::io("Unable to flush staged item", reported_path, error))?;
+    }
+
+    Ok(())
+}
+
+fn place_staged_item(staged_to: &Path, to: &Path, overwrite: bool, action: &str) -> FsResult<()> {
+    place_staged_item_with_rename(staged_to, to, overwrite, action, |from, to| {
+        commit_staged_path(from, to, overwrite)
+    })
+}
+
+fn place_staged_item_with_rename<R>(
+    staged_to: &Path,
+    to: &Path,
+    overwrite: bool,
+    action: &str,
+    rename: R,
+) -> FsResult<()>
+where
+    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    let result = (|| {
+        if path_exists(to)? {
+            if !overwrite {
+                return Err(destination_exists_error(to));
+            }
+
+            let metadata = fs::symlink_metadata(to)
+                .map_err(|error| FsError::io("Unable to read destination metadata", to, error))?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                return Err(destination_type_error(to));
+            }
+        }
+
+        rename(staged_to, to).map_err(|error| FsError::io(action, to, error))
+    })();
+
+    if result.is_err() {
+        cleanup_partial_copy(staged_to);
+    } else {
+        // The file data is synced before commit. Syncing the containing
+        // directory as well makes the rename durable across power loss on
+        // platforms/filesystems that support directory fsync. Unsupported
+        // directory handles are deliberately best-effort after a successful
+        // commit because the replacement can no longer be rolled back safely.
+        sync_parent_directory(to);
+    }
+
+    result
+}
+
+#[cfg(unix)]
+fn commit_staged_path(staged_to: &Path, to: &Path, overwrite: bool) -> std::io::Result<()> {
+    if overwrite {
+        // POSIX rename replaces a non-directory destination atomically when
+        // both paths are in the same directory/filesystem.
+        fs::rename(staged_to, to)
+    } else {
+        commit_staged_path_no_clobber(staged_to, to)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn commit_staged_path_no_clobber(staged_to: &Path, to: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let staged = CString::new(staged_to.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "staged path contains an interior NUL byte",
+        )
+    })?;
+    let destination = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination path contains an interior NUL byte",
+        )
+    })?;
+
+    // SAFETY: both C strings are NUL-terminated and remain alive for the call.
+    // RENAME_NOREPLACE makes the existence check part of the rename itself,
+    // closing the path_exists/rename race without ever deleting the contender.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            staged.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn commit_staged_path_no_clobber(staged_to: &Path, to: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    const RENAME_EXCL: u32 = 0x0000_0004;
+
+    unsafe extern "C" {
+        fn renamex_np(
+            from: *const libc::c_char,
+            to: *const libc::c_char,
+            flags: u32,
+        ) -> libc::c_int;
+    }
+
+    let staged = CString::new(staged_to.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "staged path contains an interior NUL byte",
+        )
+    })?;
+    let destination = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination path contains an interior NUL byte",
+        )
+    })?;
+
+    // SAFETY: both C strings are NUL-terminated and remain alive for the call.
+    let result = unsafe { renamex_np(staged.as_ptr(), destination.as_ptr(), RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn commit_staged_path_no_clobber(staged_to: &Path, to: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(staged_to)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "atomic no-clobber directory placement is unsupported on this platform",
+        ));
+    }
+
+    // link is atomic and fails if `to` already exists. Removing the staged hard
+    // link afterwards leaves the committed name intact.
+    fs::hard_link(staged_to, to)?;
+    fs::remove_file(staged_to)
+}
+
+#[cfg(windows)]
+fn commit_staged_path(staged_to: &Path, to: &Path, overwrite: bool) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let staged: Vec<u16> = staged_to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let flags = MOVEFILE_WRITE_THROUGH
+        | if overwrite {
+            MOVEFILE_REPLACE_EXISTING
+        } else {
+            0
+        };
+
+    // SAFETY: both UTF-16 paths are NUL-terminated and remain alive for the
+    // call. Without REPLACE_EXISTING, MoveFileExW is the Windows no-clobber
+    // primitive; with it, Windows replaces the destination in one operation.
+    let result = unsafe { MoveFileExW(staged.as_ptr(), destination.as_ptr(), flags) };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn commit_staged_path(staged_to: &Path, to: &Path, overwrite: bool) -> std::io::Result<()> {
+    if !overwrite && to.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "destination already exists",
+        ));
+    }
+
+    fs::rename(staged_to, to)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Ok(directory) = File::open(parent) {
+        let _ = directory.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) {}
 
 #[cfg(unix)]
 fn is_cross_device_error(error: &std::io::Error) -> bool {
@@ -1352,6 +1854,376 @@ mod tests {
 
     fn cleanup(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    fn carelo_temporary_items(path: &Path) -> Vec<PathBuf> {
+        fs::read_dir(path)
+            .expect("read test directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".carelo-"))
+            .map(|entry| entry.path())
+            .collect()
+    }
+
+    #[test]
+    fn directory_copy_and_move_reject_descendant_targets_before_mutation() {
+        let root = test_root("descendant-target");
+        let source = root.join("source");
+        fs::create_dir_all(&source).expect("create source");
+        fs::write(source.join("file.txt"), "data").expect("write source file");
+
+        let sequential_destination = source.join("nested/sequential");
+        let sequential_error = copy_items_with_progress(
+            &[dir_item(&source, &sequential_destination)],
+            |_| {},
+            |_| Ok(()),
+        )
+        .expect_err("sequential copy into a descendant must fail");
+        assert_eq!(sequential_error.code, "invalid_transfer_target");
+        assert!(!sequential_destination.exists());
+
+        let parallel_destination = source.join("nested/parallel");
+        let parallel_error = copy_items_parallel(
+            &[dir_item(&source, &parallel_destination)],
+            4,
+            |_| {},
+            |_| Ok(()),
+        )
+        .expect_err("parallel copy into a descendant must fail");
+        assert_eq!(parallel_error.code, "invalid_transfer_target");
+        assert!(!parallel_destination.exists());
+
+        let move_destination = source.join("nested/moved");
+        let move_error =
+            move_items_with_progress(&[dir_item(&source, &move_destination)], |_| {}, |_| Ok(()))
+                .expect_err("move into a descendant must fail");
+        assert_eq!(move_error.code, "invalid_transfer_target");
+        assert!(source.exists());
+        assert!(!move_destination.exists());
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn directory_reservation_never_merges_into_a_late_destination() {
+        let root = test_root("directory-no-clobber");
+        let destination = root.join("destination");
+        fs::create_dir(&destination).expect("create racing destination");
+        fs::write(destination.join("external.txt"), "external").expect("write external file");
+
+        let error = create_destination_directory(&destination)
+            .expect_err("an existing directory must not be merged into");
+
+        assert_eq!(error.code, "destination_exists");
+        assert_eq!(
+            fs::read_to_string(destination.join("external.txt")).expect("read external file"),
+            "external"
+        );
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descendant_guard_resolves_existing_symlinked_destination_parents() {
+        let root = test_root("descendant-symlink-parent");
+        let source = root.join("source");
+        let inside = source.join("inside");
+        let alias = root.join("inside-alias");
+        fs::create_dir_all(&inside).expect("create source child");
+        std::os::unix::fs::symlink(&inside, &alias).expect("create destination parent alias");
+        let destination = alias.join("copy");
+
+        let error =
+            copy_items_with_progress(&[dir_item(&source, &destination)], |_| {}, |_| Ok(()))
+                .expect_err("symlinked descendant must fail");
+
+        assert_eq!(error.code, "invalid_transfer_target");
+        assert!(!destination.exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn overwrite_copy_cancellation_preserves_destination_and_cleans_stage() {
+        let root = test_root("overwrite-copy-cancel");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, "complete replacement").expect("write source");
+        fs::write(&destination, "original destination").expect("write destination");
+        let checkpoint_root = root.clone();
+
+        let error = copy_items_with_progress(
+            &[LocalTransferItem {
+                from: source.to_string_lossy().into_owned(),
+                to: destination.to_string_lossy().into_owned(),
+                overwrite: true,
+                symlink_mode: SymlinkMode::Preserve,
+            }],
+            |_| {},
+            |_| {
+                if !carelo_temporary_items(&checkpoint_root).is_empty() {
+                    Err(FsError::new(
+                        "operation_cancelled",
+                        "The file operation was cancelled.",
+                        Some(source.to_string_lossy().into_owned()),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("overwrite should stop before committing the staged copy");
+
+        assert_eq!(error.code, "operation_cancelled");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read original destination"),
+            "original destination"
+        );
+        assert_eq!(
+            fs::read_to_string(&source).expect("source should remain"),
+            "complete replacement"
+        );
+        assert!(
+            carelo_temporary_items(&root).is_empty(),
+            "cancelled overwrite left a Carelo temporary item"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn overwrite_copy_write_failure_preserves_destination_and_cleans_stage() {
+        let root = test_root("overwrite-copy-write-fault");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, "complete replacement").expect("write source");
+        fs::write(&destination, "original destination").expect("write destination");
+        let metadata = fs::metadata(&source).expect("source metadata");
+        let mut progress = ProgressState::default();
+        let mut on_progress = |_progress: OperationProgress| {};
+        let mut checkpoint = |_path: Option<&Path>| Ok(());
+
+        let error = copy_file_with_contents(
+            &source,
+            &destination,
+            &metadata,
+            true,
+            &mut progress,
+            &mut on_progress,
+            &mut checkpoint,
+            |_reader, writer, _progress, _on_progress, _checkpoint| {
+                writer
+                    .write_all(b"partial replacement")
+                    .expect("stage partial data");
+                Err(FsError::new(
+                    "injected_write_failure",
+                    "Injected destination write failure.",
+                    Some(destination.to_string_lossy().into_owned()),
+                ))
+            },
+        )
+        .expect_err("injected write failure should abort replacement");
+
+        assert_eq!(error.code, "injected_write_failure");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read original destination"),
+            "original destination"
+        );
+        assert!(
+            carelo_temporary_items(&root).is_empty(),
+            "failed overwrite left a Carelo temporary item"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn overwrite_copy_commits_replacement_and_leaves_no_stage() {
+        let root = test_root("overwrite-copy-commit");
+        let source = root.join("source.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&source, "complete replacement").expect("write source");
+        fs::write(&destination, "original destination").expect("write destination");
+
+        copy_items_with_progress(
+            &[LocalTransferItem {
+                from: source.to_string_lossy().into_owned(),
+                to: destination.to_string_lossy().into_owned(),
+                overwrite: true,
+                symlink_mode: SymlinkMode::Preserve,
+            }],
+            |_| {},
+            |_| Ok(()),
+        )
+        .expect("commit staged overwrite");
+
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read replacement"),
+            "complete replacement"
+        );
+        assert!(
+            carelo_temporary_items(&root).is_empty(),
+            "successful overwrite left a Carelo temporary item"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn cross_volume_move_commit_failure_preserves_destination_and_cleans_stage() {
+        let root = test_root("move-commit-fault");
+        let destination = root.join("destination.txt");
+        fs::write(&destination, "original destination").expect("write destination");
+        let staged = root.join(format!(".carelo-move-{}-injected.tmp", std::process::id()));
+        fs::write(&staged, "complete replacement").expect("write staged move");
+
+        let error = place_temporary_move_with_rename(&staged, &destination, true, |_from, _to| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected final placement failure",
+            ))
+        })
+        .expect_err("injected placement failure should abort move");
+
+        assert_eq!(error.code, "permission_denied");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read original destination"),
+            "original destination"
+        );
+        assert!(
+            carelo_temporary_items(&root).is_empty(),
+            "failed move placement left a Carelo temporary item"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn late_destination_cannot_be_clobbered_by_no_overwrite_commit() {
+        let root = test_root("move-late-destination");
+        let destination = root.join("destination.txt");
+        let staged = root.join(format!(
+            ".carelo-move-{}-late-destination.tmp",
+            std::process::id()
+        ));
+        fs::write(&staged, "staged move").expect("write staged move");
+
+        let error = place_temporary_move_with_rename(&staged, &destination, false, |from, to| {
+            // Simulate another process winning the race after the initial
+            // path_exists check but before the actual placement syscall.
+            fs::write(to, "racing destination")?;
+            commit_staged_path(from, to, false)
+        })
+        .expect_err("no-overwrite placement must not clobber a late destination");
+
+        assert_eq!(error.code, "io_error");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read racing destination"),
+            "racing destination"
+        );
+        assert!(
+            carelo_temporary_items(&root).is_empty(),
+            "no-clobber failure left a Carelo temporary item"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn temporary_copy_paths_are_unique_across_parallel_workers() {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+
+        let root = test_root("parallel-temporary-paths");
+        let destination = root.join("destination.txt");
+        let paths = Mutex::new(Vec::new());
+
+        std::thread::scope(|scope| {
+            for _ in 0..64 {
+                scope.spawn(|| {
+                    let path = temporary_copy_path(&destination).expect("temporary copy path");
+                    paths.lock().expect("path lock").push(path);
+                });
+            }
+        });
+
+        let paths = paths.into_inner().expect("collected paths");
+        let unique: HashSet<_> = paths.iter().collect();
+        assert_eq!(unique.len(), paths.len());
+        assert!(carelo_temporary_items(&root).is_empty());
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserved_symlink_commit_failure_keeps_old_link_and_cleans_stage() {
+        let root = test_root("symlink-commit-fault");
+        let old_target = root.join("old-target.txt");
+        let new_target = root.join("new-target.txt");
+        let source = root.join("source-link");
+        let destination = root.join("destination-link");
+        fs::write(&old_target, "old").expect("write old target");
+        fs::write(&new_target, "new").expect("write new target");
+        std::os::unix::fs::symlink("new-target.txt", &source).expect("create source link");
+        std::os::unix::fs::symlink("old-target.txt", &destination)
+            .expect("create destination link");
+
+        let error = copy_symlink_with_rename(&source, &destination, true, |_from, _to| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected symlink placement failure",
+            ))
+        })
+        .expect_err("injected placement failure should preserve destination link");
+
+        assert_eq!(error.code, "permission_denied");
+        assert_eq!(
+            fs::read_link(&destination).expect("read destination link"),
+            PathBuf::from("old-target.txt")
+        );
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read old link target"),
+            "old"
+        );
+        assert!(
+            carelo_temporary_items(&root).is_empty(),
+            "failed symlink replacement left a Carelo temporary item"
+        );
+
+        cleanup(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserved_symlink_overwrite_commits_new_link_and_cleans_stage() {
+        let root = test_root("symlink-overwrite-commit");
+        let old_target = root.join("old-target.txt");
+        let new_target = root.join("new-target.txt");
+        let source = root.join("source-link");
+        let destination = root.join("destination-link");
+        fs::write(&old_target, "old").expect("write old target");
+        fs::write(&new_target, "new").expect("write new target");
+        std::os::unix::fs::symlink("new-target.txt", &source).expect("create source link");
+        std::os::unix::fs::symlink("old-target.txt", &destination)
+            .expect("create destination link");
+
+        copy_symlink(&source, &destination, true).expect("replace preserved symlink");
+
+        assert_eq!(
+            fs::read_link(&destination).expect("read destination link"),
+            PathBuf::from("new-target.txt")
+        );
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read new link target"),
+            "new"
+        );
+        assert!(
+            carelo_temporary_items(&root).is_empty(),
+            "successful symlink overwrite left a Carelo temporary item"
+        );
+
+        cleanup(&root);
     }
 
     #[test]

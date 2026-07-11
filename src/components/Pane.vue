@@ -43,6 +43,10 @@ import {
   shouldConfirmDelete,
 } from '../utils/deleteConfirmation';
 import { extensionForName, isCompressiblePdfEntry, isConvertibleImageEntry } from '../utils/fileTypes';
+import {
+  extractFileOperationBatch,
+  listCompletedFileOperationItems,
+} from '../utils/fileOperationResults';
 import { EDIT_PATH_EVENT, OPEN_BATCH_RENAME_EVENT } from '../utils/appEvents';
 import { renamePromptInputSelection } from '../utils/renamePrompt';
 
@@ -1290,7 +1294,6 @@ async function reloadPanesAfterPointerMove(sourcePaneId, targetPaneId, targetDir
   ];
 
   await refreshDirectories(touchedDirectories, paneIds);
-  requestColumnRefreshes(touchedDirectories, paneIds);
 }
 
 async function transferEntriesToPointerDrop(event, dragOperation, paneDrop) {
@@ -1579,24 +1582,11 @@ function parentDirectoriesForEntries(operationEntries) {
 async function refreshDirectories(paths, paneIds = null) {
   const uniquePaths = [...new Set(paths.filter(Boolean))];
 
-  await Promise.all(uniquePaths.map((path) => store.reloadDirectoryInPanes(path, paneIds)));
+  await store.reloadDirectoriesInPanes(uniquePaths, paneIds);
 }
 
 function refreshPathsForOperationDirectory(directory) {
   return [directory, effectiveDirectory()].filter(Boolean);
-}
-
-function requestColumnRefreshes(paths, paneIds = null) {
-  const uniquePaths = [...new Set(paths.filter(Boolean))];
-  const targetPaneIds = Array.isArray(paneIds) && paneIds.length > 0
-    ? paneIds
-    : ['left', 'right'];
-
-  for (const paneId of targetPaneIds) {
-    for (const path of uniquePaths) {
-      store.requestColumnDirectoryRefresh(paneId, path);
-    }
-  }
 }
 
 async function reloadPanesAfterMove(sourcePaneId, targetDirectory, operationEntries = []) {
@@ -1607,7 +1597,6 @@ async function reloadPanesAfterMove(sourcePaneId, targetDirectory, operationEntr
   ];
 
   await refreshDirectories(touchedDirectories, paneIds);
-  requestColumnRefreshes(touchedDirectories, paneIds);
 }
 
 function handleFileDragStart(payload) {
@@ -3098,14 +3087,31 @@ async function handleContextAction(action) {
 
       if (confirmed) {
         const touchedDirectories = parentDirectoriesForEntries(deleteEntries);
-        await deleteItems(deleteEntries.map((item) => item.path), store.appSettings.deleteMode);
+        let batch = null;
+        let deleteError = null;
+
+        try {
+          batch = await deleteItems(
+            deleteEntries.map((item) => item.path),
+            store.appSettings.deleteMode,
+          );
+        } catch (error) {
+          batch = extractFileOperationBatch(error);
+          deleteError = error;
+        }
+
+        const completedPaths = listCompletedFileOperationItems(batch).map((item) => item.from);
         store.clearSelection(props.paneId);
         await refreshDirectories(touchedDirectories);
         store.recordTrashDelete({
-          paths: deleteEntries.map((item) => item.path),
+          paths: completedPaths,
           directories: touchedDirectories,
-          label: deleteEntries.length === 1 ? `Deleted "${deleteEntries[0].name}"` : `Deleted ${deleteEntries.length} items`,
+          label: completedPaths.length === 1 ? 'Deleted 1 item' : `Deleted ${completedPaths.length} items`,
         });
+
+        if (deleteError) {
+          throw deleteError;
+        }
       }
       return;
     }

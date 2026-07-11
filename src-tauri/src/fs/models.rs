@@ -123,6 +123,8 @@ pub struct FsError {
     pub code: String,
     pub message: String,
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<FileOperationBatchResult>,
 }
 
 impl FsError {
@@ -131,7 +133,13 @@ impl FsError {
             code: code.into(),
             message: message.into(),
             path,
+            batch: None,
         }
+    }
+
+    pub fn with_batch(mut self, batch: FileOperationBatchResult) -> Self {
+        self.batch = Some(batch);
+        self
     }
 
     pub fn io(action: &str, path: &std::path::Path, error: std::io::Error) -> Self {
@@ -154,5 +162,128 @@ impl FsError {
             "Path is empty or invalid.",
             Some(path.to_string()),
         )
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOperationBatchResult {
+    pub items: Vec<FileOperationItemResult>,
+    pub cancelled: bool,
+}
+
+impl FileOperationBatchResult {
+    pub fn new(mut items: Vec<FileOperationItemResult>, cancelled: bool) -> Self {
+        items.sort_by_key(|item| item.index);
+        Self { items, cancelled }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        !self.cancelled
+            && self
+                .items
+                .iter()
+                .all(|item| item.status == FileOperationItemStatus::Completed)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOperationItemResult {
+    pub index: usize,
+    pub from: String,
+    pub to: Option<String>,
+    pub status: FileOperationItemStatus,
+    pub affected: bool,
+    pub errors: Vec<FileOperationError>,
+}
+
+impl FileOperationItemResult {
+    pub fn not_started(index: usize, from: String, to: Option<String>) -> Self {
+        Self {
+            index,
+            from,
+            to,
+            status: FileOperationItemStatus::NotStarted,
+            affected: false,
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn completed(index: usize, from: String, to: Option<String>) -> Self {
+        Self {
+            index,
+            from,
+            to,
+            status: FileOperationItemStatus::Completed,
+            affected: true,
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn failed(
+        index: usize,
+        from: String,
+        to: Option<String>,
+        error: FsError,
+        affected: bool,
+    ) -> Self {
+        Self {
+            index,
+            from,
+            to,
+            status: if affected {
+                FileOperationItemStatus::Partial
+            } else {
+                FileOperationItemStatus::Failed
+            },
+            affected,
+            errors: vec![FileOperationError::from(error)],
+        }
+    }
+
+    pub fn cancelled(
+        index: usize,
+        from: String,
+        to: Option<String>,
+        error: FsError,
+        affected: bool,
+    ) -> Self {
+        Self {
+            index,
+            from,
+            to,
+            status: FileOperationItemStatus::Cancelled,
+            affected,
+            errors: vec![FileOperationError::from(error)],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileOperationItemStatus {
+    Completed,
+    Failed,
+    Partial,
+    Cancelled,
+    NotStarted,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOperationError {
+    pub code: String,
+    pub message: String,
+    pub path: Option<String>,
+}
+
+impl From<FsError> for FileOperationError {
+    fn from(error: FsError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            path: error.path,
+        }
     }
 }

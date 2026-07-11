@@ -21,6 +21,10 @@ and custom tools.
   open in the other pane.
 - Type-ahead find: start typing in a pane to jump to the first item whose name
   matches in the current folder; repeat the key to cycle matches.
+- Unified recursive search for names, paths, and file contents, with location,
+  depth, type, extension, modified-date, size, hidden/ignored-file, symlink,
+  case-sensitive, regex, and content-size facets. Name and content shortcuts open
+  the same search surface with the appropriate preset.
 - Permissions editor: a dedicated dialog to change Unix permissions — owner,
   group, and other read/write/execute plus the setuid, setgid, and sticky bits —
   with octal entry, an `ls -l` style preview, and optional recursive apply for
@@ -248,8 +252,8 @@ operations use native Rust libraries, including the `zip` crate.
 
 - `Tab`: switch active pane
 - `Cmd/Ctrl + Shift + P`: command palette
-- `Cmd/Ctrl + P`: fuzzy file search in the current folder
-- `Cmd/Ctrl + Shift + F`: content search in the current folder
+- `Cmd/Ctrl + P`: unified search with the name/path preset
+- `Cmd/Ctrl + Shift + F`: unified search with the content preset
 - `Cmd/Ctrl + L`: edit the address bar / go to a path
 - `Space`: Quick Look (preview overlay); `Insert`: toggle item selection
 - `Backspace` or `Cmd/Ctrl + Up`: go to parent folder

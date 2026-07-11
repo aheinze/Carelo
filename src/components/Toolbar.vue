@@ -18,6 +18,10 @@ import {
   minimizeTauriWindow,
   toggleMaximizeTauriWindow,
 } from '../composables/useTauriWindow';
+import {
+  extractFileOperationBatch,
+  listCompletedFileOperationItems,
+} from '../utils/fileOperationResults';
 
 const store = useFileManagerStore();
 const dialog = useDialog();
@@ -186,13 +190,28 @@ async function deleteSelection() {
   const touchedDirectories = [...new Set(
     entries.map((entry) => store.parentDirectoryFor(entry.path)).filter(Boolean),
   )];
-  await deleteItems(entries.map((entry) => entry.path), store.appSettings.deleteMode);
-  await Promise.all(touchedDirectories.map((path) => store.reloadDirectoryInPanes(path)));
+  let batch = null;
+  let deleteError = null;
+
+  try {
+    batch = await deleteItems(entries.map((entry) => entry.path), store.appSettings.deleteMode);
+  } catch (error) {
+    batch = extractFileOperationBatch(error);
+    deleteError = error;
+  }
+
+  const completedPaths = listCompletedFileOperationItems(batch).map((item) => item.from);
+  store.clearSelection(store.activePaneId);
+  await store.reloadDirectoriesInPanes(touchedDirectories);
   store.recordTrashDelete({
-    paths: entries.map((entry) => entry.path),
+    paths: completedPaths,
     directories: touchedDirectories,
-    label: entries.length === 1 ? `Deleted "${entries[0].name}"` : `Deleted ${entries.length} items`,
+    label: completedPaths.length === 1 ? 'Deleted 1 item' : `Deleted ${completedPaths.length} items`,
   });
+
+  if (deleteError) {
+    throw deleteError;
+  }
 }
 </script>
 
@@ -415,7 +434,13 @@ async function deleteSelection() {
 
       <label class="search-field">
         <AppIcon name="search" :size="14" />
-        <input v-model="store.searchQuery" data-search-field type="search" placeholder="Search" />
+        <input
+          v-model="store.searchQuery"
+          data-search-field
+          type="search"
+          aria-label="Filter visible items"
+          placeholder="Filter visible items"
+        />
       </label>
 
       <div class="toolbar-divider toolbar-divider--soft" aria-hidden="true"></div>

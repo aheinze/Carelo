@@ -6,6 +6,10 @@ import FileRow from './FileRow.vue';
 import { listDirectory } from '../composables/useFileOperations';
 import { dropEffectFromEvent, parentPath } from '../composables/useFileTransferGuards';
 import { archiveParentPath, archiveRootPath, isArchiveEntry, isArchivePath, isBrowsableEntry } from '../utils/archivePaths';
+import {
+  columnRefreshPaths,
+  reconcileRefreshedColumnTrail,
+} from '../utils/columnViewState';
 import { fileTypeIconKind, fileTypeIconName } from '../utils/fileTypeIcons';
 
 const NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
@@ -176,6 +180,7 @@ let columnLoadVersion = 0;
 let scrollerResizeObserver = null;
 let customScrollbarDrag = null;
 let listColumnResize = null;
+let columnRefreshQueue = Promise.resolve();
 
 const activeSearchQuery = computed(() => props.searchQuery.trim().toLowerCase());
 const isSearchFiltering = computed(() => activeSearchQuery.value.length > 0);
@@ -1948,26 +1953,31 @@ async function refreshColumnDirectory(path) {
       return;
     }
 
-    const selectedIndex = Math.min(
-      columnTrail.value[currentIndex].selectedIndex,
-      entries.length - 1,
-    );
-    const refreshedPaths = new Set(entries.map((entry) => entry.path));
+    const currentColumn = columnTrail.value[currentIndex];
+    const previousVisibleEntries = visibleEntriesForColumn(currentColumn);
+    const focusedPath = previousVisibleEntries[currentColumn.selectedIndex]?.path || '';
+    const anchorPath = previousVisibleEntries[currentColumn.selectionAnchorIndex]?.path || '';
+    const refreshedColumn = { ...currentColumn, entries };
+    const refreshedVisibleEntries = computeVisibleEntriesForColumn(refreshedColumn);
+    const wasDeepestColumn = currentIndex === columnTrail.value.length - 1;
+    const reconciled = reconcileRefreshedColumnTrail({
+      trail: columnTrail.value,
+      columnIndex: currentIndex,
+      entries,
+      visibleEntries: refreshedVisibleEntries,
+      childPaths: entries
+        .filter(isBrowsableEntry)
+        .map(childPathForEntry),
+      focusedPath,
+      anchorPath,
+      normalizePath: cleanPath,
+    });
 
-    columnTrail.value = [
-      ...columnTrail.value.slice(0, currentIndex),
-      {
-        ...columnTrail.value[currentIndex],
-        entries,
-        rawEntryCount: entries.length,
-        selectedIndex,
-        selectedPaths: (columnTrail.value[currentIndex].selectedPaths || [])
-          .filter((path) => refreshedPaths.has(path)),
-        loading: false,
-        error: '',
-      },
-      ...columnTrail.value.slice(currentIndex + 1),
-    ];
+    columnTrail.value = reconciled.trail;
+
+    if (wasDeepestColumn || reconciled.descendantsPruned) {
+      emit('preview-entry', reconciled.focusedEntry);
+    }
   } catch (error) {
     const currentIndex = columnTrail.value.findIndex((column) => cleanPath(column.path) === requestedPath);
 
@@ -1987,6 +1997,22 @@ async function refreshColumnDirectory(path) {
       ...columnTrail.value.slice(currentIndex + 1),
     ];
   }
+}
+
+function enqueueColumnDirectoryRefresh(request) {
+  const paths = columnRefreshPaths(request);
+
+  if (paths.length === 0) {
+    return;
+  }
+
+  columnRefreshQueue = columnRefreshQueue
+    .then(async () => {
+      for (const path of paths) {
+        await refreshColumnDirectory(path);
+      }
+    })
+    .catch(() => {});
 }
 
 onMounted(() => {
@@ -2067,9 +2093,7 @@ watch(
 watch(
   () => props.columnRefreshRequest?.id,
   () => {
-    if (props.columnRefreshRequest?.path) {
-      refreshColumnDirectory(props.columnRefreshRequest.path);
-    }
+    enqueueColumnDirectoryRefresh(props.columnRefreshRequest);
   },
 );
 watch(

@@ -328,6 +328,8 @@ pub fn extract_archive_entry_to(
         )
     })?;
 
+    ensure_supported_extract_kind(entry.kind, &entry.path)?;
+    validate_archive_entries_for_extract(path)?;
     ensure_archive_destination_available(destination, entry.kind, overwrite)?;
 
     match archive_format_for_path(&path.archive_path) {
@@ -827,6 +829,25 @@ fn safe_zip_entry_path(entry: &ZipFile<'_>) -> FsResult<Option<String>> {
     Ok(Some(path))
 }
 
+fn safe_tar_entry_path<R: Read>(entry: &tar::Entry<'_, R>) -> FsResult<Option<String>> {
+    let path = entry
+        .path()
+        .map_err(|error| archive_io_error("Unable to read tar entry path", Path::new(""), error))?;
+    let Some(path) = normalize_archive_inner_path(&path.to_string_lossy()) else {
+        return Err(FsError::new(
+            "unsafe_archive_entry",
+            "The archive contains an unsafe path.",
+            Some(path.to_string_lossy().into_owned()),
+        ));
+    };
+
+    if path.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(path))
+}
+
 fn safe_sevenz_entry_path(entry: &SevenZArchiveEntry) -> FsResult<Option<String>> {
     let Some(path) = normalize_archive_inner_path(entry.name()) else {
         return Err(FsError::new(
@@ -959,10 +980,6 @@ fn ensure_archive_destination_available(
                     Some(destination.to_string_lossy().into_owned()),
                 ));
             }
-
-            fs::remove_file(destination).map_err(|error| {
-                FsError::io("Unable to replace existing file", destination, error)
-            })?;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -972,6 +989,114 @@ fn ensure_archive_destination_available(
                 error,
             ));
         }
+    }
+
+    Ok(())
+}
+
+fn ensure_supported_extract_kind(kind: FileEntryKind, path: &str) -> FsResult<()> {
+    match kind {
+        FileEntryKind::File | FileEntryKind::Directory => Ok(()),
+        FileEntryKind::Symlink => Err(FsError::new(
+            "unsupported_archive_entry",
+            "Archive entries that create symbolic links are not supported.",
+            Some(path.to_string()),
+        )),
+        FileEntryKind::Other => Err(FsError::new(
+            "unsupported_archive_entry",
+            "This archive entry type is not supported for extraction.",
+            Some(path.to_string()),
+        )),
+    }
+}
+
+fn validate_archive_entries_for_extract(path: &ArchivePath) -> FsResult<()> {
+    match archive_format_for_path(&path.archive_path) {
+        Some(BrowsableArchiveFormat::Zip) => {
+            let file = open_archive_file(&path.archive_path)?;
+            let mut archive = ZipArchive::new(file).map_err(|error| {
+                zip_error("Unable to read zip archive", &path.archive_path, error)
+            })?;
+
+            for index in 0..archive.len() {
+                let entry = archive.by_index(index).map_err(|error| {
+                    zip_error(
+                        "Unable to read zip archive entry",
+                        &path.archive_path,
+                        error,
+                    )
+                })?;
+                let Some(entry_path) = safe_zip_entry_path(&entry)? else {
+                    continue;
+                };
+                if !is_selected_archive_entry(&path.inner_path, &entry_path) {
+                    continue;
+                }
+                let _ = zip_entry_to_info_for_extract(&entry)?;
+            }
+
+            Ok(())
+        }
+        Some(BrowsableArchiveFormat::Tar) => {
+            let file = open_archive_file(&path.archive_path)?;
+            validate_tar_entries_for_extract(path, file)
+        }
+        Some(BrowsableArchiveFormat::TarGz) => {
+            let file = open_archive_file(&path.archive_path)?;
+            validate_tar_entries_for_extract(path, GzDecoder::new(file))
+        }
+        Some(BrowsableArchiveFormat::TarZst) => {
+            let file = open_archive_file(&path.archive_path)?;
+            let decoder = zstd::stream::read::Decoder::new(file).map_err(|error| {
+                archive_io_error("Unable to read tar.zst archive", &path.archive_path, error)
+            })?;
+            validate_tar_entries_for_extract(path, decoder)
+        }
+        Some(BrowsableArchiveFormat::SevenZ) => {
+            let archive = SevenZArchive::open(&path.archive_path).map_err(|error| {
+                sevenz_error("Unable to read 7z archive", &path.archive_path, error)
+            })?;
+
+            for entry in &archive.files {
+                let Some(entry_path) = safe_sevenz_entry_path(entry)? else {
+                    continue;
+                };
+                if !is_selected_archive_entry(&path.inner_path, &entry_path) {
+                    continue;
+                }
+                let _ = sevenz_entry_to_info_for_extract(entry)?;
+            }
+
+            Ok(())
+        }
+        None => Err(FsError::new(
+            "unsupported_archive_format",
+            "This archive format is not supported for browsing.",
+            Some(path.archive_path.to_string_lossy().into_owned()),
+        )),
+    }
+}
+
+fn validate_tar_entries_for_extract<R: Read>(path: &ArchivePath, reader: R) -> FsResult<()> {
+    let mut archive = TarArchive::new(reader);
+
+    for entry in archive.entries().map_err(|error| {
+        archive_io_error("Unable to read tar archive", &path.archive_path, error)
+    })? {
+        let entry = entry.map_err(|error| {
+            archive_io_error(
+                "Unable to read tar archive entry",
+                &path.archive_path,
+                error,
+            )
+        })?;
+        let Some(entry_path) = safe_tar_entry_path(&entry)? else {
+            continue;
+        };
+        if !is_selected_archive_entry(&path.inner_path, &entry_path) {
+            continue;
+        }
+        let _ = tar_entry_to_info_for_extract(&entry)?;
     }
 
     Ok(())
@@ -990,6 +1115,12 @@ fn extract_zip_entry_to(path: &ArchivePath, destination: &Path, overwrite: bool)
                 error,
             )
         })?;
+        let Some(entry_path) = safe_zip_entry_path(&entry)? else {
+            continue;
+        };
+        if !is_selected_archive_entry(&path.inner_path, &entry_path) {
+            continue;
+        }
         let Some(info) = zip_entry_to_info_for_extract(&entry)? else {
             continue;
         };
@@ -1021,6 +1152,12 @@ fn extract_tar_entry_to<R: Read>(
                 error,
             )
         })?;
+        let Some(entry_path) = safe_tar_entry_path(&entry)? else {
+            continue;
+        };
+        if !is_selected_archive_entry(&path.inner_path, &entry_path) {
+            continue;
+        }
         let Some(info) = tar_entry_to_info_for_extract(&entry)? else {
             continue;
         };
@@ -1045,6 +1182,12 @@ fn extract_sevenz_entry_to(
 
     let result = reader.for_each_entries(|entry, source| {
         let step = (|| -> FsResult<()> {
+            let Some(entry_path) = safe_sevenz_entry_path(entry)? else {
+                return Ok(());
+            };
+            if !is_selected_archive_entry(&path.inner_path, &entry_path) {
+                return Ok(());
+            }
             let Some(info) = sevenz_entry_to_info_for_extract(entry)? else {
                 return Ok(());
             };
@@ -1110,20 +1253,9 @@ fn zip_entry_to_info_for_extract(entry: &ZipFile<'_>) -> FsResult<Option<Archive
 fn tar_entry_to_info_for_extract<R: Read>(
     entry: &tar::Entry<'_, R>,
 ) -> FsResult<Option<ArchiveEntryInfo>> {
-    let path = entry
-        .path()
-        .map_err(|error| archive_io_error("Unable to read tar entry path", Path::new(""), error))?;
-    let Some(path) = normalize_archive_inner_path(&path.to_string_lossy()) else {
-        return Err(FsError::new(
-            "unsafe_archive_entry",
-            "The archive contains an unsafe path.",
-            Some(path.to_string_lossy().into_owned()),
-        ));
-    };
-
-    if path.is_empty() {
+    let Some(path) = safe_tar_entry_path(entry)? else {
         return Ok(None);
-    }
+    };
 
     let entry_type = entry.header().entry_type();
 
@@ -1140,7 +1272,11 @@ fn tar_entry_to_info_for_extract<R: Read>(
     } else if entry_type.is_file() {
         FileEntryKind::File
     } else {
-        FileEntryKind::Other
+        return Err(FsError::new(
+            "unsupported_archive_entry",
+            "This tar archive entry type is not supported for extraction.",
+            Some(path),
+        ));
     };
 
     Ok(Some(ArchiveEntryInfo {
@@ -1172,6 +1308,13 @@ fn sevenz_entry_to_info_for_extract(
     }
 
     Ok(Some(info))
+}
+
+fn is_selected_archive_entry(selected_path: &str, entry_path: &str) -> bool {
+    entry_path == selected_path
+        || entry_path
+            .strip_prefix(selected_path)
+            .is_some_and(|remainder| remainder.starts_with('/'))
 }
 
 fn relative_extract_path(selected_path: &str, entry_path: &str) -> Option<PathBuf> {
@@ -1241,7 +1384,7 @@ fn write_archive_entry<R: Read + ?Sized>(
     destination: &Path,
     relative_path: &Path,
     overwrite: bool,
-    _size: u64,
+    expected_size: u64,
 ) -> FsResult<()> {
     let output_path = if relative_path.as_os_str().is_empty() {
         destination.to_path_buf()
@@ -1257,7 +1400,11 @@ fn write_archive_entry<R: Read + ?Sized>(
     }
 
     if kind != FileEntryKind::File {
-        return Ok(());
+        return Err(FsError::new(
+            "unsupported_archive_entry",
+            "This archive entry type is not supported for extraction.",
+            Some(output_path.to_string_lossy().into_owned()),
+        ));
     }
 
     if let Some(parent) = output_path.parent() {
@@ -1266,26 +1413,265 @@ fn write_archive_entry<R: Read + ?Sized>(
         })?;
     }
 
-    if overwrite && output_path.exists() {
-        fs::remove_file(&output_path).map_err(|error| {
-            FsError::io(
-                "Unable to replace existing extracted file",
-                &output_path,
-                error,
-            )
-        })?;
+    let (stage, mut output) = ArchiveFileStage::create(&output_path)?;
+    let copied = io::copy(reader, &mut output)
+        .map_err(|error| FsError::io("Unable to write extracted file", &output_path, error))?;
+
+    if copied != expected_size {
+        return Err(FsError::new(
+            "archive_entry_size_mismatch",
+            format!(
+                "The archive entry ended after {copied} bytes; expected {expected_size} bytes."
+            ),
+            Some(output_path.to_string_lossy().into_owned()),
+        ));
     }
 
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&output_path)
-        .map_err(|error| FsError::io("Unable to create extracted file", &output_path, error))?;
+    output
+        .flush()
+        .map_err(|error| FsError::io("Unable to flush extracted file", &output_path, error))?;
+    output
+        .sync_all()
+        .map_err(|error| FsError::io("Unable to sync extracted file", &output_path, error))?;
+    drop(output);
 
-    io::copy(reader, &mut output)
-        .map(|_| ())
-        .map_err(|error| FsError::io("Unable to write extracted file", &output_path, error))
+    stage.commit(&output_path, overwrite)
 }
+
+struct ArchiveFileStage {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl ArchiveFileStage {
+    fn create(destination: &Path) -> FsResult<(Self, File)> {
+        static STAGE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let sequence = STAGE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        for attempt in 0..100 {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = parent.join(format!(
+                ".carelo-extract-{}-{nonce}-{sequence}-{attempt}.tmp",
+                std::process::id()
+            ));
+
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => {
+                    return Ok((
+                        Self {
+                            path,
+                            committed: false,
+                        },
+                        file,
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(FsError::io(
+                        "Unable to create temporary extracted file",
+                        destination,
+                        error,
+                    ));
+                }
+            }
+        }
+
+        Err(FsError::new(
+            "temporary_path_unavailable",
+            "Unable to allocate a temporary path for the extracted file.",
+            Some(destination.to_string_lossy().into_owned()),
+        ))
+    }
+
+    fn commit(mut self, destination: &Path, overwrite: bool) -> FsResult<()> {
+        let result = commit_archive_file(&self.path, destination, overwrite);
+
+        match result {
+            Ok(()) => {
+                self.committed = true;
+                sync_archive_parent_directory(destination);
+                Ok(())
+            }
+            Err(error) if !overwrite && error.kind() == io::ErrorKind::AlreadyExists => {
+                Err(FsError::new(
+                    "destination_exists",
+                    "An item already exists at the destination.",
+                    Some(destination.to_string_lossy().into_owned()),
+                ))
+            }
+            Err(error) => Err(FsError::io(
+                "Unable to place extracted file",
+                destination,
+                error,
+            )),
+        }
+    }
+}
+
+impl Drop for ArchiveFileStage {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn commit_archive_file(staged: &Path, destination: &Path, overwrite: bool) -> io::Result<()> {
+    if overwrite {
+        fs::rename(staged, destination)
+    } else {
+        commit_archive_file_no_clobber(staged, destination)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn commit_archive_file_no_clobber(staged: &Path, destination: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let staged = CString::new(staged.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staged path contains an interior NUL byte",
+        )
+    })?;
+    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination path contains an interior NUL byte",
+        )
+    })?;
+
+    // SAFETY: both C strings are NUL-terminated and remain alive for the call.
+    // RENAME_NOREPLACE makes the no-clobber check and placement one operation.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            staged.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn commit_archive_file_no_clobber(staged: &Path, destination: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    const RENAME_EXCL: u32 = 0x0000_0004;
+
+    unsafe extern "C" {
+        fn renamex_np(
+            from: *const libc::c_char,
+            to: *const libc::c_char,
+            flags: u32,
+        ) -> libc::c_int;
+    }
+
+    let staged = CString::new(staged.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "staged path contains an interior NUL byte",
+        )
+    })?;
+    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination path contains an interior NUL byte",
+        )
+    })?;
+
+    // SAFETY: both C strings are NUL-terminated and remain alive for the call.
+    let result = unsafe { renamex_np(staged.as_ptr(), destination.as_ptr(), RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn commit_archive_file_no_clobber(staged: &Path, destination: &Path) -> io::Result<()> {
+    fs::hard_link(staged, destination)?;
+    let _ = fs::remove_file(staged);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn commit_archive_file(staged: &Path, destination: &Path, overwrite: bool) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+
+    #[link(name = "Kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let staged: Vec<u16> = staged.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let flags = MOVEFILE_WRITE_THROUGH
+        | if overwrite {
+            MOVEFILE_REPLACE_EXISTING
+        } else {
+            0
+        };
+
+    // SAFETY: both UTF-16 paths are NUL-terminated and remain alive for the call.
+    let result = unsafe { MoveFileExW(staged.as_ptr(), destination.as_ptr(), flags) };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn commit_archive_file(staged: &Path, destination: &Path, overwrite: bool) -> io::Result<()> {
+    if !overwrite && destination.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destination already exists",
+        ));
+    }
+
+    fs::rename(staged, destination)
+}
+
+#[cfg(unix)]
+fn sync_archive_parent_directory(path: &Path) {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if let Ok(directory) = File::open(parent) {
+        let _ = directory.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_archive_parent_directory(_path: &Path) {}
 
 fn zip_modified_at(datetime: zip::DateTime) -> Option<u64> {
     unix_seconds_from_ymd_hms(
@@ -3561,10 +3947,61 @@ fn archive_io_error(action: &str, path: &Path, error: io::Error) -> FsError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::{Read, Seek, SeekFrom, Write};
 
     fn test_root(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("carelo-archive-test-{}-{name}", std::process::id()))
+    }
+
+    fn assert_no_extract_stages(directory: &Path) {
+        let stages = fs::read_dir(directory)
+            .expect("read test directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".carelo-extract-")
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+
+        assert!(stages.is_empty(), "temporary stages remain: {stages:?}");
+    }
+
+    fn write_single_file_zip(path: &Path, entry_name: &str, contents: &[u8]) {
+        let file = File::create(path).expect("create zip archive");
+        let mut archive = ZipWriter::new(file);
+        archive
+            .start_file(
+                entry_name,
+                FileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .expect("start zip entry");
+        archive.write_all(contents).expect("write zip entry");
+        archive.finish().expect("finish zip archive");
+    }
+
+    fn write_single_tar_entry(path: &Path, entry_name: &str, entry_type: tar::EntryType) {
+        let file = File::create(path).expect("create tar archive");
+        let mut archive = TarBuilder::new(file);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(entry_type);
+        header.set_mode(0o644);
+        header.set_size(0);
+        header.set_mtime(0);
+
+        if entry_type.is_hard_link() || entry_type.is_symlink() {
+            archive
+                .append_link(&mut header, entry_name, "target.txt")
+                .expect("append tar link entry");
+        } else {
+            archive
+                .append_data(&mut header, entry_name, io::empty())
+                .expect("append tar entry");
+        }
+
+        archive.finish().expect("finish tar archive");
     }
 
     #[test]
@@ -3757,6 +4194,266 @@ mod tests {
             fs::read_to_string(copied_path).expect("read copied file"),
             "nested"
         );
+
+        let copied_folder = root.join("copied-folder");
+        extract_archive_entry_to(&folder_path, &copied_folder, false).expect("copy directory out");
+        assert_eq!(
+            fs::read_to_string(copied_folder.join("nested.txt"))
+                .expect("read copied directory entry"),
+            "nested"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn archive_entry_replace_is_atomic_and_no_clobbering() {
+        let root = test_root("entry-replace");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create test root");
+
+        let archive_path = root.join("replacement.zip");
+        write_single_file_zip(&archive_path, "note.txt", b"replacement");
+        let archive_entry = ArchivePath {
+            archive_path,
+            inner_path: "note.txt".to_string(),
+        };
+        let destination = root.join("note.txt");
+        fs::write(&destination, "original").expect("write existing destination");
+
+        let error = extract_archive_entry_to(&archive_entry, &destination, false)
+            .expect_err("no-clobber extraction should reject an existing destination");
+        assert_eq!(error.code, "destination_exists");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read preserved destination"),
+            "original"
+        );
+
+        extract_archive_entry_to(&archive_entry, &destination, true)
+            .expect("overwrite existing destination");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read replaced destination"),
+            "replacement"
+        );
+        assert_no_extract_stages(&root);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn archive_stage_no_clobber_preserves_a_late_destination() {
+        let root = test_root("stage-no-clobber-race");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create test root");
+
+        let destination = root.join("note.txt");
+        let (stage, mut staged_file) =
+            ArchiveFileStage::create(&destination).expect("create archive stage");
+        staged_file
+            .write_all(b"replacement")
+            .expect("write staged replacement");
+        staged_file.sync_all().expect("sync staged replacement");
+        drop(staged_file);
+
+        fs::write(&destination, "contender").expect("create late destination");
+        let error = stage
+            .commit(&destination, false)
+            .expect_err("no-clobber commit should reject the late destination");
+
+        assert_eq!(error.code, "destination_exists");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read late destination"),
+            "contender"
+        );
+        assert_no_extract_stages(&root);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn corrupt_archive_entry_preserves_existing_destination() {
+        let root = test_root("corrupt-entry-preserves-destination");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create test root");
+
+        let archive_path = root.join("corrupt.zip");
+        write_single_file_zip(&archive_path, "note.txt", b"replacement");
+
+        let data_start = {
+            let file = File::open(&archive_path).expect("open zip archive");
+            let mut archive = ZipArchive::new(file).expect("read zip archive");
+            let entry = archive.by_index(0).expect("read zip entry");
+            entry.data_start()
+        };
+        let mut archive_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&archive_path)
+            .expect("open zip archive for corruption");
+        archive_file
+            .seek(SeekFrom::Start(data_start))
+            .expect("seek to zip data");
+        let mut first_byte = [0_u8; 1];
+        archive_file
+            .read_exact(&mut first_byte)
+            .expect("read zip data byte");
+        first_byte[0] ^= 0xff;
+        archive_file
+            .seek(SeekFrom::Start(data_start))
+            .expect("seek back to zip data");
+        archive_file
+            .write_all(&first_byte)
+            .expect("corrupt zip data");
+        archive_file.sync_all().expect("sync corrupt zip archive");
+
+        let destination = root.join("note.txt");
+        fs::write(&destination, "original").expect("write existing destination");
+        let archive_entry = ArchivePath {
+            archive_path,
+            inner_path: "note.txt".to_string(),
+        };
+
+        extract_archive_entry_to(&archive_entry, &destination, true)
+            .expect_err("corrupt entry should fail extraction");
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read preserved destination"),
+            "original"
+        );
+        assert_no_extract_stages(&root);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rejects_unsupported_tar_entry_kinds_without_replacing_destination() {
+        let root = test_root("unsupported-tar-entry-kinds");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create test root");
+
+        let cases = [
+            ("symlink", tar::EntryType::symlink()),
+            ("hard-link", tar::EntryType::hard_link()),
+            ("fifo", tar::EntryType::fifo()),
+            ("other", tar::EntryType::new(b'Z')),
+        ];
+
+        for (name, entry_type) in cases {
+            let archive_path = root.join(format!("{name}.tar"));
+            write_single_tar_entry(&archive_path, "entry", entry_type);
+            let destination = root.join(format!("{name}.txt"));
+            fs::write(&destination, "original").expect("write existing destination");
+
+            let error = extract_archive_entry_to(
+                &ArchivePath {
+                    archive_path,
+                    inner_path: "entry".to_string(),
+                },
+                &destination,
+                true,
+            )
+            .expect_err("unsupported tar entry should fail extraction");
+
+            assert_eq!(error.code, "unsupported_archive_entry");
+            assert_eq!(
+                fs::read_to_string(&destination).expect("read preserved destination"),
+                "original",
+                "destination changed for {name} entry"
+            );
+        }
+
+        assert_no_extract_stages(&root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn preflights_unsupported_tar_children_before_creating_destination() {
+        let root = test_root("unsupported-tar-child-preflight");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create test root");
+
+        let archive_path = root.join("folder.tar");
+        let archive_file = File::create(&archive_path).expect("create tar archive");
+        let mut archive = TarBuilder::new(archive_file);
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_entry_type(tar::EntryType::file());
+        file_header.set_mode(0o644);
+        file_header.set_size(4);
+        file_header.set_mtime(0);
+        archive
+            .append_data(&mut file_header, "folder/good.txt", &b"good"[..])
+            .expect("append regular tar entry");
+        let mut fifo_header = tar::Header::new_gnu();
+        fifo_header.set_entry_type(tar::EntryType::fifo());
+        fifo_header.set_mode(0o644);
+        fifo_header.set_size(0);
+        fifo_header.set_mtime(0);
+        archive
+            .append_data(&mut fifo_header, "folder/pipe", io::empty())
+            .expect("append fifo tar entry");
+        archive.finish().expect("finish tar archive");
+
+        let destination = root.join("extracted-folder");
+        let error = extract_archive_entry_to(
+            &ArchivePath {
+                archive_path,
+                inner_path: "folder".to_string(),
+            },
+            &destination,
+            false,
+        )
+        .expect_err("unsupported child should fail preflight");
+
+        assert_eq!(error.code, "unsupported_archive_entry");
+        assert!(!destination.exists());
+        assert_no_extract_stages(&root);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unrelated_unsupported_tar_entry_does_not_block_selected_file() {
+        let root = test_root("unrelated-unsupported-tar-entry");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create test root");
+
+        let archive_path = root.join("mixed.tar");
+        let archive_file = File::create(&archive_path).expect("create tar archive");
+        let mut archive = TarBuilder::new(archive_file);
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_entry_type(tar::EntryType::file());
+        file_header.set_mode(0o644);
+        file_header.set_size(4);
+        file_header.set_mtime(0);
+        archive
+            .append_data(&mut file_header, "selected.txt", &b"good"[..])
+            .expect("append selected regular entry");
+        let mut fifo_header = tar::Header::new_gnu();
+        fifo_header.set_entry_type(tar::EntryType::fifo());
+        fifo_header.set_mode(0o644);
+        fifo_header.set_size(0);
+        fifo_header.set_mtime(0);
+        archive
+            .append_data(&mut fifo_header, "unrelated-pipe", io::empty())
+            .expect("append unrelated fifo entry");
+        archive.finish().expect("finish tar archive");
+
+        let destination = root.join("selected.txt");
+        extract_archive_entry_to(
+            &ArchivePath {
+                archive_path,
+                inner_path: "selected.txt".to_string(),
+            },
+            &destination,
+            false,
+        )
+        .expect("extract selected regular entry");
+
+        assert_eq!(
+            fs::read_to_string(&destination).expect("read selected extraction"),
+            "good"
+        );
+        assert!(!root.join("unrelated-pipe").exists());
+        assert_no_extract_stages(&root);
 
         let _ = fs::remove_dir_all(&root);
     }

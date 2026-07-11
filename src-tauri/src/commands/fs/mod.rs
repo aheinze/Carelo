@@ -1,5 +1,8 @@
 use crate::fs::local::LocalFileProvider;
-use crate::fs::models::{FileEntry, FileEntryKind, FileMetadata, FsError, FsResult, VolumeEntry};
+use crate::fs::models::{
+    FileEntry, FileEntryKind, FileMetadata, FileOperationBatchResult, FileOperationItemResult,
+    FileOperationItemStatus, FsError, FsResult, VolumeEntry,
+};
 use crate::fs::provider::FileProvider;
 use crate::fs::remote::{
     check_registered_remote, check_remote, copy_local_to_remote_item, copy_remote_item,
@@ -128,6 +131,152 @@ pub struct ContentSearchResult {
     pub score: i64,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, Eq, Hash, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum UnifiedSearchMatchScope {
+    Name,
+    Content,
+    #[default]
+    #[serde(rename = "all", alias = "both")]
+    All,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, Hash, PartialEq)]
+pub enum UnifiedSearchCategory {
+    #[serde(rename = "directory", alias = "folder")]
+    Directory,
+    #[serde(rename = "archive")]
+    Archive,
+    #[serde(rename = "image")]
+    Image,
+    #[serde(rename = "video")]
+    Video,
+    #[serde(rename = "audio")]
+    Audio,
+    #[serde(rename = "config")]
+    Config,
+    #[serde(rename = "code")]
+    Code,
+    #[serde(rename = "spreadsheet")]
+    Spreadsheet,
+    #[serde(rename = "presentation")]
+    Presentation,
+    #[serde(rename = "document")]
+    Document,
+    #[serde(rename = "file", alias = "other")]
+    File,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiedSearchOptions {
+    #[serde(default = "default_unified_search_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub match_scope: UnifiedSearchMatchScope,
+    #[serde(default)]
+    pub include_hidden: bool,
+    #[serde(default = "default_true")]
+    pub respect_ignore: bool,
+    #[serde(default = "default_true")]
+    pub include_files: bool,
+    #[serde(default = "default_true")]
+    pub include_directories: bool,
+    #[serde(default)]
+    pub follow_symlinks: bool,
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+    #[serde(default)]
+    pub categories: Vec<UnifiedSearchCategory>,
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    #[serde(default, alias = "minSize")]
+    pub min_size_bytes: Option<u64>,
+    #[serde(default, alias = "maxSize")]
+    pub max_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub modified_after: Option<u64>,
+    #[serde(default)]
+    pub modified_before: Option<u64>,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub regex: bool,
+    #[serde(
+        default = "default_content_search_max_file_bytes",
+        alias = "maxContentFileBytes",
+        alias = "maxFileBytes"
+    )]
+    pub max_content_bytes: u64,
+}
+
+impl Default for UnifiedSearchOptions {
+    fn default() -> Self {
+        Self {
+            limit: default_unified_search_limit(),
+            match_scope: UnifiedSearchMatchScope::All,
+            include_hidden: false,
+            respect_ignore: true,
+            include_files: true,
+            include_directories: true,
+            follow_symlinks: false,
+            max_depth: None,
+            categories: Vec::new(),
+            extensions: Vec::new(),
+            min_size_bytes: None,
+            max_size_bytes: None,
+            modified_after: None,
+            modified_before: None,
+            case_sensitive: false,
+            regex: false,
+            max_content_bytes: default_content_search_max_file_bytes(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Eq, PartialEq)]
+pub enum UnifiedSearchMatchSource {
+    #[serde(rename = "name")]
+    Name,
+    #[serde(rename = "content")]
+    Content,
+    #[serde(rename = "both")]
+    Both,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiedSearchResult {
+    pub name: String,
+    pub path: String,
+    pub parent_path: String,
+    pub kind: String,
+    pub category: UnifiedSearchCategory,
+    pub size: Option<u64>,
+    pub modified_at: Option<u64>,
+    pub match_source: UnifiedSearchMatchSource,
+    pub match_indices: Vec<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_number: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_end: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_count: Option<usize>,
+    pub score: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifiedSearchResponse {
+    pub results: Vec<UnifiedSearchResult>,
+    pub scanned_entries: u64,
+    pub matched_entries: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextPreview {
@@ -170,6 +319,10 @@ fn default_content_search_limit() -> usize {
     120
 }
 
+fn default_unified_search_limit() -> usize {
+    120
+}
+
 fn default_content_search_max_file_bytes() -> u64 {
     24 * 1024 * 1024
 }
@@ -199,7 +352,7 @@ pub use preview::{
     read_text_preview, MediaStreamState,
 };
 pub use remotes::{add_remote_volume, list_remote_volumes, remove_remote_volume};
-pub use search::{search_content, search_files, FileSearchIndexState};
+pub use search::{search_content, search_files, unified_search, FileSearchIndexState};
 pub use size::measure_items_size;
 pub use state::{
     cancel_file_operation, pause_file_operation, resume_file_operation, FileOperationState,

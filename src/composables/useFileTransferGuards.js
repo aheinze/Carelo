@@ -11,6 +11,13 @@ import { useDialog } from './useDialog';
 import { useFileManagerStore } from '../stores/fileManagerStore';
 import { archiveParentPath, isArchivePath, joinArchiveAwarePath } from '../utils/archivePaths';
 import { formatFileDateTime } from '../utils/dateFormat';
+import { isSameOrChildLocalPath } from '../utils/localPaths';
+import {
+  extractFileOperationBatch,
+  listCompletedFileOperationItems,
+  listSafeRetryFileOperationItems,
+  mapFileOperationItemsToInputs,
+} from '../utils/fileOperationResults';
 
 export function joinPath(directory, name) {
   if (isArchivePath(directory)) {
@@ -54,36 +61,7 @@ export function siblingPath(path, nextName) {
 }
 
 export function isSameOrChildPath(path, parent) {
-  const child = cleanPath(path);
-  const base = cleanPath(parent);
-
-  return child === base || (base !== '/' && child.startsWith(`${base}/`));
-}
-
-function transferItemContainsPath(item, path) {
-  const candidate = cleanPath(path);
-
-  if (!candidate) {
-    return false;
-  }
-
-  return [item?.from, item?.to].some((root) => root && isSameOrChildPath(candidate, root));
-}
-
-function retryItemsForFailure(items, failedPath) {
-  const fallback = items.map((item) => ({ ...item }));
-
-  if (!failedPath) {
-    return fallback;
-  }
-
-  const failedIndex = items.findIndex((item) => transferItemContainsPath(item, failedPath));
-
-  if (failedIndex < 0) {
-    return fallback;
-  }
-
-  return items.slice(failedIndex).map((item) => ({ ...item }));
+  return isSameOrChildLocalPath(cleanPath(path), cleanPath(parent));
 }
 
 function itemLabel(count) {
@@ -764,10 +742,11 @@ export function useFileTransferGuards() {
       ? [targetDirectory, ...sourceParents]
       : [targetDirectory];
     const runItems = items.map((item) => ({ ...item }));
-    let retryItems = runItems.map((item) => ({ ...item }));
+    let retryItems = [];
+    let retryEntries = [];
     const retryAction = () => runQueuedTransfer({
       items: retryItems,
-      entries: sourceEntries,
+      entries: retryEntries,
       mode,
       targetDirectory,
     });
@@ -786,79 +765,100 @@ export function useFileTransferGuards() {
     // 'off' forces serial transfers; otherwise the backend picks concurrency
     // by storage type (high for remote, serial for spinning disks).
     const maxConcurrency = store.transferMaxConcurrency();
+    let batch = null;
+    let operationError = null;
 
     try {
       if (mode === 'move') {
-        await moveItems(runItems, jobId, maxConcurrency);
+        batch = await moveItems(runItems, jobId, maxConcurrency);
       } else {
-        await copyItems(runItems, jobId, maxConcurrency);
-      }
-
-      // Re-key color tags before the reload so the moved file keeps its dot
-      // immediately (no-op when nothing was tagged).
-      if (mode === 'move') {
-        await store.relocateFileTags(runItems.map((item) => ({ from: item.from, to: item.to }))).catch(() => {});
-      }
-
-      await Promise.all(
-        [...new Set(touchedDirectories.filter(Boolean))]
-          .map((path) => store.reloadDirectoryInPanes(path)),
-      );
-      store.completeQueueJob(jobId, `${itemText} ${mode === 'move' ? 'moved' : 'copied'}`);
-
-      if (transferIsUndoable(runItems)) {
-        if (mode === 'move') {
-          store.recordHistory({
-            kind: 'move',
-            label: `${itemText} moved`,
-            items: runItems.map((item) => ({
-              from: item.from,
-              to: item.to,
-              symlinkMode: item.symlinkMode,
-            })),
-            directories: [...new Set(touchedDirectories.filter(Boolean))],
-          });
-        } else {
-          // Only the items we newly created are safe to delete on undo; items
-          // that replaced an existing file can't restore the original.
-          const createdPaths = runItems
-            .filter((item) => !item.overwrite)
-            .map((item) => item.to);
-
-          if (createdPaths.length > 0) {
-            store.recordHistory({
-              kind: 'copy',
-              label: `${itemText} copied`,
-              items: runItems.map((item) => ({ ...item })),
-              createdPaths,
-              directories: [targetDirectory].filter(Boolean),
-            });
-          }
-        }
+        batch = await copyItems(runItems, jobId, maxConcurrency);
       }
     } catch (error) {
-      // Operations now continue past individual item failures, so some items
-      // may have completed before the error. Refresh so the panes match disk.
-      await Promise.allSettled(
-        [...new Set(touchedDirectories.filter(Boolean))]
-          .map((path) => store.reloadDirectoryInPanes(path)),
-      );
-
-      if (error?.code === 'operation_cancelled') {
-        store.cancelQueueJobDone(jobId);
-        return;
-      }
-
-      const currentJob = store.queue.find((job) => job.id === jobId);
-      retryItems = retryItemsForFailure(runItems, error?.path || currentJob?.currentPath);
-      store.failQueueJob(jobId, error?.message || `${operationLabel} failed.`, {
-        failedItems: retryItems.map((item) => ({
-          path: item.from,
-          message: error?.message || 'Failed',
-        })),
-      });
-      throw error;
+      operationError = error;
+      batch = extractFileOperationBatch(error);
     }
+
+    const completedPairs = mapFileOperationItemsToInputs(
+      listCompletedFileOperationItems(batch),
+      runItems,
+    ).filter(({ input }) => Boolean(input));
+    const completedItems = completedPairs.map(({ input }) => input);
+
+    // Re-key tags and history only for top-level items the backend confirmed
+    // complete. Partial or affected items must never enter an automatic inverse.
+    if (mode === 'move' && completedItems.length > 0) {
+      await store.relocateFileTags(
+        completedItems.map((item) => ({ from: item.from, to: item.to })),
+      ).catch(() => {});
+    }
+
+    const undoableCompleted = completedItems.filter((item) => transferIsUndoable([item]));
+
+    if (mode === 'move' && undoableCompleted.length > 0) {
+      store.recordHistory({
+        kind: 'move',
+        label: `${itemLabel(undoableCompleted.length)} moved`,
+        items: undoableCompleted.map((item) => ({
+          from: item.from,
+          to: item.to,
+          symlinkMode: item.symlinkMode,
+        })),
+        directories: [...new Set(touchedDirectories.filter(Boolean))],
+      });
+    } else if (mode === 'copy') {
+      // Replaced destinations have no restorable original. Keep the item list
+      // aligned with createdPaths so redo cannot replay an excluded overwrite.
+      const undoableCopies = undoableCompleted.filter((item) => !item.overwrite);
+
+      if (undoableCopies.length > 0) {
+        store.recordHistory({
+          kind: 'copy',
+          label: `${itemLabel(undoableCopies.length)} copied`,
+          items: undoableCopies.map((item) => ({ ...item })),
+          createdPaths: undoableCopies.map((item) => item.to),
+          directories: [targetDirectory].filter(Boolean),
+        });
+      }
+    }
+
+    await store.reloadDirectoriesInPanes(touchedDirectories).catch(() => {});
+
+    if (!operationError) {
+      store.completeQueueJob(jobId, `${itemText} ${mode === 'move' ? 'moved' : 'copied'}`);
+      return;
+    }
+
+    const retryPairs = mapFileOperationItemsToInputs(
+      listSafeRetryFileOperationItems(batch),
+      runItems,
+    ).filter(({ input }) => Boolean(input));
+    retryItems = retryPairs.map(({ input }) => ({ ...input }));
+    retryEntries = retryItems
+      .map((item) => sourceEntries.find((entry) => cleanPath(entry.path) === cleanPath(item.from)))
+      .filter(Boolean);
+    store.updateQueueJob(jobId, {
+      retryAction: retryItems.length > 0 ? retryAction : null,
+    });
+
+    if (operationError.code === 'operation_cancelled') {
+      store.cancelQueueJobDone(jobId);
+      return;
+    }
+
+    const failedItems = (batch?.items || [])
+      .filter((result) => result.status !== 'completed')
+      .map((result) => ({
+        path: result.from,
+        status: result.status,
+        retryable: listSafeRetryFileOperationItems([result]).length === 1,
+        message: (result.errors || []).map((error) => error.message).filter(Boolean).join('; ')
+          || 'Not completed',
+      }));
+    store.failQueueJob(jobId, operationError.message || `${operationLabel} failed.`, {
+      failedItems,
+    });
+    throw operationError;
   }
 
   async function renameEntry(entry, nextName) {
