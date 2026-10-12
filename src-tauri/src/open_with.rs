@@ -195,6 +195,24 @@ fn mime_type_for_extension(extension: &str) -> Option<String> {
     Some(mime_type.to_string())
 }
 
+// On Linux, launch through GIO like other file managers do. xdg-open falls back
+// to its own naive Exec= parser on unrecognised desktops (e.g. Hyprland), which
+// breaks on quoted commands, and it reports no failure back to us.
+#[cfg(target_os = "linux")]
+fn open_with_system_default(path: &Path) -> FsResult<()> {
+    use gtk::gio::{self, prelude::*};
+
+    let uri = gio::File::for_path(path).uri();
+    gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>).map_err(|error| {
+        FsError::new(
+            "open_failed",
+            format!("Unable to open item with the default app: {error}"),
+            Some(path.to_string_lossy().into_owned()),
+        )
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
 fn open_with_system_default(path: &Path) -> FsResult<()> {
     tauri_plugin_opener::open_path(path, None::<&str>).map_err(|error| {
         FsError::new(
@@ -206,6 +224,24 @@ fn open_with_system_default(path: &Path) -> FsResult<()> {
 }
 
 fn open_with_desktop_app(path: &Path, app: &DesktopApp) -> FsResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::gio::{self, prelude::*};
+
+        if let Some(info) = gio::DesktopAppInfo::from_filename(&app.desktop_file) {
+            let uri = gio::File::for_path(path).uri();
+            return info
+                .launch_uris(&[uri.as_str()], None::<&gio::AppLaunchContext>)
+                .map_err(|error| {
+                    FsError::new(
+                        "open_with_failed",
+                        format!("Unable to open with {}: {error}", app.name),
+                        Some(path.to_string_lossy().into_owned()),
+                    )
+                });
+        }
+    }
+
     let tokens = tokenize_exec(&app.exec);
     let args = expand_exec_tokens(&tokens, path);
     let Some((program, rest)) = args.split_first() else {
