@@ -18,6 +18,7 @@
         "minWidth": 960,
         "minHeight": 640,
         "decorations": false,
+        "dragDropEnabled": false,
         "transparent": false,
         "backgroundColor": "#282d2a",
         "visible": false,
