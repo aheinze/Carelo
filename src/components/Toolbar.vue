@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import AppIcon from './AppIcon.vue';
 import SidebarSelector from './SidebarSelector.vue';
+import WindowControls from './WindowControls.vue';
 import WorkIndicator from './WorkIndicator.vue';
 import WorkspaceSelector from './WorkspaceSelector.vue';
 import { createFile, createFolder, deleteItems } from '../composables/useFileOperations';
@@ -13,9 +14,7 @@ import {
   shouldConfirmDelete,
 } from '../utils/deleteConfirmation';
 import {
-  closeTauriWindow,
   getTauriWindow,
-  minimizeTauriWindow,
   toggleMaximizeTauriWindow,
 } from '../composables/useTauriWindow';
 import {
@@ -43,6 +42,8 @@ const activeDirectoryIsArchive = computed(() =>
 const activeSelectionHasArchiveEntries = computed(() =>
   store.operationEntriesFor(store.activePaneId).some((entry) => isArchivePath(entry.path)),
 );
+const windowControlsOnRight = computed(() => store.appSettings.windowControlsPosition === 'right');
+const showLeftWindowControls = computed(() => !windowControlsOnRight.value && !store.sidebarVisible);
 
 function startDragging(event) {
   if (event.button !== 0 || event.detail > 1) return;
@@ -50,19 +51,9 @@ function startDragging(event) {
   getTauriWindow()?.startDragging().catch(() => {});
 }
 
-function minimizeWindow(event) {
-  event?.stopPropagation();
-  minimizeTauriWindow().catch(() => {});
-}
-
 function toggleMaximizeWindow(event) {
   event?.stopPropagation();
   toggleMaximizeTauriWindow().catch(() => {});
-}
-
-function closeWindow(event) {
-  event?.stopPropagation();
-  closeTauriWindow({ force: true }).catch(() => {});
 }
 
 function refreshActivePane() {
@@ -218,52 +209,17 @@ async function deleteSelection() {
 <template>
   <header
     class="toolbar"
+    :class="{ 'toolbar--controls-right': windowControlsOnRight }"
     aria-label="Application toolbar"
     @mousedown="startDragging"
     @dblclick="toggleMaximizeWindow"
   >
     <div class="toolbar-left">
-      <div
-        v-if="!store.sidebarVisible"
+      <WindowControls
+        v-if="showLeftWindowControls"
         class="toolbar-window-controls"
-        aria-label="Window actions"
-        @mousedown.stop
-        @dblclick.stop
-      >
-        <button
-          type="button"
-          class="window-control window-control--close"
-          aria-label="Close window"
-          @pointerdown.stop
-          @mousedown.stop
-          @dblclick.stop
-          @click.stop.prevent="closeWindow"
-        >
-          <span aria-hidden="true"></span>
-        </button>
-        <button
-          type="button"
-          class="window-control window-control--minimize"
-          aria-label="Minimize window"
-          @pointerdown.stop
-          @mousedown.stop
-          @dblclick.stop
-          @click.stop.prevent="minimizeWindow"
-        >
-          <span aria-hidden="true"></span>
-        </button>
-        <button
-          type="button"
-          class="window-control window-control--zoom"
-          aria-label="Zoom window"
-          @pointerdown.stop
-          @mousedown.stop
-          @dblclick.stop
-          @click.stop.prevent="toggleMaximizeWindow"
-        >
-          <span aria-hidden="true"></span>
-        </button>
-      </div>
+        position="left"
+      />
 
       <SidebarSelector v-if="!store.sidebarVisible" />
 
@@ -493,6 +449,12 @@ async function deleteSelection() {
         </button>
       </div>
     </div>
+
+    <WindowControls
+      v-if="windowControlsOnRight"
+      class="toolbar-window-controls toolbar-window-controls--right"
+      position="right"
+    />
   </header>
 </template>
 
@@ -520,78 +482,28 @@ async function deleteSelection() {
   min-width: 0;
 }
 
-/* ── Traffic lights shown when the sidebar is hidden ─────── */
+/* ── Window controls ─────────────────────────────────────── */
 .toolbar-window-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
   padding: 0 4px 0 2px;
-  flex: 0 0 auto;
 }
 
-.window-control {
-  position: relative;
-  display: grid;
-  width: 13px;
-  height: 13px;
-  place-items: center;
-  border-radius: 50%;
-  padding: 0;
-  box-shadow:
-    inset 0 0 0 0.5px rgb(0 0 0 / 0.35),
-    0 1px 2px rgb(0 0 0 / 0.25);
+/* Right placement: own grid column so the action cluster clips instead of
+   pushing the controls past the window edge. */
+.toolbar-window-controls--right {
+  justify-self: end;
+  padding: 0 0 0 12px;
 }
 
-.window-control span {
-  width: 6px;
-  height: 6px;
-  opacity: 0;
-  transition: opacity 90ms ease;
+.toolbar--controls-right {
+  grid-template-columns: minmax(180px, 1fr) minmax(0, auto) auto;
 }
 
-.toolbar-window-controls:hover .window-control span {
-  opacity: 0.75;
-}
-
-.window-control--close { background: var(--traffic-close); }
-.window-control--minimize { background: var(--traffic-minimize); }
-.window-control--zoom { background: var(--traffic-zoom); }
-
-.window-control--close span::before,
-.window-control--close span::after {
-  position: absolute;
-  top: 6px;
-  left: 3.7px;
-  width: 5.7px;
-  height: 1px;
-  border-radius: 1px;
-  background: rgb(80 0 0 / 0.75);
-  content: "";
-}
-
-.window-control--close span::before { transform: rotate(45deg); }
-.window-control--close span::after { transform: rotate(-45deg); }
-
-.window-control--minimize span::before {
-  position: absolute;
-  top: 6px;
-  left: 3.8px;
-  width: 5.7px;
-  height: 1.2px;
-  border-radius: 1px;
-  background: rgb(88 58 0 / 0.75);
-  content: "";
-}
-
-.window-control--zoom span::before {
-  position: absolute;
-  top: 3.9px;
-  left: 4px;
-  width: 4.8px;
-  height: 4.8px;
-  border: 1px solid rgb(0 70 14 / 0.68);
-  border-radius: 1px;
-  content: "";
+.toolbar--controls-right .toolbar-right {
+  justify-self: auto;
+  justify-content: flex-end;
+  margin-left: 0;
+  overflow: hidden;
+  flex-shrink: 1;
 }
 
 /* ── Nav cluster ──────────────────────────────────────────── */

@@ -1,6 +1,7 @@
 <script setup>
 import { computed, defineAsyncComponent, nextTick, ref, onMounted, onUnmounted } from 'vue';
 import AppIcon from './AppIcon.vue';
+import WindowControls from './WindowControls.vue';
 import WorkspaceSelector from './WorkspaceSelector.vue';
 import { getFileMetadata, removeRemoteVolume } from '../composables/useFileOperations';
 import { useDialog } from '../composables/useDialog';
@@ -10,9 +11,7 @@ import {
   OPEN_REMOTE_STORAGE_EVENT,
 } from '../utils/appEvents';
 import {
-  closeTauriWindow,
   getTauriWindow,
-  minimizeTauriWindow,
   toggleMaximizeTauriWindow,
 } from '../composables/useTauriWindow';
 
@@ -81,6 +80,7 @@ const sidebarItemMenuDetail = computed(() => {
 
   return item.detail || 'Location';
 });
+const windowControlsOnLeft = computed(() => store.appSettings.windowControlsPosition !== 'right');
 const sidebarItemMenuGroups = computed(() => {
   const item = sidebarItemMenu.value?.item;
 
@@ -1170,19 +1170,9 @@ function startDragging(event) {
   getTauriWindow()?.startDragging().catch(() => {});
 }
 
-function minimizeWindow(event) {
-  event?.stopPropagation();
-  minimizeTauriWindow().catch(() => {});
-}
-
 function toggleMaximizeWindow(event) {
   event?.stopPropagation();
   toggleMaximizeTauriWindow().catch(() => {});
-}
-
-function closeWindow(event) {
-  event?.stopPropagation();
-  closeTauriWindow({ force: true }).catch(() => {});
 }
 
 onMounted(() => {
@@ -1227,41 +1217,11 @@ onUnmounted(() => {
       @mousedown="startDragging"
       @dblclick="toggleMaximizeWindow"
     >
-      <div class="window-controls" aria-label="Window actions" @mousedown.stop @dblclick.stop>
-        <button
-          type="button"
-          class="window-control window-control--close"
-          aria-label="Close window"
-          @pointerdown.stop
-          @mousedown.stop
-          @dblclick.stop
-          @click.stop.prevent="closeWindow"
-        >
-          <span aria-hidden="true"></span>
-        </button>
-        <button
-          type="button"
-          class="window-control window-control--minimize"
-          aria-label="Minimize window"
-          @pointerdown.stop
-          @mousedown.stop
-          @dblclick.stop
-          @click.stop.prevent="minimizeWindow"
-        >
-          <span aria-hidden="true"></span>
-        </button>
-        <button
-          type="button"
-          class="window-control window-control--zoom"
-          aria-label="Zoom window"
-          @pointerdown.stop
-          @mousedown.stop
-          @dblclick.stop
-          @click.stop.prevent="toggleMaximizeWindow"
-        >
-          <span aria-hidden="true"></span>
-        </button>
-      </div>
+      <WindowControls
+        v-if="windowControlsOnLeft"
+        class="sidebar-window-controls"
+        position="left"
+      />
     </div>
 
     <div
@@ -1519,77 +1479,8 @@ onUnmounted(() => {
   flex: 0 0 auto;
 }
 
-/* ── Traffic lights ───────────────────────────────────────── */
-.window-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.sidebar-window-controls {
   padding-left: 12px;
-}
-
-.window-control {
-  position: relative;
-  display: grid;
-  width: 13px;
-  height: 13px;
-  place-items: center;
-  border-radius: 50%;
-  padding: 0;
-  box-shadow:
-    inset 0 0 0 0.5px rgb(0 0 0 / 0.35),
-    0 1px 2px rgb(0 0 0 / 0.25);
-}
-
-.window-control span {
-  width: 6px;
-  height: 6px;
-  opacity: 0;
-  transition: opacity 90ms ease;
-}
-
-.window-controls:hover .window-control span {
-  opacity: 0.75;
-}
-
-.window-control--close { background: var(--traffic-close); }
-.window-control--minimize { background: var(--traffic-minimize); }
-.window-control--zoom { background: var(--traffic-zoom); }
-
-.window-control--close span::before,
-.window-control--close span::after {
-  position: absolute;
-  top: 6px;
-  left: 3.7px;
-  width: 5.7px;
-  height: 1px;
-  border-radius: 1px;
-  background: rgb(80 0 0 / 0.75);
-  content: "";
-}
-
-.window-control--close span::before { transform: rotate(45deg); }
-.window-control--close span::after { transform: rotate(-45deg); }
-
-.window-control--minimize span::before {
-  position: absolute;
-  top: 6px;
-  left: 3.8px;
-  width: 5.7px;
-  height: 1.2px;
-  border-radius: 1px;
-  background: rgb(88 58 0 / 0.75);
-  content: "";
-}
-
-.window-control--zoom span::before {
-  position: absolute;
-  top: 3.9px;
-  left: 4px;
-  width: 4.8px;
-  height: 4.8px;
-  border: 1px solid rgb(0 70 14 / 0.68);
-  border-radius: 1px;
-  content: "";
 }
 
 /* ── Sections ────────────────────────────────────────────── */

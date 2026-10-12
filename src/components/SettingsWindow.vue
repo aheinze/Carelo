@@ -40,7 +40,7 @@ const sections = [
     id: 'appearance',
     label: 'Appearance',
     icon: 'monitor',
-    keywords: 'appearance theme color scheme accent color dark light auto system material one dark pro tokyo night',
+    keywords: 'appearance theme color scheme accent color dark light auto system material one dark pro tokyo night window controls position left right',
   },
   {
     id: 'files',
@@ -99,6 +99,10 @@ const viewModes = [
   { value: 'list', label: 'List', icon: 'list' },
   { value: 'grid', label: 'Grid', icon: 'grid' },
   { value: 'columns', label: 'Columns', icon: 'columns' },
+];
+const windowControlsPositions = [
+  { value: 'left', label: 'Left', icon: 'sidebar' },
+  { value: 'right', label: 'Right', icon: 'panel-right' },
 ];
 const deletionModes = [
   { value: 'trash', label: 'Move to Trash', icon: 'trash' },
@@ -245,6 +249,10 @@ function accentPresetStyle(color) {
 
 function setDefaultViewMode(viewMode) {
   store.setAppSetting('defaultViewMode', viewMode);
+}
+
+function setWindowControlsPosition(position) {
+  store.setAppSetting('windowControlsPosition', position);
 }
 
 function setDeleteMode(deleteMode) {
@@ -690,6 +698,27 @@ onUnmounted(() => {
                           <span>Choose</span>
                         </span>
                       </label>
+                    </div>
+                  </div>
+
+                  <div class="setting-row setting-row--stacked">
+                    <div class="setting-copy">
+                      <strong>Window controls position</strong>
+                      <span>Place minimize, maximize, and close on the right (GNOME, Windows) or on the left (macOS).</span>
+                    </div>
+
+                    <div class="view-segment" role="group" aria-label="Window controls position">
+                      <button
+                        v-for="position in windowControlsPositions"
+                        :key="position.value"
+                        type="button"
+                        :class="{ active: store.appSettings.windowControlsPosition === position.value }"
+                        :aria-pressed="store.appSettings.windowControlsPosition === position.value"
+                        @click="setWindowControlsPosition(position.value)"
+                      >
+                        <AppIcon :name="position.icon" :size="16" :stroke-width="1.8" />
+                        <span>{{ position.label }}</span>
+                      </button>
                     </div>
                   </div>
                 </div>

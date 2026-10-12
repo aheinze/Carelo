@@ -95,6 +95,7 @@ const VIEW_MODES = ['list', 'grid', 'columns'];
 const APPEARANCE_MODES = ['system', 'light', 'dark'];
 const CUSTOM_TOOL_TARGETS = ['both', 'files', 'folders'];
 const DELETE_MODES = ['trash', 'permanent'];
+const WINDOW_CONTROLS_POSITIONS = ['left', 'right'];
 const DEFAULT_FAVORITE_GROUP_ID = 'favorites';
 const NAV_HISTORY_LIMIT = 80;
 const REMOTE_HEALTH_ACTIVE_REFRESH_INTERVAL_MS = 60_000;
@@ -129,6 +130,7 @@ const DEFAULT_APP_SETTINGS = Object.freeze({
   restoreTerminalPanel: false,
   confirmDelete: true,
   deleteMode: 'trash',
+  windowControlsPosition: 'left',
   // 'auto' lets the backend pick concurrency by storage type; 'off' forces serial.
   transferParallelism: 'auto',
   terminalStartsInActiveFolder: true,
@@ -167,6 +169,12 @@ function normalizeCustomToolTarget(target) {
 
 function normalizeDeleteMode(mode) {
   return DELETE_MODES.includes(mode) ? mode : DEFAULT_APP_SETTINGS.deleteMode;
+}
+
+function normalizeWindowControlsPosition(position) {
+  return WINDOW_CONTROLS_POSITIONS.includes(position)
+    ? position
+    : DEFAULT_APP_SETTINGS.windowControlsPosition;
 }
 
 function normalizeCustomToolExtensions(extensions) {
@@ -250,6 +258,7 @@ function normalizeAppSettings(settings = {}) {
     restoreTerminalPanel: value.restoreTerminalPanel === true,
     confirmDelete: value.confirmDelete !== false,
     deleteMode: normalizeDeleteMode(value.deleteMode),
+    windowControlsPosition: normalizeWindowControlsPosition(value.windowControlsPosition),
     transferParallelism: value.transferParallelism === 'off' ? 'off' : 'auto',
     terminalStartsInActiveFolder: value.terminalStartsInActiveFolder !== false,
     editorCommand: normalizeEditorCommand(value.editorCommand),
